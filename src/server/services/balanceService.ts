@@ -16,7 +16,7 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { withAccountCredentialContext, withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 import {
   isManagedSub2ApiTokenDue,
   isSub2ApiPlatform,
@@ -336,7 +336,8 @@ export async function refreshBalance(accountId: number) {
     }
   }
   const readBalance = async (token: string) => withAccountProxyOverride(accountProxyUrl,
-    () => adapter.getBalance(site.url, token, platformUserId));
+    () => withAccountCredentialContext({ accountId: account.id, siteId: site.id },
+      () => adapter.getBalance(site.url, token, platformUserId)));
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
     setAccountRuntimeHealth(account.id, {

@@ -57,6 +57,7 @@ const zhToEn: Record<string, string> = {
   '使用日志': 'Usage Logs',
   '暂无使用日志': 'No Usage Logs',
   '可用性监控': 'Availability Monitor',
+  'Linux.do 快捷登录': 'Linux.do Assisted Sign-in',
   '系统': 'System',
   '设置': 'Settings',
   '程序日志': 'System Logs',

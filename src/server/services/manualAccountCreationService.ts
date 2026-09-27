@@ -11,8 +11,12 @@ import {
 import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
 import { type AccountCreatePayload } from '../contracts/accountsRoutePayloads.js';
 import { convergeAccountMutation } from './accountMutationWorkflow.js';
+import { applyRotatedCredential } from './accountCredentialRotation.js';
+import { getAccountCredentialContext, withAccountCredentialContext } from './siteProxy.js';
 
-const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
+// Slow community relays can need several round trips (rolling-credential
+// exchange, /api/user/self, model list) before verification answers.
+const ACCOUNT_VERIFY_TIMEOUT_MS = 30_000;
 
 type AccountInitializationParams = {
   accountId: number;
@@ -151,7 +155,24 @@ function buildQueuedAccountInitializationMessage(
   return '已添加为 API Key 账号，后台正在同步模型和路由信息。';
 }
 
-export async function createManualAccount({
+/**
+ * Creates an account row from a credential the caller already holds.
+ *
+ * The flow always runs inside a credential-tracking scope: verification and the
+ * background token sync each exchange a rolling credential, and a plain
+ * `POST /api/accounts` caller would otherwise store the value the first exchange
+ * already retired.
+ */
+export function createManualAccount(
+  params: CreateManualAccountParams,
+): Promise<CreateManualAccountResult> {
+  return withAccountCredentialContext(
+    { siteId: params.site.id },
+    () => createManualAccountInner(params),
+  );
+}
+
+async function createManualAccountInner({
   body,
   site,
   adapter,
@@ -241,6 +262,11 @@ export async function createManualAccount({
   }
   const extraConfig = mergeAccountExtraConfig(undefined, extraConfigPatch);
 
+  // Verification exchanges a rolling credential (`new_api_refresh`) and retires
+  // the value the caller captured from the browser. Persist the replacement, or
+  // the account is dead on arrival.
+  accessToken = applyRotatedCredential(accessToken, getAccountCredentialContext()?.rotated);
+
   const result = await insertAndGetById<typeof schema.accounts.$inferSelect>({
     table: schema.accounts,
     idColumn: schema.accounts.id,
@@ -272,16 +298,19 @@ export async function createManualAccount({
         successMessage: () => `${taskTitle}已完成`,
         failureMessage: (currentTask) => `${taskTitle}失败：${currentTask.error || 'unknown error'}`,
       },
-      async () => initializeAccountInBackground({
-        accountId: result.id,
-        site,
-        adapter,
-        tokenType,
-        accessToken,
-        apiToken,
-        platformUserId: resolvedPlatformUserId,
-        skipModelFetch: body.skipModelFetch,
-      }),
+      async () => withAccountCredentialContext(
+        { accountId: result.id, siteId: site.id },
+        () => initializeAccountInBackground({
+          accountId: result.id,
+          site,
+          adapter,
+          tokenType,
+          accessToken,
+          apiToken,
+          platformUserId: resolvedPlatformUserId,
+          skipModelFetch: body.skipModelFetch,
+        }),
+      ),
     );
     queuedTaskId = task.id;
     queuedMessage = buildQueuedAccountInitializationMessage(tokenType, body.skipModelFetch);

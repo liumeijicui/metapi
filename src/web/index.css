@@ -2105,6 +2105,23 @@ body {
   justify-content: flex-end;
 }
 
+/**
+ * Check-in state on the site list: the badge answers "did anyone check in
+ * today" while the fraction keeps a multi-account site from looking finished
+ * when only one of its accounts succeeded.
+ */
+.site-checkin-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.site-checkin-progress {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
 .site-balance-primary {
   font-size: 14px;
   font-weight: 600;

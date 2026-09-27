@@ -1,10 +1,10 @@
 import { FastifyInstance, FastifyReply } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { getInsertedRowId } from '../../db/insertHelpers.js';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, lt } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
-import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { formatUtcSqlDateTime, getLocalDayRangeUtc } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -19,6 +19,8 @@ import { getSiteInitializationPreset } from '../../../shared/siteInitializationP
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
 import { probeSiteModels } from '../../services/modelService.js';
+import { refreshBalance } from '../../services/balanceService.js';
+import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
   try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
@@ -455,22 +457,65 @@ export async function sitesRoutes(app: FastifyInstance) {
       siteId: schema.accounts.siteId,
       balance: schema.accounts.balance,
       extraConfig: schema.accounts.extraConfig,
+      checkinEnabled: schema.accounts.checkinEnabled,
+      lastBalanceRefresh: schema.accounts.lastBalanceRefresh,
     }).from(schema.accounts).all();
+
+    // Today's successful check-ins are read per site, not per account: the list
+    // answers "has anyone here checked in today", so a site only counts as done
+    // once at least one of its accounts actually succeeded.
+    const { startUtc, endUtc } = getLocalDayRangeUtc();
+    const todaySuccessRows = await db
+      .select({ accountId: schema.checkinLogs.accountId, siteId: schema.accounts.siteId })
+      .from(schema.checkinLogs)
+      .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
+      .where(
+        and(
+          gte(schema.checkinLogs.createdAt, startUtc),
+          lt(schema.checkinLogs.createdAt, endUtc),
+          eq(schema.checkinLogs.status, 'success'),
+        ),
+      )
+      .all();
+    const checkedInAccountsBySiteId = new Map<number, Set<number>>();
+    for (const row of todaySuccessRows) {
+      const bucket = checkedInAccountsBySiteId.get(row.siteId) ?? new Set<number>();
+      bucket.add(row.accountId);
+      checkedInAccountsBySiteId.set(row.siteId, bucket);
+    }
 
     const totalBalanceBySiteId: Record<number, number> = {};
     const subscriptionBySiteId: Record<number, SiteSubscriptionAggregate | undefined> = {};
+    const accountCountBySiteId: Record<number, number> = {};
+    const checkinEnabledCountBySiteId: Record<number, number> = {};
+    const latestBalanceRefreshBySiteId: Record<number, string> = {};
     for (const row of accountRows) {
       totalBalanceBySiteId[row.siteId] = roundMetric((totalBalanceBySiteId[row.siteId] || 0) + Number(row.balance || 0));
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
+      accountCountBySiteId[row.siteId] = (accountCountBySiteId[row.siteId] || 0) + 1;
+      if (row.checkinEnabled !== false) {
+        checkinEnabledCountBySiteId[row.siteId] = (checkinEnabledCountBySiteId[row.siteId] || 0) + 1;
+      }
+      const previousRefresh = latestBalanceRefreshBySiteId[row.siteId] || '';
+      if (row.lastBalanceRefresh && row.lastBalanceRefresh > previousRefresh) {
+        latestBalanceRefreshBySiteId[row.siteId] = row.lastBalanceRefresh;
+      }
     }
 
-    return siteRowsWithApiEndpoints.map((site) => ({
-      ...site,
-      totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
-      subscriptionSummary: subscriptionBySiteId[site.id] || null,
-    }));
+    return siteRowsWithApiEndpoints.map((site) => {
+      const checkedInAccounts = checkedInAccountsBySiteId.get(site.id);
+      return {
+        ...site,
+        totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
+        subscriptionSummary: subscriptionBySiteId[site.id] || null,
+        accountCount: accountCountBySiteId[site.id] || 0,
+        checkinEnabledCount: checkinEnabledCountBySiteId[site.id] || 0,
+        todayCheckedIn: (checkedInAccounts?.size ?? 0) > 0,
+        todayCheckedInCount: checkedInAccounts?.size ?? 0,
+        lastBalanceRefresh: latestBalanceRefreshBySiteId[site.id] || null,
+      };
+    });
   });
-
   // Add a site
   app.post<{ Body: unknown }>('/api/sites', async (request, reply) => {
     const parsedBody = parseSiteCreatePayload(request.body);
@@ -801,7 +846,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (ids.length === 0) {
       return reply.code(400).send({ message: 'ids is required' });
     }
-    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy'].includes(action)) {
+    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy', 'refreshBalance'].includes(action)) {
       return reply.code(400).send({ message: 'Invalid action' });
     }
 
@@ -816,6 +861,23 @@ export async function sitesRoutes(app: FastifyInstance) {
       }
 
       try {
+        if (action === 'refreshBalance') {
+          // Refreshing one site means refreshing every account it owns; a site can
+          // hold several accounts and the balance shown is their sum.
+          const accountIds = await db
+            .select({ id: schema.accounts.id })
+            .from(schema.accounts)
+            .where(eq(schema.accounts.siteId, id))
+            .all();
+          const results = await Promise.allSettled(accountIds.map((row: { id: number }) => refreshBalance(row.id)));
+          const failures = results.filter((item) => item.status === 'rejected');
+          if (accountIds.length > 0 && failures.length === accountIds.length) {
+            failedItems.push({ id, message: '余额刷新失败' });
+            continue;
+          }
+          successIds.push(id);
+          continue;
+        }
         if (action === 'delete') {
           await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
         } else if (action === 'enableSystemProxy') {
@@ -850,6 +912,57 @@ export async function sitesRoutes(app: FastifyInstance) {
     };
   });
 
+  // Refresh balances for every account owned by the given sites (all active
+  // sites when no ids are supplied). Runs as a background task because a large
+  // site list takes far longer than a request should stay open.
+  app.post<{ Body: unknown }>('/api/sites/refresh-balances', async (request, reply) => {
+    const body = (request.body ?? {}) as { ids?: unknown };
+    const requestedIds = normalizeBatchIds(body.ids);
+    const siteRows = requestedIds.length > 0
+      ? await db.select().from(schema.sites).where(inArray(schema.sites.id, requestedIds)).all()
+      : await db.select().from(schema.sites).all();
+    const siteIds = siteRows.map((site: { id: number }) => site.id);
+    if (siteIds.length === 0) {
+      return reply.code(400).send({ success: false, message: '没有可刷新的站点' });
+    }
+
+    const { task, reused } = startBackgroundTask(
+      {
+        type: 'status',
+        title: requestedIds.length > 0 ? `刷新 ${siteIds.length} 个站点余额` : '刷新全部站点余额',
+        dedupeKey: requestedIds.length > 0 ? `refresh-site-balances-${siteIds.join('-')}` : 'refresh-all-site-balances',
+        notifyOnFailure: true,
+        successMessage: (currentTask) => {
+          const summary = (currentTask.result as { refreshed?: number; failed?: number }) || {};
+          return `站点余额刷新完成：成功 ${summary.refreshed ?? 0}，失败 ${summary.failed ?? 0}`;
+        },
+        failureMessage: (currentTask) => `站点余额刷新失败：${currentTask.error || 'unknown error'}`,
+      },
+      async () => {
+        const accountRows = await db
+          .select({ id: schema.accounts.id })
+          .from(schema.accounts)
+          .where(inArray(schema.accounts.siteId, siteIds))
+          .all();
+        const results = await Promise.allSettled(accountRows.map((row: { id: number }) => refreshBalance(row.id)));
+        const failed = results.filter((item) => item.status === 'rejected').length;
+        return {
+          total: accountRows.length,
+          refreshed: accountRows.length - failed,
+          failed,
+        };
+      },
+    );
+
+    return reply.code(202).send({
+      success: true,
+      queued: true,
+      reused,
+      jobId: task.id,
+      status: task.status,
+      message: reused ? '站点余额刷新进行中，请稍后查看' : '已开始刷新站点余额，请稍后查看',
+    });
+  });
   // Get disabled models for a site
   app.get<{ Params: { id: string } }>('/api/sites/:id/disabled-models', async (request, reply) => {
     const id = parseInt(request.params.id);

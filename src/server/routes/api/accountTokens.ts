@@ -18,7 +18,7 @@ import {
 import { getAdapter } from '../../services/platforms/index.js';
 import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import { withAccountProxyOverride } from '../../services/siteProxy.js';
+import { withAccountCredentialContext, withAccountProxyOverride } from '../../services/siteProxy.js';
 import { type ModelRefreshResult } from '../../services/modelService.js';
 import {
   type CoverageBatchRebuildResult,
@@ -30,6 +30,7 @@ import {
   parseAccountTokenCreatePayload,
   parseAccountTokenSyncAllPayload,
   parseAccountTokenUpdatePayload,
+  parseSiteApiKeySyncPayload,
 } from '../../contracts/accountTokensRoutePayloads.js';
 
 type AccountWithSiteRow = {
@@ -52,6 +53,8 @@ type SyncExecutionResult = {
   updated: number;
   maskedPending?: number;
   pendingTokenIds?: number[];
+  /** True when this sync had to create the key on the site first. */
+  keyCreated?: boolean;
   total: number;
   defaultTokenId?: number | null;
 };
@@ -70,11 +73,105 @@ type CoverageRefreshFailureItem = {
   discoveredApiToken: false;
 };
 
+type UpstreamApiTokenLike = {
+  name?: string | null;
+  key?: string | null;
+  enabled?: boolean | null;
+  tokenGroup?: string | null;
+};
+
+/** The concrete adapter type, so the helper below needs no separate import. */
+type SiteAdapter = NonNullable<ReturnType<typeof getAdapter>>;
+
 type CoverageRefreshItem = ModelRefreshResult | CoverageRefreshFailureItem;
 type CoverageRefreshRebuildResult = CoverageBatchRebuildResult;
 
-const TOKEN_SYNC_TIMEOUT_MS = 15_000;
+/**
+ * Upstream token listings paginate through every key an account owns, and some
+ * community relays answer in well over 15s; the original window made healthy
+ * accounts fail with a timeout error.
+ */
+const TOKEN_SYNC_TIMEOUT_MS = 30_000;
 const SYNC_ALL_BATCH_SIZE = 3;
+
+/** Name given to a key this server creates when the site has none yet. */
+const AUTO_CREATED_TOKEN_NAME = 'metapi';
+/**
+ * Total budget for creating a missing key, including the follow-up listing call.
+ * Creating a key is a write, so it gets a slightly larger window than a read.
+ */
+const TOKEN_CREATE_TIMEOUT_MS = TOKEN_SYNC_TIMEOUT_MS * 2;
+
+/**
+ * Reads the account's keys, and when the site has none, creates one and reads it
+ * back so the caller always ends up with a usable plaintext key.
+ *
+ * Without the create step a brand-new account stays unusable: the upstream list
+ * is empty, so nothing can be routed through it.
+ */
+async function loadOrCreateUpstreamTokens(input: {
+  adapter: SiteAdapter | null;
+  siteUrl: string;
+  accessToken: string;
+  platformUserId: number | null;
+  proxyUrl: string | null;
+}): Promise<{ tokens: UpstreamApiTokenLike[]; created: boolean; createUnsupported: boolean }> {
+  const { adapter, siteUrl, accessToken, platformUserId, proxyUrl } = input;
+  if (!adapter) return { tokens: [], created: false, createUnsupported: true };
+
+  const listTokens = async () => withTimeout(
+    () => withAccountProxyOverride(proxyUrl,
+      () => adapter.getApiTokens(siteUrl, accessToken, platformUserId ?? undefined)),
+    TOKEN_SYNC_TIMEOUT_MS,
+    `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
+  );
+
+  let tokens = await listTokens();
+  if (tokens.length > 0) return { tokens, created: false, createUnsupported: false };
+
+  // Older deployments expose only the singular accessor; treat it as a list.
+  const fallback = await withTimeout(
+    () => withAccountProxyOverride(proxyUrl,
+      () => adapter.getApiToken(siteUrl, accessToken, platformUserId ?? undefined)),
+    TOKEN_SYNC_TIMEOUT_MS,
+    `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
+  );
+  if (fallback) {
+    return {
+      tokens: [{ name: 'default', key: fallback, enabled: true, tokenGroup: 'default' }],
+      created: false,
+      createUnsupported: false,
+    };
+  }
+
+  const createResult = await withTimeout(
+    () => withAccountProxyOverride(proxyUrl,
+      () => adapter.createApiToken(siteUrl, accessToken, platformUserId ?? undefined, {
+        name: AUTO_CREATED_TOKEN_NAME,
+        unlimitedQuota: true,
+      })),
+    TOKEN_CREATE_TIMEOUT_MS,
+    `token create timeout (${Math.round(TOKEN_CREATE_TIMEOUT_MS / 1000)}s)`,
+  );
+  if (!createResult) {
+    return { tokens: [], created: false, createUnsupported: true };
+  }
+
+  tokens = await listTokens();
+  if (tokens.length === 0) {
+    const created = await withTimeout(
+      () => withAccountProxyOverride(proxyUrl,
+        () => adapter.getApiToken(siteUrl, accessToken, platformUserId ?? undefined)),
+      TOKEN_SYNC_TIMEOUT_MS,
+      `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
+    );
+    if (created) {
+      tokens = [{ name: 'default', key: created, enabled: true, tokenGroup: 'default' }];
+    }
+  }
+
+  return { tokens, created: true, createUnsupported: false };
+}
 
 function buildSyncAccountLabel(item: SyncExecutionResult): string {
   const account = (item.accountName || `#${item.accountId}`).trim();
@@ -298,31 +395,28 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
   try {
     const platformUserId = resolvePlatformUserId(row.accounts.extraConfig, row.accounts.username);
     const accountProxyUrl = getProxyUrlFromExtraConfig(row.accounts.extraConfig);
-    let tokens = await withTimeout(
-      () => withAccountProxyOverride(accountProxyUrl,
-        () => adapter.getApiTokens(row.sites.url, row.accounts.accessToken, platformUserId)),
-      TOKEN_SYNC_TIMEOUT_MS,
-      `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
-    );
 
-    if (tokens.length === 0) {
-      const fallback = await withTimeout(
-        () => withAccountProxyOverride(accountProxyUrl,
-          () => adapter.getApiToken(row.sites.url, row.accounts.accessToken, platformUserId)),
-        TOKEN_SYNC_TIMEOUT_MS,
-        `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
-      );
-      if (fallback) {
-        tokens = [{ name: 'default', key: fallback, enabled: true, tokenGroup: 'default' }];
-      }
-    }
+    // A site with no key yet is not a dead end: create one, otherwise the freshly
+    // bound account has nothing to route with and silently stays unused.
+    const { tokens, created: keyCreated, createUnsupported } = await withAccountCredentialContext(
+      { accountId: row.accounts.id, siteId: row.sites.id },
+      () => loadOrCreateUpstreamTokens({
+        adapter,
+        siteUrl: row.sites.url,
+        accessToken: row.accounts.accessToken,
+        platformUserId: platformUserId ?? null,
+        proxyUrl: accountProxyUrl ?? null,
+      }),
+    );
 
     if (tokens.length === 0) {
       return {
         ...base,
         status: 'skipped',
-        reason: 'no_upstream_tokens',
-        message: 'upstream returned no api tokens',
+        reason: createUnsupported ? 'token_create_unsupported' : 'no_upstream_tokens',
+        message: createUnsupported
+          ? 'upstream has no api tokens and does not support creating one automatically'
+          : 'upstream returned no api tokens',
         synced: false,
         created: 0,
         updated: 0,
@@ -341,6 +435,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
         ...base,
         status: 'synced',
         reason: 'upstream_masked_tokens',
+        keyCreated,
         message: `上游返回 ${synced.maskedPending} 条脱敏令牌，已保存为待补全记录，请手动补全明文 token。`,
         synced: true,
         ...synced,
@@ -349,6 +444,9 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
     return {
       ...base,
       status: 'synced',
+      reason: keyCreated ? 'upstream_token_created' : 'upstream_tokens_synced',
+      message: keyCreated ? '站点原本没有密钥，已自动创建并同步' : undefined,
+      keyCreated,
       synced: true,
       ...synced,
     };
@@ -470,6 +568,75 @@ function buildCoverageRefreshFailureItem(
   };
 }
 
+
+/**
+ * Makes sure every account of a site has a usable key, creating one when the site
+ * has none. This is the batch entry point behind the "同步站点密钥" button.
+ */
+async function syncSiteApiKeys(siteIds: number[] | null) {
+  const allSites = await db.select().from(schema.sites).all();
+  const allSiteIds = allSites.filter((site) => site.status !== 'disabled').map((site) => site.id);
+  const rows = await db.select().from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .all();
+
+  const wanted = siteIds && siteIds.length > 0 ? new Set(siteIds) : null;
+  const targets = rows.filter((row) => (wanted ? wanted.has(row.sites.id) : true));
+
+  // Sites with no credential cannot be read from at all; report them explicitly
+  // instead of letting them vanish from the summary.
+  const coveredSiteIds = new Set(targets.map((row) => row.sites.id));
+  const uncredentialed = (wanted ? [...wanted] : allSiteIds)
+    .filter((siteId) => !coveredSiteIds.has(siteId));
+
+  const results: SyncExecutionResult[] = uncredentialed.map((siteId) => {
+    const site = allSites.find((item) => item.id === siteId);
+    return {
+      accountId: 0,
+      accountName: '-',
+      accountStatus: null,
+      siteId,
+      siteName: site?.name || `#${siteId}`,
+      siteStatus: site?.status || null,
+      status: 'skipped' as const,
+      reason: 'no_credential',
+      message: '站点尚未绑定任何账号，请先完成登录后再同步密钥',
+      synced: false,
+      created: 0,
+      updated: 0,
+      total: 0,
+      defaultTokenId: null,
+    };
+  });
+
+  for (let offset = 0; offset < targets.length; offset += SYNC_ALL_BATCH_SIZE) {
+    const batch = targets.slice(offset, offset + SYNC_ALL_BATCH_SIZE);
+    const batchResults = await Promise.all(batch.map(async (row) => {
+      const result = await executeAccountTokenSync(row);
+      appendTokenSyncEvent(result);
+      return result;
+    }));
+    results.push(...batchResults);
+  }
+
+  const coverageRefresh = await refreshCoverageForAccounts(
+    results.filter((item) => item.status === 'synced').map((item) => item.accountId),
+  );
+
+  return {
+    summary: {
+      total: results.length,
+      synced: results.filter((item) => item.status === 'synced').length,
+      skipped: results.filter((item) => item.status === 'skipped').length,
+      failed: results.filter((item) => item.status === 'failed').length,
+      created: results.reduce((acc, item) => acc + item.created, 0),
+      updated: results.reduce((acc, item) => acc + item.updated, 0),
+      keyCreated: results.filter((item) => item.keyCreated).length,
+    },
+    results,
+    coverageRefresh,
+  };
+}
 export async function accountTokensRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { accountId?: string } }>('/api/account-tokens', async (request) => {
     const accountId = request.query.accountId ? Number.parseInt(request.query.accountId, 10) : undefined;
@@ -594,20 +761,23 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
     const createdViaUpstream = await withAccountProxyOverride(
       getProxyUrlFromExtraConfig(account.extraConfig),
-      () => adapter.createApiToken(
-        site.url,
-        account.accessToken,
-        platformUserId,
-        {
-          name: asTrimmedString(body.name),
-          group: asTrimmedString(body.group),
-          unlimitedQuota,
-          remainQuota,
-          expiredTime,
-          allowIps: asTrimmedString(body.allowIps),
-          modelLimitsEnabled,
-          modelLimits: asTrimmedString(body.modelLimits),
-        },
+      () => withAccountCredentialContext(
+        { accountId: account.id, siteId: site.id },
+        () => adapter.createApiToken(
+          site.url,
+          account.accessToken,
+          platformUserId,
+          {
+            name: asTrimmedString(body.name),
+            group: asTrimmedString(body.group),
+            unlimitedQuota,
+            remainQuota,
+            expiredTime,
+            allowIps: asTrimmedString(body.allowIps),
+            modelLimitsEnabled,
+            modelLimits: asTrimmedString(body.modelLimits),
+          },
+        ),
       ),
     );
     if (!createdViaUpstream) {
@@ -940,7 +1110,10 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const groups = await withAccountProxyOverride(
         getProxyUrlFromExtraConfig(account.extraConfig),
-        () => adapter.getUserGroups(site.url, account.accessToken, platformUserId),
+        () => withAccountCredentialContext(
+          { accountId: account.id, siteId: site.id },
+          () => adapter.getUserGroups(site.url, account.accessToken, platformUserId),
+        ),
       );
       const normalized = Array.from(new Set((groups || []).map((item) => String(item || '').trim()).filter(Boolean)));
       return { success: true, groups: normalized.length > 0 ? normalized : ['default'] };
@@ -1046,6 +1219,20 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     });
   });
 
+  /**
+   * Batch-syncs the keys of the selected sites (or every site when ids is empty).
+   * Sites that have no key yet get one created on the spot.
+   */
+  app.post<{ Body: unknown }>('/api/account-tokens/sync-sites', async (request, reply) => {
+    const parsedBody = parseSiteApiKeySyncPayload(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ success: false, message: parsedBody.error });
+    }
+
+    const ids = normalizeBatchIds(parsedBody.data.ids);
+    const syncResult = await syncSiteApiKeys(ids.length > 0 ? ids : null);
+    return { success: true, ...syncResult };
+  });
   app.get<{ Params: { accountId: string } }>('/api/account-tokens/account/:accountId/default', async (request, reply) => {
     const accountId = Number.parseInt(request.params.accountId, 10);
     if (Number.isNaN(accountId)) {

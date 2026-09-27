@@ -33,9 +33,14 @@ import {
 import { appendSessionTokenRebindHint } from "../../services/alertRules.js";
 import {
   parseSiteProxyUrlInput,
+  getAccountCredentialContext,
+  withAccountCredentialContext,
   withAccountProxyOverride,
   withSiteRecordProxyRequestInit,
 } from "../../services/siteProxy.js";
+import {
+  applyRotatedCredential,
+} from "../../services/accountCredentialRotation.js";
 import { createRateLimitGuard } from "../../middleware/requestRateLimit.js";
 import { getAccountsSnapshot } from "../../services/accountsOverviewService.js";
 import {
@@ -239,7 +244,9 @@ type LoginFailureInfo = {
 };
 
 const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
-const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
+// Slow community relays can need several round trips (rolling-credential
+// exchange, /api/user/self, model list) before verification answers.
+const ACCOUNT_VERIFY_TIMEOUT_MS = 30_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
 
 function normalizeLoginFailure(
@@ -1148,16 +1155,27 @@ export async function accountsRoutes(app: FastifyInstance) {
           : resolvePlatformUserId(account.extraConfig, account.username);
 
       let verifyResult: any;
+      let rotatedCredential: { cookieName: string; value: string } | undefined;
       try {
-        verifyResult = await withAccountProxyOverride(
+        // Rebinding a `new_api_refresh` session retires the caller's secret and
+        // returns the replacement only in Set-Cookie. Read the rotation back out
+        // of the credential context so the value persisted below is the live one.
+        const verifyOutcome = await withAccountProxyOverride(
           getProxyUrlFromExtraConfig(account.extraConfig),
-          () =>
-            adapter.verifyToken(
-              site.url,
-              nextAccessToken,
-              candidatePlatformUserId,
-            ),
+          () => withAccountCredentialContext(
+            { accountId, siteId: site.id },
+            async () => ({
+              verified: await adapter.verifyToken(
+                site.url,
+                nextAccessToken,
+                candidatePlatformUserId,
+              ),
+              rotated: getAccountCredentialContext()?.rotated,
+            }),
+          ),
         );
+        verifyResult = verifyOutcome.verified;
+        rotatedCredential = verifyOutcome.rotated;
       } catch (err: any) {
         return reply.code(400).send({
           success: false,
@@ -1194,7 +1212,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           : account.apiToken || "";
 
       const updates: Record<string, unknown> = {
-        accessToken: nextAccessToken,
+        accessToken: applyRotatedCredential(nextAccessToken, rotatedCredential),
         status: "active",
         updatedAt: new Date().toISOString(),
       };

@@ -87,6 +87,7 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.4",
     "pg": "^8.16.3",
+    "playwright-core": "^1.63.0",
     "rate-limiter-flexible": "^11.1.0",
     "socks": "^2.8.9",
     "undici": "^6.25.0",
@@ -133,5 +134,10 @@
     "name": "cita-777",
     "email": "cita-777@users.noreply.github.com",
     "url": "https://github.com/cita-777"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.10.0": true,
+    "esbuild@0.21.5": true,
+    "sharp@0.34.5": true
   }
 }

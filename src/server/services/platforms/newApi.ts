@@ -3,11 +3,21 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 import { fetchJsonWithShieldCookieRetry } from './newApiShield.js';
+import { getAccountCredentialContext, recordRotatedCredential } from '../siteProxy.js';
+import { persistRotatedRefreshCookie } from '../accountCredentialRotation.js';
 import {
   buildEndpointModelContextLengthScope,
   extractContextLengthsFromPayload,
   setModelContextLengths,
 } from '../modelContextLengthCache.js';
+
+/**
+ * A refresh cookie yields a short-lived access token. Exchanging it on every
+ * single API call would be wasteful and can trip upstream rate limits, so
+ * tokens are cached until shortly before their own expiry.
+ */
+const REFRESH_TOKEN_CACHE = new Map<string, { accessToken: string; expiresAtMs: number }>();
+const REFRESH_TOKEN_CACHE_LEAD_MS = 60 * 1000;
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
@@ -86,7 +96,128 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private isCookieHeaderCredential(token: string): boolean {
-    return /(^|;\s*)(session|token|auth_token|access_token|jwt|jwt_token)=/i.test(token);
+    return /(^|;\s*)(session|token|auth_token|access_token|jwt|jwt_token|new_api_refresh)=/i.test(token);
+  }
+
+  /**
+   * Newer new-api deployments stop exposing a long-lived session and instead
+   * keep only a `new_api_refresh` cookie in the browser. The access token lives
+   * in page memory, so the refresh cookie is the only durable credential and it
+   * has to be exchanged for a bearer token before any management API works.
+   */
+  private isRefreshCookieCredential(token: string): boolean {
+    return /(^|;\s*)new_api_refresh=/i.test(token || '');
+  }
+
+  private extractRefreshCookie(token: string): string | null {
+    const match = (token || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+    return match?.[1]?.trim() || null;
+  }
+
+  /**
+   * Exchanges the refresh cookie for a short-lived access token. Returns null
+   * when the credential is not a refresh cookie or the exchange fails.
+   */
+  private async exchangeRefreshCookie(baseUrl: string, token: string): Promise<string | null> {
+    const refreshValue = this.resolveLiveRefreshValue(this.extractRefreshCookie(token));
+    if (!refreshValue) return null;
+
+    const cacheKey = `${baseUrl}::${refreshValue}`;
+    const cached = REFRESH_TOKEN_CACHE.get(cacheKey);
+    if (cached && cached.expiresAtMs - Date.now() > REFRESH_TOKEN_CACHE_LEAD_MS) {
+      return cached.accessToken;
+    }
+
+    try {
+      // Some deployments reject the exchange unless it looks same-origin
+      // (AUTH_ORIGIN_FORBIDDEN), so the site's own origin is sent along.
+      const siteOrigin = (() => {
+        try {
+          return new URL(baseUrl).origin;
+        } catch {
+          return '';
+        }
+      })();
+      const res = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          Cookie: `new_api_refresh=${refreshValue}`,
+          Accept: 'application/json',
+          ...(siteOrigin ? { Origin: siteOrigin, Referer: `${siteOrigin}/` } : {}),
+        },
+      });
+      const accessToken = res.data?.data?.access_token;
+      // The exchange rolls the refresh secret and returns the replacement only in
+      // Set-Cookie. Dropping it makes the credential single-use: the next call
+      // would present a retired secret and the account would look revoked.
+      this.captureRotatedRefreshValue(res.cookieHeader, refreshValue);
+      await this.persistRotatedRefreshCookie(res.cookieHeader, refreshValue);
+      if (typeof accessToken === 'string' && accessToken.trim()) {
+        const expiresRaw = Number(res?.data?.access_expires_at);
+        const expiresAtMs = Number.isFinite(expiresRaw) && expiresRaw > 0
+          ? expiresRaw * 1000
+          : Date.now() + 5 * 60 * 1000;
+        REFRESH_TOKEN_CACHE.set(cacheKey, { accessToken: accessToken.trim(), expiresAtMs });
+        return accessToken.trim();
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Prefers the newest secret this call chain has already seen.
+   *
+   * A bind flow performs several exchanges in a row (verify, then account
+   * creation, then token sync) from one credential string. Each exchange retires
+   * the previous secret, so reusing the original string makes every step after
+   * the first one fail as if the account were revoked.
+   */
+  private resolveLiveRefreshValue(refreshValue: string | null): string | null {
+    if (!refreshValue) return null;
+    const rotated = getAccountCredentialContext()?.rotated;
+    if (rotated && rotated.cookieName.toLowerCase() === 'new_api_refresh' && rotated.value) {
+      return rotated.value;
+    }
+    return refreshValue;
+  }
+
+  /**
+   * Records the replacement secret for the rest of this call chain, so a later
+   * exchange in the same flow presents the live value instead of a retired one.
+   */
+  private captureRotatedRefreshValue(cookieHeader: string, previousValue: string): void {
+    const match = (cookieHeader || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+    const nextValue = match?.[1]?.trim();
+    if (!nextValue || nextValue === previousValue) return;
+    recordRotatedCredential('new_api_refresh', nextValue);
+  }
+
+  /**
+   * Writes a rolled refresh secret back to the account row it came from.
+   *
+   * Only the request that owns the account credential context may do this; a
+   * bare probe has no row to update and is left alone.
+   */
+  private async persistRotatedRefreshCookie(
+    cookieHeader: string,
+    previousValue: string,
+  ): Promise<void> {
+    const context = getAccountCredentialContext();
+    if (!context) return;
+    const match = (cookieHeader || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+    const nextValue = match?.[1]?.trim();
+    if (!nextValue || nextValue === previousValue) return;
+    await persistRotatedRefreshCookie({
+      accountId: context.accountId,
+      siteId: context.siteId,
+      cookieName: 'new_api_refresh',
+      previousValue,
+      nextValue,
+    });
+  }
+  private async resolveBearerToken(baseUrl: string, token: string): Promise<string> {
+    if (!this.isRefreshCookieCredential(token)) return token;
+    return (await this.exchangeRefreshCookie(baseUrl, token)) || token;
   }
 
   private decodeBase64Loose(value: string): string | null {
@@ -483,6 +614,24 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return next.join('; ');
   }
 
+  /**
+   * Returns the browser UA that the managed Chrome build actually uses. Shields
+   * that fingerprint the UA version would reject a mismatched constant, so the
+   * installed version is preferred and a current default is the fallback.
+   */
+  private resolveUserAgent(): string {
+    const version = (process.env.METAPI_BROWSER_UA_VERSION || '').trim() || '154.0.0.0';
+    return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+  }
+
+  private deriveRequestOrigin(url: string): string | null {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return null;
+    }
+  }
+
   private mergeSetCookiePairs(cookieHeader: string, setCookieHeaders: string[]): string {
     let merged = cookieHeader;
     for (const raw of setCookieHeaders) {
@@ -660,6 +809,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
     );
   }
 
+  /**
+   * True for a route that simply does not exist on this deployment.
+   *
+   * Deployments disagree on the check-in route (`/api/user/sign_in` on older
+   * forks, `/api/user/checkin` on newer ones), so the probe that walks both always
+   * gets one 404. That 404 must never outrank a real answer from the other route.
+   */
+  private isMissingRouteMessage(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    if (/^http\s+404:/i.test(text)) return true;
+    return /invalid url \(post \/api\/user\/(sign_in|checkin)\)/.test(text);
+  }
+
   private isCookieSessionFailureMessage(message?: string | null): boolean {
     if (!message) return false;
     const text = message.toLowerCase();
@@ -692,9 +855,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
       return true;
     }
 
+    // A 404 from the *other* check-in route is noise: the very next message is
+    // the site's real verdict ("签到功能未启用", "already checked in", ...), and
+    // reporting the 404 makes a working account look broken.
     const currentLooksLikeMissingEndpoint =
       this.isMissingCheckinEndpointMessage(currentMessage)
-      || /^HTTP\s+404:/i.test(currentMessage);
+      || this.isMissingRouteMessage(currentMessage);
+    if (currentLooksLikeMissingEndpoint && !this.isMissingRouteMessage(next)) {
+      return true;
+    }
     if (currentLooksLikeMissingEndpoint && this.isCookieSessionFailureMessage(next)) {
       return true;
     }
@@ -741,7 +910,10 @@ export class NewApiAdapter extends BasePlatformAdapter {
     const { fetch } = await import('undici');
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+      // Some shields bind the verification cookie to a specific browser build
+      // and reject any other UA version, so the configured Chrome version is
+      // used instead of a hard-coded one.
+      'User-Agent': this.resolveUserAgent(),
       ...this.normalizeHeaders(options?.headers),
     };
 
@@ -749,6 +921,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (cookieHeader) {
       headers['Cookie'] = cookieHeader;
       delete headers['cookie'];
+
+    // Some deployments check that a request looks same-origin before serving
+    // the management API; their own frontend always calls from the site origin.
+    // Without this, a shield-protected site answers 403 even with valid cookies.
+    const requestOrigin = this.deriveRequestOrigin(url);
+    if (requestOrigin) {
+      if (!headers['Origin']) headers['Origin'] = requestOrigin;
+      if (!headers['Referer']) headers['Referer'] = requestOrigin + '/';
+    }
     }
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -942,6 +1123,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   override async getUserInfo(baseUrl: string, accessToken: string, platformUserId?: number): Promise<UserInfo | null> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     try {
       const directRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -1020,14 +1202,18 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   override async verifyToken(baseUrl: string, token: string, platformUserId?: number): Promise<TokenVerifyResult> {
-    const openAiModels = await this.getOpenAiModels(baseUrl, token);
+    // A `new_api_refresh` cookie is not itself a usable credential; swap it for
+    // a bearer token first so downstream calls see a normal session.
+    const resolvedToken = await this.resolveBearerToken(baseUrl, token);
+
+    const openAiModels = await this.getOpenAiModels(baseUrl, resolvedToken);
     if (openAiModels.length > 0) {
       return { tokenType: 'apikey', models: openAiModels };
     }
 
     try {
       const directRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${resolvedToken}` },
       });
       if (directRes?.success && directRes?.data) {
         const userId = directRes.data.id;
@@ -1114,6 +1300,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     let firstFailureMessage: string | undefined;
     const rememberFailure = (message?: string | null) => {
@@ -1220,6 +1407,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     let failureMessage: string | null = null;
     const rememberFailure = (message?: string | null) => {
@@ -1273,6 +1461,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     platformUserId?: number,
     contextSourceScope?: string,
   ): Promise<string[]> {
+     token = await this.resolveBearerToken(baseUrl,  token);
     const openAiModels = await this.getOpenAiModels(baseUrl, token, contextSourceScope);
     if (openAiModels.length > 0) return openAiModels;
 
@@ -1304,12 +1493,14 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const userId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const tokens = await this.getApiTokensWithUser(baseUrl, accessToken, userId);
     return tokens.find((token) => token.enabled !== false)?.key || tokens[0]?.key || null;
   }
 
   async getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const userId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     return this.getApiTokensWithUser(baseUrl, accessToken, userId);
   }
@@ -1325,6 +1516,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     platformUserId?: number,
     options?: CreateApiTokenOptions,
   ): Promise<boolean> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const payload = JSON.stringify(this.buildDefaultTokenPayload(options));
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
 
@@ -1355,6 +1547,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const dedupe = (groups: string[]) => Array.from(new Set(groups.map((item) => item.trim()).filter(Boolean)));
     let terminalError: string | null = null;
@@ -1418,6 +1611,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     tokenKey: string,
     platformUserId?: number,
   ): Promise<boolean> {
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const targetKey = this.normalizeTokenKeyForCompare(tokenKey);
     if (!targetKey) return false;
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);

@@ -11,6 +11,14 @@ const monitorConfigPayloadSchema = z.object({
   ldohCookie: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
+const assistedLoginCapturePayloadSchema = z.object({
+  siteId: z.number().int().positive().optional(),
+  bindAccount: z.boolean().optional(),
+  credentialMode: z.enum(['auto', 'session', 'apikey']).optional(),
+  skipModelFetch: z.boolean().optional(),
+  username: z.string().optional(),
+}).passthrough();
+
 const oauthStartPayloadSchema = z.object({
   accountId: z.number().int().positive().optional(),
   projectId: z.string().optional(),
@@ -83,6 +91,9 @@ const updateCenterRollbackPayloadSchema = z.object({
 }).passthrough();
 
 export type AuthChangePayload = z.output<typeof authChangePayloadSchema>;
+export type AssistedLoginCapturePayload = z.output<typeof assistedLoginCapturePayloadSchema>;
+/** @deprecated kept for back-compat with the original Linux.do-only routes. */
+export type LinuxdoCapturePayload = AssistedLoginCapturePayload;
 export type MonitorConfigPayload = z.output<typeof monitorConfigPayloadSchema>;
 export type OauthConnectionRebindPayload = z.output<typeof oauthConnectionRebindPayloadSchema>;
 export type OauthConnectionProxyUpdatePayload = z.output<typeof oauthConnectionProxyUpdatePayloadSchema>;
@@ -138,6 +149,18 @@ function formatSupportRoutePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'callbackUrl') {
     return 'Invalid callbackUrl. Expected string.';
+  }
+  if (firstPath === 'siteId') {
+    return 'Invalid siteId. Expected positive number.';
+  }
+  if (firstPath === 'bindAccount') {
+    return 'Invalid bindAccount. Expected boolean.';
+  }
+  if (firstPath === 'credentialMode') {
+    return 'Invalid credentialMode. Expected auto/session/apikey.';
+  }
+  if (firstPath === 'skipModelFetch') {
+    return 'Invalid skipModelFetch. Expected boolean.';
   }
   if (firstPath === 'data') {
     return 'Invalid data. Expected object.';
@@ -215,6 +238,17 @@ export function parseAuthChangePayload(input: unknown):
 export function parseMonitorConfigPayload(input: unknown):
 { success: true; data: MonitorConfigPayload } | { success: false; error: string } {
   return parseSupportRoutePayload(monitorConfigPayloadSchema, input);
+}
+
+export function parseAssistedLoginCapturePayload(input: unknown):
+{ success: true; data: AssistedLoginCapturePayload } | { success: false; error: string } {
+  return parseSupportRoutePayload(assistedLoginCapturePayloadSchema, input);
+}
+
+/** @deprecated use parseAssistedLoginCapturePayload */
+export function parseLinuxdoCapturePayload(input: unknown):
+{ success: true; data: LinuxdoCapturePayload } | { success: false; error: string } {
+  return parseAssistedLoginCapturePayload(input);
 }
 
 export function parseOauthStartPayload(input: unknown):

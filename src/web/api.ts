@@ -765,6 +765,11 @@ export type DownstreamApiKeyTrendResponse = {
 export const api = {
   // Sites
   getSites: () => request("/api/sites"),
+  refreshSiteBalances: (ids?: number[]) =>
+    request("/api/sites/refresh-balances", {
+      method: "POST",
+      body: JSON.stringify(ids && ids.length > 0 ? { ids } : {}),
+    }),
   addSite: (data: any) =>
     request("/api/sites", { method: "POST", body: JSON.stringify(data) }),
   updateSite: (id: number, data: any) =>
@@ -908,6 +913,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(wait ? { wait: true } : {}),
       timeoutMs: wait ? 150_000 : 30_000,
+    }),
+
+  /**
+   * Batch-syncs the keys of the given sites; sites without a key get one created.
+   */
+  syncSiteApiKeys: (ids: number[] = []) =>
+    request("/api/account-tokens/sync-sites", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+      timeoutMs: 300_000,
     }),
 
   // Check-in
@@ -1419,6 +1434,47 @@ export const api = {
       body: JSON.stringify(data),
     }),
   initMonitorSession: () => request("/api/monitor/session", { method: "POST" }),
+
+  // Assisted login (managed browser session reused for community-site sign-in)
+  getAssistedLoginProviders: () =>
+    request("/api/assisted-login/providers", { timeoutMs: 30_000 }),
+  getAssistedLoginStatus: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/status`, {
+      timeoutMs: 60_000,
+    }),
+  openAssistedLoginWindow: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/login-window`, {
+      method: "POST",
+      timeoutMs: 60_000,
+    }),
+  checkAssistedLoginSession: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/check-session`, {
+      method: "POST",
+      timeoutMs: 90_000,
+    }),
+  captureAssistedLoginCredentials: (
+    provider: string,
+    data: {
+      siteId: number;
+      bindAccount?: boolean;
+      credentialMode?: "auto" | "session" | "apikey";
+      skipModelFetch?: boolean;
+      username?: string;
+    },
+  ) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/capture`, {
+      method: "POST",
+      body: JSON.stringify(data),
+      timeoutMs: 180_000,
+    }),
+
+  // Re-run the assisted-login handoff for an account whose credential expired.
+  refreshAssistedLoginAccount: (provider: string, accountId: number) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/refresh-account`, {
+      method: "POST",
+      body: JSON.stringify({ accountId }),
+      timeoutMs: 180_000,
+    }),
 
   // Models marketplace
   getModelsMarketplace: (options?: {

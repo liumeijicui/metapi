@@ -19,6 +19,11 @@ import { eventsRoutes } from './routes/api/events.js';
 import { taskRoutes } from './routes/api/tasks.js';
 import { testRoutes } from './routes/api/test.js';
 import { monitorRoutes } from './routes/api/monitor.js';
+import { assistedLoginRoutes } from './routes/api/assistedLogin.js';
+import {
+  startAssistedLoginWatchSchedulers,
+  stopAssistedLoginWatchSchedulers,
+} from './services/assistedLogin/watchers.js';
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
@@ -227,6 +232,7 @@ await app.register(updateCenterRoutes);
 await app.register(taskRoutes);
 await app.register(testRoutes);
 await app.register(monitorRoutes);
+await app.register(assistedLoginRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
 
@@ -267,6 +273,7 @@ startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startChannelRecoveryProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
+startAssistedLoginWatchSchedulers();
 startUpdateCenterPolling();
 startUsageAggregationProjectorScheduler();
 startAdminSnapshotWarmScheduler();
@@ -287,6 +294,7 @@ app.addHook('onClose', async () => {
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();
   await stopSub2ApiManagedRefreshScheduler();
+  stopAssistedLoginWatchSchedulers();
   await stopOAuthLoopbackCallbackServers();
 });
 

@@ -127,10 +127,11 @@ describe('account tokens sync routes with site status', () => {
     expect(getApiTokenMock).not.toHaveBeenCalled();
   });
 
-  it('returns skipped when upstream has no api tokens', async () => {
+  it('skips when upstream has no api tokens and cannot create one', async () => {
     const { account } = await seedAccount({ siteStatus: 'active' });
     getApiTokensMock.mockResolvedValue([]);
     getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(false);
 
     const response = await app.inject({
       method: 'POST',
@@ -142,7 +143,7 @@ describe('account tokens sync routes with site status', () => {
       success: true,
       synced: false,
       status: 'skipped',
-      reason: 'no_upstream_tokens',
+      reason: 'token_create_unsupported',
     });
 
     const tokenRows = await db.select()
@@ -150,6 +151,65 @@ describe('account tokens sync routes with site status', () => {
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
     expect(tokenRows.length).toBe(0);
+  });
+
+  // A brand-new site has no key yet, so syncing has to create one; otherwise the
+  // account stays unroutable and the failure is silent.
+  it('creates a key on the site when upstream has none, then syncs it', async () => {
+    const { account, site } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { name: 'metapi', key: 'sk-auto-created-token', enabled: true },
+      ]);
+    getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(true);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      reason: 'upstream_token_created',
+      keyCreated: true,
+    });
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(createApiTokenMock.mock.calls[0][0]).toBe(site.url);
+    expect(createApiTokenMock.mock.calls[0][3]).toMatchObject({ name: 'metapi', unlimitedQuota: true });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows.length).toBe(1);
+    expect(tokenRows[0].token).toBe('sk-auto-created-token');
+  });
+
+  // Sites with no credential cannot be read at all, so the batch sync has to say
+  // so rather than silently dropping them from the summary.
+  it('reports sites without any credential in the batch sync', async () => {
+    const { site } = await seedAccount({ siteStatus: 'active' });
+    const bare = await db.insert(schema.sites).values({
+      name: `bare-${nextSeed()}`,
+      url: 'https://bare.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens/sync-sites',
+      payload: { ids: [site.id, bare.id] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { summary: { skipped: number }; results: Array<{ siteId: number; reason?: string }> };
+    const bareResult = body.results.find((item) => item.siteId === bare.id);
+    expect(bareResult).toMatchObject({ reason: 'no_credential' });
   });
 
   it('stores masked upstream token values as masked_pending placeholders', async () => {

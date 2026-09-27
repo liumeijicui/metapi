@@ -70,6 +70,11 @@ type SiteRow = {
   sortOrder?: number;
   totalBalance?: number;
   subscriptionSummary?: SiteSubscriptionSummary | null;
+  accountCount?: number;
+  checkinEnabledCount?: number;
+  todayCheckedIn?: boolean;
+  todayCheckedInCount?: number;
+  lastBalanceRefresh?: string | null;
   createdAt?: string;
   postRefreshProbeEnabled?: boolean;
   postRefreshProbeModel?: string | null;
@@ -224,6 +229,50 @@ function SiteBalanceDisplay(props: {
   );
 }
 
+/**
+ * Shows whether the site has checked in today and how far along it is.
+ *
+ * A site counts as done once any one of its accounts succeeds, but the progress
+ * fraction is still shown so a multi-account site does not look finished when
+ * only part of it is.
+ */
+function SiteCheckinDisplay(props: { site: SiteRow }) {
+  const { site } = props;
+  const total = site.checkinEnabledCount ?? 0;
+  const done = site.todayCheckedInCount ?? 0;
+  const succeeded = site.todayCheckedIn === true;
+  const hasAccounts = (site.accountCount ?? 0) > 0;
+
+  if (!hasAccounts) {
+    return (
+      <span className="badge badge-muted" style={{ fontSize: 11 }}>
+        未绑定
+      </span>
+    );
+  }
+  if (total <= 0) {
+    return (
+      <span className="badge badge-muted" style={{ fontSize: 11 }}>
+        未开启
+      </span>
+    );
+  }
+
+  return (
+    <div className="site-checkin-inline">
+      <span className={`badge ${succeeded ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: 11 }}>
+        {succeeded ? '已签到' : '未签到'}
+      </span>
+      <span
+        className="site-checkin-progress"
+        data-tooltip={`今日已签到 ${done}/${total} 个账号`}
+        data-tooltip-side="top"
+      >
+        {done}/{total}
+      </span>
+    </div>
+  );
+}
 const platformColors: Record<string, string> = {
   'new-api': 'badge-info',
   'one-api': 'badge-success',
@@ -292,6 +341,9 @@ export default function Sites() {
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
+  const [refreshingBalances, setRefreshingBalances] = useState(false);
+  // Per-site outcome of the last balance refresh: true = timestamp moved, false = it did not.
+  const [refreshOutcome, setRefreshOutcome] = useState<Record<number, boolean>>({});
   const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
   const [createdSiteForChoice, setCreatedSiteForChoice] = useState<{
@@ -304,6 +356,7 @@ export default function Sites() {
   const isMobile = useIsMobile();
   const [showMobileTools, setShowMobileTools] = useState(false);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [syncingKeys, setSyncingKeys] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
     siteId?: number;
@@ -1125,6 +1178,46 @@ export default function Sites() {
     }
   };
 
+  /**
+   * Pulls the API keys of the selected sites from the sites themselves.
+   * Sites that have no key yet get one created during the sync.
+   */
+  const handleSyncSiteApiKeys = async () => {
+    if (selectedSiteIds.length === 0) {
+      toast.info('请先选择要同步密钥的站点');
+      return;
+    }
+
+    setSyncingKeys(true);
+    try {
+      const result = await api.syncSiteApiKeys(selectedSiteIds);
+      const summary = result?.summary || {};
+      const failedItems = Array.isArray(result?.results)
+        ? result.results.filter((item: any) => item?.status === 'failed')
+        : [];
+      const skippedItems = Array.isArray(result?.results)
+        ? result.results.filter((item: any) => item?.status === 'skipped')
+        : [];
+      const parts = [
+        `同步成功 ${summary.synced || 0}`,
+        `自动创建 ${summary.keyCreated || 0}`,
+        `跳过 ${summary.skipped || 0}`,
+        `失败 ${summary.failed || 0}`,
+      ];
+      if ((summary.failed || 0) > 0 || (summary.skipped || 0) > 0) {
+        const firstFailure = failedItems[0] || skippedItems[0];
+        const detail = firstFailure?.message || firstFailure?.reason || '';
+        toast.info(`密钥同步完成：${parts.join('，')}${detail ? `（例：${detail}）` : ''}`);
+      } else {
+        toast.success(`密钥同步完成：${parts.join('，')}`);
+      }
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '同步站点密钥失败');
+    } finally {
+      setSyncingKeys(false);
+    }
+  };
   const confirmDelete = async () => {
     const target = deleteConfirm;
     if (!target) return;
@@ -1147,6 +1240,66 @@ export default function Sites() {
     await runBatchAction('delete', true);
   };
 
+  /**
+   * Refreshes balances for the selected sites, or every site when nothing is
+   * selected. The server queues this as a background task, so we poll until a
+   * site's update timestamp actually moves rather than assuming a fixed delay.
+   */
+  const handleRefreshSiteBalances = async () => {
+    if (refreshingBalances) return;
+    setRefreshingBalances(true);
+    try {
+      const ids = selectedSiteIds.length > 0 ? selectedSiteIds : undefined;
+      const idFilter = ids ? new Set(ids) : null;
+      // Only sites with at least one account can produce a balance result; an
+      // unbound site has nothing to refresh and must not be reported as failed.
+      const targets = sites.filter((site) => (!idFilter || idFilter.has(site.id)) && (site.accountCount ?? 0) > 0);
+      const previousStamps = new Map<number, string | null | undefined>();
+      for (const site of targets) previousStamps.set(site.id, site.lastBalanceRefresh);
+
+      setRefreshOutcome({});
+      await api.refreshSiteBalances(ids);
+      toast.success(ids ? '已开始刷新所选站点余额' : '已开始刷新全部站点余额');
+
+      // The refresh is queued as a server-side background task, so poll until the
+      // timestamps stop moving, then grade every target by whether its own
+      // timestamp changed. Accounts with dead credentials never move.
+      const deadline = Date.now() + 40_000;
+      let rows = sites;
+      let stableRounds = 0;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        rows = await api.getSites();
+        setSites(rows || []);
+        const movedNow = (rows || []).some((site: SiteRow) =>
+          (!idFilter || idFilter.has(site.id))
+          && !!site.lastBalanceRefresh
+          && site.lastBalanceRefresh !== previousStamps.get(site.id));
+        stableRounds = movedNow ? 0 : stableRounds + 1;
+        if (stableRounds >= 2) break;
+      }
+
+      const nextOutcome: Record<number, boolean> = {};
+      for (const site of targets) {
+        const after = (rows || []).find((row: SiteRow) => row.id === site.id)?.lastBalanceRefresh;
+        nextOutcome[site.id] = !!after && after !== previousStamps.get(site.id);
+      }
+      setRefreshOutcome(nextOutcome);
+      await load();
+
+      const okCount = Object.values(nextOutcome).filter(Boolean).length;
+      const failCount = targets.length - okCount;
+      if (failCount > 0) {
+        toast.info(`刷新完成：成功 ${okCount}，失败 ${failCount}（失败站点已标记）`);
+      } else {
+        toast.success(`刷新完成：${okCount} 个站点均成功`);
+      }
+    } catch (e: any) {
+      toast.error(e.message || '刷新余额失败');
+    } finally {
+      setRefreshingBalances(false);
+    }
+  };
   const handleSiteRowClick = (siteId: number, event: React.MouseEvent<HTMLTableRowElement>) => {
     if (shouldIgnoreRowSelectionClick(event.target)) return;
     const isSelected = selectedSiteIds.includes(siteId);
@@ -1193,6 +1346,28 @@ export default function Sites() {
               />
             </div>
           )}
+          <button
+            type="button"
+            data-testid="sites-refresh-balances"
+            onClick={handleRefreshSiteBalances}
+            disabled={refreshingBalances}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            {refreshingBalances ? (
+              <>
+                <span className="spinner spinner-sm" />
+                刷新中...
+              </>
+            ) : (
+              selectedSiteIds.length > 0 ? '刷新所选余额' : '刷新余额'
+            )}
+          </button>
+          {Object.keys(refreshOutcome).length > 0 ? (
+            <span data-testid="sites-refresh-summary" style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              上次刷新：成功 {Object.values(refreshOutcome).filter(Boolean).length}，失败 {Object.values(refreshOutcome).filter((v) => !v).length}
+            </span>
+          ) : null}
           <button onClick={openAdd} className="btn btn-primary">
             {isAdding ? '取消' : '+ 添加站点'}
           </button>
@@ -1219,6 +1394,19 @@ export default function Sites() {
                 placeholder="自定义排序"
               />
             </div>
+            <button
+              type="button"
+              data-testid="sites-mobile-refresh-balances"
+              onClick={() => {
+                void handleRefreshSiteBalances();
+                setShowMobileTools(false);
+              }}
+              disabled={refreshingBalances}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {refreshingBalances ? '刷新中...' : '刷新余额'}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -1256,6 +1444,15 @@ export default function Sites() {
             style={{ border: '1px solid var(--color-border)' }}
           >
             批量关闭系统代理
+          </button>
+          <button
+            data-testid="sites-sync-api-keys"
+            onClick={handleSyncSiteApiKeys}
+            disabled={batchActionLoading || syncingKeys}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            {syncingKeys ? '同步中...' : '同步站点密钥'}
           </button>
           <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             批量启用
@@ -2004,6 +2201,12 @@ export default function Sites() {
                     title={(
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         <span>{site.name || '-'}</span>
+                        {refreshOutcome[site.id] === true ? (
+                          <span className="badge badge-success" style={{ fontSize: 11 }}>刷新成功</span>
+                        ) : null}
+                        {refreshOutcome[site.id] === false ? (
+                          <span className="badge badge-error" style={{ fontSize: 11 }}>刷新失败</span>
+                        ) : null}
                         {site.url ? (
                           <a
                             href={site.url}
@@ -2087,6 +2290,15 @@ export default function Sites() {
                           align="end"
                         />
                       )}
+                    />
+                    <MobileField label="今日签到" value={(
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <SiteCheckinDisplay site={site} />
+                      </div>
+                    )} />
+                    <MobileField
+                      label="最后更新"
+                      value={site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
                     />
                     <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
                     <MobileField
@@ -2230,6 +2442,8 @@ export default function Sites() {
                   <th>名称</th>
                   <th>外部签到站URL</th>
                   <th>总余额</th>
+                  <th>今日签到</th>
+                  <th>最后更新</th>
                   <th>状态</th>
                   <th>系统代理</th>
                   <th>权重</th>
@@ -2271,6 +2485,16 @@ export default function Sites() {
                           }}
                         >
                           {site.name}
+                        {refreshOutcome[site.id] === true ? (
+                          <span className="badge badge-success" style={{ fontSize: 11 }} data-testid={`site-refresh-ok-${site.id}`}>
+                            刷新成功
+                          </span>
+                        ) : null}
+                        {refreshOutcome[site.id] === false ? (
+                          <span className="badge badge-error" style={{ fontSize: 11 }} data-testid={`site-refresh-fail-${site.id}`}>
+                            刷新失败
+                          </span>
+                        ) : null}
                         </a>
                         {hasConfiguredCustomHeaders(site.customHeaders) ? (
                           <span className="badge badge-info" style={{ fontSize: 11 }}>
@@ -2306,6 +2530,12 @@ export default function Sites() {
                         balance={site.totalBalance}
                         summary={site.subscriptionSummary}
                       />
+                    </td>
+                    <td data-testid={`site-checkin-${site.id}`}>
+                      <SiteCheckinDisplay site={site} />
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
                     </td>
                     <td>
                       <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>

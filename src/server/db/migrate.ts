@@ -1,3 +1,4 @@
+import { guardRepoDatabaseUnderVitest } from './vitestDataDirGuard.js';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
@@ -88,7 +89,7 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
 
 function resolveSqliteDbPath(): string {
   const raw = (config.dbUrl || '').trim();
-  if (!raw) return resolve(`${config.dataDir}/hub.db`);
+  if (!raw) return guardRepoDatabaseUnderVitest(resolve(`${config.dataDir}/hub.db`));
   if (raw === ':memory:') return raw;
   if (raw.startsWith('file://')) {
     const parsed = new URL(raw);

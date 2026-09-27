@@ -1190,6 +1190,35 @@ export default function Accounts() {
     }
   };
 
+  /**
+   * Re-acquires credentials through the persisted browser session. This is the
+   * button-driven recovery path for an expired token: it repeats the original
+   * assisted login instead of asking the user to paste a token by hand.
+   */
+  const handleRefreshCredential = async (account: any) => {
+    const provider = String(account?.oauthProvider || "linuxdo").trim() || "linuxdo";
+    const key = `refresh-credential-${account.id}`;
+    setActionLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await api.refreshAssistedLoginAccount(provider, account.id);
+      if (res?.success) {
+        toast.success(res.message || "凭证已重新获取");
+        load(true);
+        return;
+      }
+      const message = res?.message || "重新获取凭证失败";
+      if (res?.status === "needs_provider_login") {
+        toast.error(`${message}（请先完成 ${provider} 登录）`);
+      } else {
+        toast.error(message);
+      }
+    } catch (e: any) {
+      toast.error(e?.message || "重新获取凭证失败");
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
   useEffect(() => {
     const { accountId, openRebind } = readFocusAccountIntent(location.search);
     if (!accountId || !loaded || activeSegment === "tokens") return;
@@ -2923,6 +2952,18 @@ export default function Accounts() {
                               }
                             />
                             <MobileField
+                              label="今日签到"
+                              value={(
+                                <span
+                                  data-testid={`account-checkin-today-mobile-${a.id}`}
+                                  className={`badge ${a.todayCheckedIn ? 'badge-success' : 'badge-muted'}`}
+                                  style={{ fontSize: 11 }}
+                                >
+                                  {a.todayCheckedIn ? '已签到' : '未签到'}
+                                </span>
+                              )}
+                            />
+                            <MobileField
                               label="签到"
                               value={
                                 capabilities.canCheckin ? (
@@ -3055,12 +3096,25 @@ export default function Accounts() {
                               )}
                               {a.status === "expired" &&
                                 !capabilities.proxyOnly && (
-                                  <button
-                                    onClick={() => openRebindPanel(a)}
-                                    className="btn btn-link btn-link-warning"
-                                  >
-                                    重新绑定
-                                  </button>
+                                  <>
+                                    <button
+                                      onClick={() => handleRefreshCredential(a)}
+                                      disabled={actionLoading[`refresh-credential-${a.id}`]}
+                                      className="btn btn-link btn-link-info"
+                                    >
+                                      {actionLoading[`refresh-credential-${a.id}`] ? (
+                                        <span className="spinner spinner-sm" />
+                                      ) : (
+                                        "重新获取凭证"
+                                      )}
+                                    </button>
+                                    <button
+                                      onClick={() => openRebindPanel(a)}
+                                      className="btn btn-link btn-link-warning"
+                                    >
+                                      手动重新绑定
+                                    </button>
+                                  </>
                                 )}
                               <button
                                 onClick={() =>
@@ -3259,6 +3313,15 @@ export default function Accounts() {
                             </div>
                           </td>
                           <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span
+                                data-testid={`account-checkin-today-${a.id}`}
+                                className={`badge ${a.todayCheckedIn ? 'badge-success' : 'badge-muted'}`}
+                                style={{ fontSize: 10, whiteSpace: 'nowrap' }}
+                                data-tooltip={a.todayCheckedIn ? '今日签到成功' : '今日尚未签到成功'}
+                              >
+                                {a.todayCheckedIn ? '今日已签' : '今日未签'}
+                              </span>
                             {capabilities.canCheckin ? (
                               <button
                                 type="button"
@@ -3294,6 +3357,7 @@ export default function Accounts() {
                                 不支持
                               </span>
                             )}
+                            </div>
                           </td>
                           <td
                             className="accounts-actions-cell"
@@ -3386,12 +3450,25 @@ export default function Accounts() {
                               )}
                               {a.status === "expired" &&
                                 !capabilities.proxyOnly && (
-                                  <button
-                                    onClick={() => openRebindPanel(a)}
-                                    className="btn btn-link btn-link-warning"
-                                  >
-                                    重新绑定
-                                  </button>
+                                  <>
+                                    <button
+                                      onClick={() => handleRefreshCredential(a)}
+                                      disabled={actionLoading[`refresh-credential-${a.id}`]}
+                                      className="btn btn-link btn-link-info"
+                                    >
+                                      {actionLoading[`refresh-credential-${a.id}`] ? (
+                                        <span className="spinner spinner-sm" />
+                                      ) : (
+                                        "重新获取凭证"
+                                      )}
+                                    </button>
+                                    <button
+                                      onClick={() => openRebindPanel(a)}
+                                      className="btn btn-link btn-link-warning"
+                                    >
+                                      手动重新绑定
+                                    </button>
+                                  </>
                                 )}
                               <button
                                 onClick={() => openEditPanel(a)}

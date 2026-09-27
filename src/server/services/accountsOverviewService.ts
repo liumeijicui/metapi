@@ -30,6 +30,7 @@ export type AccountOverviewRow = typeof schema.accounts.$inferSelect & {
   capabilities: AccountCapabilities;
   todaySpend: number;
   todayReward: number;
+  todayCheckedIn: boolean;
   runtimeHealth: RuntimeHealthInfo;
 };
 
@@ -111,6 +112,10 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
 
   const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
+  // Populated from the successful check-in logs fetched below; declared here so
+  // it can be read while the payload is assembled.
+  const checkedInAccountIds = new Set<number>();
+
   const [todaySpendRows, modelCountRows, todayCheckins] = await Promise.all([
     db
       .select({
@@ -164,6 +169,8 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
     modelCountByAccount[row.accountId] = Number(row.modelCount || 0);
   }
 
+  for (const log of todayCheckins) checkedInAccountIds.add(log.accountId);
+
   const rewardByAccount: Record<number, number> = {};
   const successCountByAccount: Record<number, number> = {};
   const parsedRewardCountByAccount: Record<number, number> = {};
@@ -181,7 +188,7 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
   }
 
   return {
-    accounts: rows.map((row) => {
+    accounts: rows.map((row: { accounts: typeof schema.accounts.$inferSelect; sites: typeof schema.sites.$inferSelect }) => {
       const credentialMode = resolveStoredCredentialMode(row.accounts);
       const capabilities = buildCapabilitiesForAccount(row.accounts);
       return {
@@ -192,6 +199,7 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
         todaySpend:
           Math.round((spendByAccount[row.accounts.id] || 0) * 1_000_000) /
           1_000_000,
+        todayCheckedIn: checkedInAccountIds.has(row.accounts.id),
         todayReward:
           Math.round(
             estimateRewardWithTodayIncomeFallback({

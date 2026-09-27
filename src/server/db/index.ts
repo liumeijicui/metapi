@@ -1,3 +1,4 @@
+import { guardRepoDatabaseUnderVitest } from './vitestDataDirGuard.js';
 import Database from 'better-sqlite3';
 import mysql from 'mysql2/promise';
 import pg from 'pg';
@@ -87,7 +88,7 @@ function resolveSqlitePath(): string {
     if (isolatedVitestPath) {
       return isolatedVitestPath;
     }
-    return resolve(`${config.dataDir}/hub.db`);
+    return guardRepoDatabaseUnderVitest(resolve(`${config.dataDir}/hub.db`));
   }
   if (raw === ':memory:') return raw;
   if (raw.startsWith('file://')) {

@@ -11,6 +11,7 @@ import { Agent as UndiciAgent, ProxyAgent } from 'undici';
 import { mergeHeadersWithSiteCustomHeaders, type SiteCustomHeadersMergePriority } from './siteCustomHeaders.js';
 import { resolveProxyUrlFromExtraConfig } from './accountExtraConfig.js';
 import { stripTrailingSlashes } from './urlNormalization.js';
+import { siteUrlRequiresSystemProxy } from './siteProfiles.js';
 
 const SITE_PROXY_CACHE_TTL_MS = 3_000;
 const SUPPORTED_PROXY_PROTOCOLS = new Set([
@@ -73,6 +74,56 @@ let siteProxyCache: {
 const dispatcherCache = new Map<string, Dispatcher>();
 
 const accountProxyOverride = new AsyncLocalStorage<string | null>();
+
+/**
+ * Identity of the account whose credential the current call is using.
+ *
+ * A rotating credential (`new_api_refresh`) replaces itself on every successful
+ * exchange, and the server only returns the new secret in `Set-Cookie`. Without
+ * knowing which account row to write back to, the rotated value is lost and the
+ * chain dies after the first use - which is exactly how bound accounts ended up
+ * unusable a few seconds after they were created.
+ */
+type AccountCredentialContext = {
+  /** Absent while a brand-new account is still being created. */
+  accountId?: number;
+  siteId: number;
+  /**
+   * Newest secret an adapter observed while rotating this credential.
+   *
+   * A bind flow verifies the credential and then verifies it again while
+   * creating the account row; the first exchange retires the secret the caller
+   * still holds. Tracking the replacement here lets the whole chain converge on
+   * the live value instead of repeatedly presenting a dead one.
+   */
+  rotated?: { cookieName: string; value: string };
+};
+
+const accountCredentialContext = new AsyncLocalStorage<AccountCredentialContext>();
+
+export function getAccountCredentialContext(): AccountCredentialContext | undefined {
+  return accountCredentialContext.getStore();
+}
+
+/** Remembers the replacement secret without writing it anywhere yet. */
+export function recordRotatedCredential(cookieName: string, value: string): void {
+  const context = accountCredentialContext.getStore();
+  if (context) context.rotated = { cookieName, value };
+}
+
+
+export function withAccountCredentialContext<T>(
+  context: AccountCredentialContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  // Nested scopes appear when a flow that already tracks a credential creates another
+  // (the assisted-login bind verifies, then creates the row, then starts the token
+  // sync). Carry the rotation discovered so far into the inner scope instead of
+  // dropping it, so the secret stays consistent no matter which layer writes.
+  const current = accountCredentialContext.getStore();
+  if (!current) return accountCredentialContext.run(context, fn);
+  return accountCredentialContext.run({ ...context, rotated: current.rotated }, fn);
+}
 
 export function withAccountProxyOverride<T>(
   proxyUrl: string | null | undefined,
@@ -401,7 +452,14 @@ async function resolveSiteRequestConfigByRequestUrl(requestUrl: string): Promise
 
   const rows = await getCachedSiteProxyRows();
   const matchedRow = findBestMatchingSiteRow(rows, normalizedRequestUrl);
-  const proxyUrl = matchedRow?.proxyUrl
+  // A site profile can declare that the host is only reachable through the
+  // system proxy (some registries are blocked from the local network). That is a
+  // fact about the site, so it applies even when the row has no proxy configured.
+  const profileProxyUrl = siteUrlRequiresSystemProxy(normalizedRequestUrl)
+    ? siteProxyCache.systemProxyUrl
+    : null;
+  const proxyUrl = profileProxyUrl
+    || matchedRow?.proxyUrl
     || (matchedRow?.useSystemProxy ? siteProxyCache.systemProxyUrl : null);
   return {
     proxyUrl: proxyUrl || null,
@@ -474,6 +532,12 @@ export function withExplicitProxyRequestInit(
 export function resolveProxyUrlForSite(site: SiteProxyConfigLike | null | undefined): string | null {
   const explicitProxyUrl = normalizeSiteProxyUrl(site?.proxyUrl);
   if (explicitProxyUrl) return explicitProxyUrl;
+  // A site profile declares hosts that are only reachable through the system
+  // proxy. It applies even when the row has the toggle off, because the user
+  // cannot be expected to know a registry is blocked from this network.
+  if (siteUrlRequiresSystemProxy((site as { url?: string } | null | undefined)?.url)) {
+    return normalizeSiteProxyUrl(config.systemProxyUrl);
+  }
   if (!site?.useSystemProxy) return null;
   return normalizeSiteProxyUrl(config.systemProxyUrl);
 }

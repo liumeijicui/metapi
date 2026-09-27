@@ -17,7 +17,7 @@ import {
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
-import { withAccountProxyOverride } from './siteProxy.js';
+import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -55,7 +55,16 @@ function isUnsupportedCheckinMessage(message?: string | null): boolean {
     text.includes('check-in is not supported') ||
     text.includes('checkin is not supported') ||
     text.includes('does not support checkin') ||
-    text.includes('not support checkin')
+    text.includes('not support checkin') ||
+    // The route exists but the operator turned the feature off. That is a
+    // configuration fact, not a broken account, so it belongs with the skips
+    // instead of being retried and reported as a failure every day.
+    text.includes('签到功能未启用') ||
+    text.includes('签到未启用') ||
+    text.includes('checkin disabled') ||
+    text.includes('check-in disabled') ||
+    text.includes('checkin is disabled') ||
+    text.includes('check-in is disabled')
   );
 }
 
@@ -215,8 +224,11 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
   let activeAccessToken = account.accessToken;
-  let result = await withAccountProxyOverride(accountProxyUrl,
-    () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+  const runCheckin = (token: string) => withAccountProxyOverride(accountProxyUrl,
+    () => withAccountCredentialContext({ accountId: account.id, siteId: site.id },
+      () => adapter.checkin(site.url, token, platformUserId)));
+
+  let result = await runCheckin(activeAccessToken);
 
   if (!result.success && shouldAttemptAutoRelogin(result.message)) {
     const relogin = await tryAutoRelogin(account, site);
@@ -228,8 +240,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       // id tryAutoRelogin() just persisted.
       if (relogin.platformUserId) platformUserId = relogin.platformUserId;
       if (relogin.extraConfig) account.extraConfig = relogin.extraConfig;
-      result = await withAccountProxyOverride(accountProxyUrl,
-        () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+      result = await runCheckin(activeAccessToken);
     }
   }
 

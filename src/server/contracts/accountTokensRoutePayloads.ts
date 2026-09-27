@@ -34,9 +34,14 @@ const accountTokenSyncAllPayloadSchema = z.object({
   wait: z.boolean().optional(),
 }).passthrough();
 
+const siteApiKeySyncPayloadSchema = z.object({
+  ids: z.array(z.number().int().positive()).optional(),
+}).passthrough();
+
 export type AccountTokenBatchPayload = z.output<typeof accountTokenBatchPayloadSchema>;
 export type AccountTokenCreatePayload = z.output<typeof accountTokenCreatePayloadSchema>;
 export type AccountTokenSyncAllPayload = z.output<typeof accountTokenSyncAllPayloadSchema>;
+export type SiteApiKeySyncPayload = z.output<typeof siteApiKeySyncPayloadSchema>;
 export type AccountTokenUpdatePayload = z.output<typeof accountTokenUpdatePayloadSchema>;
 
 function normalizeAccountTokenPayloadInput(input: unknown): unknown {
@@ -133,6 +138,20 @@ export function parseAccountTokenUpdatePayload(input: unknown):
 export function parseAccountTokenSyncAllPayload(input: unknown):
 { success: true; data: AccountTokenSyncAllPayload } | { success: false; error: string } {
   const result = accountTokenSyncAllPayloadSchema.safeParse(normalizeAccountTokenPayloadInput(input));
+  if (!result.success) {
+    return {
+      success: false,
+      error: formatAccountTokenPayloadError(result.error),
+    };
+  }
+  return {
+    success: true,
+    data: result.data,
+  };
+}
+export function parseSiteApiKeySyncPayload(input: unknown):
+{ success: true; data: SiteApiKeySyncPayload } | { success: false; error: string } {
+  const result = siteApiKeySyncPayloadSchema.safeParse(normalizeAccountTokenPayloadInput(input));
   if (!result.success) {
     return {
       success: false,

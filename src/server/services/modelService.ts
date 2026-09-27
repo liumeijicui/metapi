@@ -26,7 +26,7 @@ import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js'
 import {
   syncPatternRouteChannelsAfterAffectedRouteChanges,
 } from './patternRouteChannelSyncService.js';
-import { withAccountProxyOverride } from './siteProxy.js';
+import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
 import { isCodexPlatform } from './oauth/codexAccount.js';
 import { buildStoredOauthStateFromAccount, getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from './oauth/refreshSingleflight.js';
@@ -640,7 +640,32 @@ async function runPostRefreshProbeIfEnabled(params: {
   };
 }
 
+/**
+ * Model discovery talks to the site with the account's own credential, and for
+ * a `new_api_refresh` session that call *rotates* the credential server-side.
+ * Without a credential context the replacement secret is dropped, so the stored
+ * copy becomes single-use: it keeps working from the access-token cache for a few
+ * minutes and then reports AUTH_SESSION_REVOKED forever. Run the whole scan inside
+ * the account's context so every rotation is written back to the row.
+ */
 export async function refreshModelsForAccount(
+  accountId: number,
+  options?: { allowInactive?: boolean },
+): Promise<ModelRefreshResult> {
+  const accountOwner = await db.select({ siteId: schema.accounts.siteId })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!accountOwner) {
+    return buildAccountNotFoundRefreshResult(accountId);
+  }
+  return withAccountCredentialContext(
+    { accountId, siteId: accountOwner.siteId },
+    () => runRefreshModelsForAccount(accountId, options),
+  );
+}
+
+async function runRefreshModelsForAccount(
   accountId: number,
   options?: { allowInactive?: boolean },
 ): Promise<ModelRefreshResult> {

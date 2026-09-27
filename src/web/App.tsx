@@ -35,6 +35,7 @@ const Models = lazy(() => import('./pages/Models.js'));
 const About = lazy(() => import('./pages/About.js'));
 const ModelTester = lazy(() => import('./pages/ModelTester.js'));
 const Monitors = lazy(() => import('./pages/Monitors.js'));
+const AssistedLogin = lazy(() => import('./pages/AssistedLogin.js'));
 const OAuthManagement = lazy(() => import('./pages/OAuthManagement.js'));
 const SiteAnnouncements = lazy(() => import('./pages/SiteAnnouncements.js'));
 
@@ -417,6 +418,8 @@ export const sidebarGroups = [
       { to: '/routes', label: '路由', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg> },
       { to: '/logs', label: '使用日志', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg> },
       { to: '/monitor', label: '可用性监控', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 5a2 2 0 012-2h14a2 2 0 012 2v11a2 2 0 01-2 2h-5l-2.5 3-2.5-3H5a2 2 0 01-2-2V5z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 10h3l1.5-2.5L14 13l1.5-3H17" /></svg> },
+      { to: '/linuxdo', label: 'Linux.do 快捷登录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a3 3 0 106 0 3 3 0 00-6 0zM9 17a3 3 0 11-6 0 3 3 0 016 0zM15 7l-4.5 6M10.5 13L9 14" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 19h8m0 0l-2.5-2.5M20 19l-2.5 2.5" /></svg> },
+      { to: '/github', label: 'GitHub 快捷登录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z" /></svg> },
     ],
   },
   {
@@ -869,6 +872,9 @@ function AppShell() {
                 <Route path="/routes" element={<TokenRoutes />} />
                 <Route path="/logs" element={<ProxyLogs />} />
                 <Route path="/monitor" element={<Monitors />} />
+                <Route path="/assisted-login/:provider" element={<AssistedLogin />} />
+                <Route path="/linuxdo" element={<AssistedLogin providerId="linuxdo" />} />
+                <Route path="/github" element={<AssistedLogin providerId="github" />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/downstream-keys" element={<DownstreamKeys />} />
                 <Route path="/events" element={<ProgramLogs />} />
