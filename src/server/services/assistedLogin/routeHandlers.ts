@@ -135,6 +135,17 @@ async function syncRotatedCookieToBrowser(
   }
 }
 
+/** Maps a failed probe into the shared "blocked" shape instead of throwing. */
+function blockedLoginStateFrom(error: unknown, label: string): LoginState {
+  return {
+    loggedIn: false,
+    username: null,
+    userId: null,
+    blocked: true,
+    message: (error as Error)?.message || `无法读取 ${label} 登录状态`,
+  };
+}
+
 /**
  * Builds the provider-scoped route handlers. Shared by the generic
  * `/api/assisted-login/:provider/*` routes and the per-provider aliases.
@@ -158,33 +169,34 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
 
       const browserState = session.browser.getManagedBrowserState();
       const imported = await readImportedSession(session.provider.id);
-      let loginState;
+      let loginState: LoginState;
       if (imported) {
         // An imported session replaces the managed browser entirely, so a
         // browser-less server reports the real state instead of "browser missing".
         try {
           loginState = await probeImportedSessionCached(session.provider, imported);
         } catch (error) {
-          loginState = {
-            loggedIn: false,
-            username: null,
-            userId: null,
-            blocked: true,
-            message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
-          };
+          loginState = blockedLoginStateFrom(error, session.provider.label);
         }
-      } else {
+      } else if (browserState.connected) {
+        // A status view never launches a browser: on a browser-less server that is
+        // exactly the resource spike the imported-session path exists to avoid.
+        // Only a browser that is already attached is asked directly.
         try {
           loginState = await session.getLoginState();
         } catch (error) {
-          loginState = {
-            loggedIn: false,
-            username: null,
-            userId: null,
-            blocked: true,
-            message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
-          };
+          loginState = blockedLoginStateFrom(error, session.provider.label);
         }
+      } else {
+        // Without an import and without a browser to ask, the honest answer is
+        // guidance, not a signed-out session.
+        loginState = {
+          loggedIn: false,
+          username: null,
+          userId: null,
+          blocked: false,
+          message: '尚未导入会话：粘贴一次 Cookie 保存后即可长期查看状态（服务器不会为此启动浏览器）',
+        };
       }
 
       // Any page view that confirms a live login refreshes the watcher baseline,
@@ -279,21 +291,18 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
         });
       }
 
-      // Verification runs before the write: an unusable paste must never
-      // replace a session that still works.
+      // Verification runs before the write: a paste the provider explicitly
+      // rejects must never replace a session that still works. A transient
+      // failure (rate limit, edge block, network error) says nothing about the
+      // cookie, so the import is kept and annotated instead of being dropped.
+      const previous = await readImportedSession(session.provider.id);
       let loginState: LoginState;
       try {
         loginState = await probeImportedSession(session.provider, parsed.cookieHeader);
       } catch (error) {
-        loginState = {
-          loggedIn: false,
-          username: null,
-          userId: null,
-          blocked: true,
-          message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
-        };
+        loginState = blockedLoginStateFrom(error, session.provider.label);
       }
-      if (!loginState.loggedIn) {
+      if (!loginState.loggedIn && !loginState.blocked) {
         return reply.code(400).send({
           success: false,
           message: `检测未通过${loginState.message ? `：${loginState.message}` : ''}，未保存（原有会话保持不变）`,
@@ -301,24 +310,39 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
         });
       }
 
-      const saved = await saveImportedSession(session.provider.id, parsed, {
-        username: loginState.username,
-        userId: loginState.userId,
-      });
-      importedProbeCache.set(session.provider.id, { at: Date.now(), state: loginState });
+      const verified = loginState.loggedIn;
+      const saved = await saveImportedSession(
+        session.provider.id,
+        parsed,
+        verified
+          ? { username: loginState.username, userId: loginState.userId }
+          // An unverified paste keeps the last identity the provider confirmed,
+          // so a rate-limited probe cannot blank out a known-good account name.
+          : { username: previous?.verifiedUsername ?? null, userId: previous?.verifiedUserId ?? null },
+      );
+      const resolvedState: LoginState = verified
+        ? loginState
+        : {
+          ...applyTransientFallback(loginState, saved),
+          message: `已保存，本次检测异常：${loginState.message || '未知错误'}；稍后刷新状态会自动复检`,
+        };
+      importedProbeCache.set(session.provider.id, { at: Date.now(), state: resolvedState });
 
       // A verified import becomes the watcher baseline, so an expiry is only ever
       // reported for a session we actually saw working.
-      void watcher?.seedBaseline(loginState).catch(() => undefined);
+      if (verified) {
+        void watcher?.seedBaseline(loginState).catch(() => undefined);
+      }
 
       return {
         success: true,
+        verified,
         importedSession: {
           cookieNames: saved.cookieNames,
           savedAt: saved.savedAt,
           hasCsrfToken: !!saved.csrfToken,
         },
-        loginState,
+        loginState: resolvedState,
       };
     },
 

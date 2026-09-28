@@ -74,8 +74,8 @@ export function createAssistedLoginWatcher(
    *
    * An imported session is probed over plain HTTP, so a server that cannot host
    * Chrome still reports a real status instead of spawning a browser every tick.
-   * Only a browser-owned session wakes the managed Chrome, and only when its
-   * profile already exists.
+   * A browser-held session is only checked while that browser is already
+   * attached: a background tick must never launch one.
    */
   async function readLoginState(): Promise<LoginState | null> {
     const imported = await readImportedSession(provider.id);
@@ -87,17 +87,10 @@ export function createAssistedLoginWatcher(
       }
     }
 
-    if (!browser.hasManagedBrowserProfile()) return null;
-
-    // The browser dies with the server process, so re-launch it to keep watching;
-    // the persistent profile restores the provider session at startup.
-    if (!browser.getManagedBrowserState().connected) {
-      try {
-        await browser.ensureManagedBrowserContext();
-      } catch {
-        return null;
-      }
-    }
+    // The managed browser is never launched from a background tick. Restarting it
+    // to keep watching is exactly the resident-Chrome cost the imported session
+    // path exists to avoid, so a closed browser simply ends the watch.
+    if (!browser.getManagedBrowserState().connected) return null;
 
     try {
       return await session.getLoginState();

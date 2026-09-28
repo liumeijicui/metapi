@@ -159,7 +159,13 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
       }
       setImportedSession(res.importedSession ?? null);
       setSessionRaw('');
-      toast.success(`会话已导入并验证通过：${res.loginState?.username || '（未知用户）'}`);
+      if (res.verified === false) {
+        // A transient probe failure (rate limit, edge block) still keeps the
+        // import; the annotated result is shown in the status line below.
+        toast.info(res.loginState?.message || '会话已保存，稍后刷新状态确认');
+      } else {
+        toast.success(`会话已导入并验证通过：${res.loginState?.username || '（未知用户）'}`);
+      }
       await loadAll();
     } catch (err: any) {
       toast.error(err?.message || '导入失败');
