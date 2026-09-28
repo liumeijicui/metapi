@@ -4,6 +4,14 @@ These rules apply to the whole repository unless a deeper `AGENTS.md` overrides
 them. They are intentionally opinionated and mechanical so humans and agents can
 make small, consistent changes without re-learning the codebase each time.
 
+## Communication Language
+
+- Answer the user in Chinese (Simplified) for every user-visible response:
+  explanations, plans, progress updates, summaries, and review findings.
+- Keep code, identifiers, file paths, command names, log excerpts, error
+  messages, and commit messages in their original language. Do not translate
+  them.
+
 ## Golden Principles
 
 - Prefer one source of truth. If a helper, contract, or workflow already owns

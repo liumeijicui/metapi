@@ -1,5 +1,5 @@
 import type { Page } from 'playwright-core';
-import type { AssistedLoginProvider, LoginState } from '../types.js';
+import type { AssistedLoginProvider, LoginState, ProviderHttpFetch } from '../types.js';
 
 const ORIGIN = 'https://linux.do';
 const CONNECT_HOST = 'connect.linux.do';
@@ -55,6 +55,107 @@ export const linuxDoProvider: AssistedLoginProvider = {
     }
   },
   probeLoginState,
+  /**
+   * Same endpoint as the browser probe, reached over HTTP with the imported
+   * cookie. Transient failures (rate limits, Cloudflare checks, network errors,
+   * unexpected responses) are reported as `blocked` rather than as a logged-out
+   * session: only a 404 proves the credential itself stopped working.
+   */
+  probeLoginStateHttp: async (fetchWithSession: ProviderHttpFetch): Promise<LoginState> => {
+    let response: { status: number; body: string };
+    try {
+      response = await fetchWithSession('/session/current.json', { accept: 'application/json' });
+    } catch (error) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: `网络错误：${(error as Error)?.message || '无法访问 Linux.do'}`,
+      };
+    }
+
+    // 429 is a transient rate limit, not a dead credential: reporting it as a
+    // logout would both mislead the operator and trip the expiry watcher.
+    if (response.status === 429) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: 'HTTP 429（请求被限流）',
+      };
+    }
+    if (response.status === 403) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: 'HTTP 403（Cloudflare 校验或访问被拦截）',
+      };
+    }
+    if (response.status === 503) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: 'HTTP 503（站点服务暂不可用）',
+      };
+    }
+    // 401/404 are the site explicitly rejecting the credential, so they are the
+    // only statuses that mark the imported session as unusable.
+    if (response.status === 401) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: false,
+        message: 'HTTP 401（认证被拒绝），请重新导入会话',
+      };
+    }
+    // Discourse answers 404 on the current-user endpoint when the session token
+    // is no longer accepted, which reads as "logged out", not as an edge block.
+    if (response.status === 404) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: false,
+        message: 'HTTP 404（会话已在站点侧失效），请重新导入会话',
+      };
+    }
+    if (response.status !== 200) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: `HTTP ${response.status}（非预期响应）`,
+      };
+    }
+
+    let payload: { current_user?: { username?: unknown; id?: unknown } | null } | null = null;
+    try {
+      payload = JSON.parse(response.body);
+    } catch {
+      payload = null;
+    }
+    const currentUser = payload?.current_user;
+    const username = currentUser && typeof currentUser === 'object' ? normalizeText(currentUser.username) : '';
+    if (!currentUser || typeof currentUser !== 'object' || !username) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: '响应未包含用户信息（可能被中间层拦截）',
+      };
+    }
+    const userId = typeof currentUser.id === 'number' ? currentUser.id : null;
+    return { loggedIn: true, username, userId, blocked: false };
+  },
   entryNamePattern: /linux\s*\.?\s*do|linuxdo/i,
   entrySelectors: ['[href*="linuxdo"]', '[href*="linux.do"]', 'button:has-text("LinuxDO")', 'button:has-text("LINUX DO")', 'button:has-text("linuxdo")'],
   entryTextSelectors: [

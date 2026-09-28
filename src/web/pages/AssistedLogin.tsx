@@ -4,14 +4,6 @@ import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
 
-type BrowserStatus = {
-  available: boolean;
-  running: boolean;
-  connected: boolean;
-  executableLabel?: string | null;
-  profileDir?: string;
-};
-
 type SessionStatus = {
   loggedIn: boolean;
   username: string | null;
@@ -32,6 +24,13 @@ type ProviderInfo = {
   label: string;
 };
 
+type ImportedSessionInfo = {
+  cookieNames: string[];
+  savedAt: string;
+  hasCsrfToken: boolean;
+  cookieHeader?: string;
+};
+
 const PROVIDER_FALLBACK: Record<string, ProviderInfo> = {
   linuxdo: { id: 'linuxdo', label: 'Linux.do' },
   github: { id: 'github', label: 'GitHub' },
@@ -49,7 +48,6 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
     [providerId, params.provider],
   );
   const toast = useToast();
-  const [browser, setBrowser] = useState<BrowserStatus | null>(null);
   const [session, setSession] = useState<SessionStatus | null>(null);
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [selectedSiteId, setSelectedSiteId] = useState<number | null>(null);
@@ -58,6 +56,10 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
   const [bindAccount, setBindAccount] = useState(true);
   const [skipModelFetch, setSkipModelFetch] = useState(false);
   const [lastResult, setLastResult] = useState<string>('');
+  const [importedSession, setImportedSession] = useState<ImportedSessionInfo | null>(null);
+  const [sessionRaw, setSessionRaw] = useState('');
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [cookieRevealed, setCookieRevealed] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -66,16 +68,18 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
         api.getAssistedLoginStatus(provider.id),
         api.getSites(),
       ]);
-      setBrowser(statusRes?.browser ?? null);
       setSession(statusRes?.session ?? null);
+      setImportedSession(statusRes?.importedSession ?? null);
       const rows = Array.isArray(sitesRes) ? sitesRes : [];
       setSites(rows);
       setSelectedSiteId((prev) => {
         if (prev && rows.some((row: SiteRow) => row.id === prev)) return prev;
         return rows[0]?.id ?? null;
       });
+      return statusRes?.session ?? null;
     } catch (err: any) {
       toast.error(err?.message || `加载 ${provider.label} 助手状态失败`);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -90,22 +94,15 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
     [sites, selectedSiteId],
   );
 
-  const handleOpenLogin = async () => {
-    try {
-      await api.openAssistedLoginWindow(provider.id);
-      toast.success(`已在受管浏览器中打开 ${provider.label} 登录页，完成后点击“刷新状态”`);
-    } catch (err: any) {
-      toast.error(err?.message || '无法打开登录窗口');
-    }
-  };
-
-  const handleCheckSession = async () => {
-    try {
-      await api.checkAssistedLoginSession(provider.id);
-      toast.success('已检查会话状态；若已失效，将按通知设置发送提醒');
-      await loadAll();
-    } catch (err: any) {
-      toast.error(err?.message || '检查会话失败');
+  const handleRefreshStatus = async () => {
+    const state = await loadAll();
+    if (!state) return;
+    if (state.loggedIn) {
+      toast.success(`刷新成功：已登录${state.username ? `：${state.username}` : ''}`);
+    } else if (state.blocked) {
+      toast.info(`刷新完成：${state.message || '暂时无法确认登录状态'}`);
+    } else {
+      toast.error(`刷新完成：未登录 · ${state.message || '请重新导入 Cookie'}`);
     }
   };
 
@@ -135,7 +132,7 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
       const message = res?.message || '未能获取凭证';
       setLastResult(`${status}：${message}`);
       if (status === 'needs_provider_login') {
-        toast.error(`需要先完成 ${provider.label} 登录，请在受管浏览器中登录后重试`);
+        toast.error(`需要先完成 ${provider.label} 登录，请先在上方粘贴并导入会话后重试`);
       } else {
         toast.error(message);
       }
@@ -146,13 +143,65 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
     }
   };
 
-  const browserLabel = browser?.executableLabel || (loading || !browser ? '检测中…' : '未检测到浏览器');
-  const stateColor = session?.loggedIn ? 'var(--color-success, #16a34a)' : 'var(--color-text-muted)';
-  const browserDetail = !browser || loading
-    ? '正在读取受管浏览器状态…'
-    : browser.available
-      ? browser.connected ? '已连接，会话保持中' : '已就绪，尚未启动'
-      : '未找到 Chrome/Edge，无法使用自动授权';
+  // Importing a session replaces the managed browser: the operator pastes the
+  // provider cookie once and the server polls it over plain HTTP from then on.
+  const handleSaveSession = async () => {
+    if (!sessionRaw.trim()) {
+      toast.error('请先粘贴 Cookie 或 DevTools 的 Copy as cURL 内容');
+      return;
+    }
+    setSessionBusy(true);
+    try {
+      const res = await api.saveAssistedLoginSession(provider.id, sessionRaw);
+      if (!res?.success) {
+        toast.error(res?.message || '导入失败');
+        return;
+      }
+      setImportedSession(res.importedSession ?? null);
+      setSessionRaw('');
+      toast.success(`会话已导入并验证通过：${res.loginState?.username || '（未知用户）'}`);
+      await loadAll();
+    } catch (err: any) {
+      toast.error(err?.message || '导入失败');
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+
+  const handleClearSession = async () => {
+    setSessionBusy(true);
+    try {
+      await api.clearAssistedLoginSession(provider.id);
+      setImportedSession(null);
+      setCookieRevealed(false);
+      toast.success('已清除导入的会话');
+      await loadAll();
+    } catch (err: any) {
+      toast.error(err?.message || '清除失败');
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+
+  const handleCopyCookie = async () => {
+    const value = importedSession?.cookieHeader;
+    if (!value) {
+      toast.error('未找到已保存的 Cookie');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success('Cookie 已复制到剪贴板');
+    } catch (err: any) {
+      toast.error(err?.message || '复制失败，请点“显示 Cookie”后手动复制');
+    }
+  };
+
+  const stateColor = session?.loggedIn
+    ? 'var(--color-success, #16a34a)'
+    : session?.blocked
+      ? 'var(--color-warning)'
+      : 'var(--color-text-muted)';
 
   return (
     <div className="animate-fade-in monitor-page">
@@ -164,54 +213,105 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={handleOpenLogin}>
-            打开 {provider.label} 登录
-          </button>
-          <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void loadAll()} disabled={loading}>
+          <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void handleRefreshStatus()} disabled={loading}>
             {loading ? '刷新中…' : '刷新状态'}
-          </button>
-          <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={handleCheckSession}>
-            立即检查会话
           </button>
         </div>
       </div>
 
-      <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>受管浏览器</div>
-            <div style={{ fontWeight: 600 }}>{browserLabel}</div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              {browserDetail}
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{provider.label} 登录状态</div>
-            <div style={{ fontWeight: 600, color: stateColor }}>
-              {session?.loggedIn ? `已登录：${session.username || '（未知用户）'}` : '未登录'}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              {session?.blocked
-                ? '校验未通过，请在受管浏览器窗口中完成验证'
-                : session?.message || '会话已持久化，后续授权可复用'}
-            </div>
-          </div>
+      <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontWeight: 600 }}>导入 {provider.label} 会话（推荐，无需浏览器）</div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+          在本机浏览器登录 {provider.label} 后，打开开发者工具 → 网络 → 任一条已登录请求 →
+          复制请求头里的 Cookie（或直接“Copy as cURL”），粘贴到下面。
+          {provider.id === 'linuxdo' ? ' 该方式同时绕开了 Cloudflare 对无头浏览器的拦截。' : ''}
+          服务器会加密保存这段 Cookie，仅在需要时用于自动重跑授权。
         </div>
-
-        {!loading && browser && !browser.available && (
-          <div className="monitor-hint" style={{ padding: '10px 12px' }}>
-            未检测到 Chrome 或 Edge。请安装任一浏览器后点击“刷新状态”，或设置环境变量
-            <code style={{ margin: '0 4px', fontFamily: 'var(--font-mono)' }}>
-              {provider.id === 'github' ? 'GITHUB_BROWSER_PATH' : 'LINUXDO_BROWSER_PATH'}
-            </code>
-            指向浏览器可执行文件。
+        <textarea
+          className="monitor-cookie-input"
+          style={{ minHeight: 96, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+          placeholder={provider.id === 'github'
+            ? '粘贴 Cookie（需包含 user_session）或整段 Copy as cURL 内容…'
+            : '粘贴 Cookie（需包含 _t）或整段 Copy as cURL 内容…'}
+          value={sessionRaw}
+          onChange={(event) => setSessionRaw(event.target.value)}
+        />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button type="button" className="btn btn-primary" onClick={handleSaveSession} disabled={sessionBusy}>
+            {sessionBusy ? '处理中…' : importedSession ? '重新导入并检测' : '保存并检测'}
+          </button>
+          {importedSession && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={handleClearSession}
+              disabled={sessionBusy}
+            >
+              清除已导入会话
+            </button>
+          )}
+          {importedSession && (
+            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              已导入：{importedSession.cookieNames.join('、') || '（未知）'}
+              {importedSession.savedAt ? ` · ${new Date(importedSession.savedAt).toLocaleString()}` : ''}
+              {importedSession.hasCsrfToken ? ' · 含 CSRF 令牌' : ''}
+            </span>
+          )}
+        </div>
+        {importedSession && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 12, color: 'var(--color-text-muted)' }}>
+            <span>已保存的 Cookie 值（可随时取回，避免误判失效后拿不到原串）：</span>
+            {!cookieRevealed && (
+              <code style={{ fontFamily: 'var(--font-mono)' }}>
+                {importedSession.cookieNames.map((name) => `${name}=••••••`).join('; ') || '（未知）'}
+              </code>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setCookieRevealed((value) => !value)}
+            >
+              {cookieRevealed ? '隐藏 Cookie' : '显示 Cookie'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => void handleCopyCookie()}
+            >
+              复制 Cookie
+            </button>
           </div>
         )}
-        {!loading && browser?.available && !session?.loggedIn && (
+        {importedSession && cookieRevealed && importedSession.cookieHeader && (
+          <textarea
+            className="monitor-cookie-input"
+            readOnly
+            value={importedSession.cookieHeader}
+            onFocus={(event) => event.currentTarget.select()}
+            style={{ minHeight: 64, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+          />
+        )}
+        <div style={{ fontSize: 13 }}>
+          {provider.label} 登录状态：
+          <span style={{ fontWeight: 600, color: stateColor }}>
+            {session?.loggedIn
+              ? `已登录${session.username ? `：${session.username}` : ''}`
+              : session?.blocked ? '暂时无法确认' : '未登录'}
+          </span>
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {session?.blocked
+              ? ` · ${session.message || '限流或风控拦截，不代表会话已失效，稍后刷新即可'}`
+              : session?.message
+                ? ` · ${session.message}`
+                : importedSession ? ' · 会话已加密保存，可长期复用' : ''}
+          </span>
+        </div>
+        {importedSession && (
           <div className="monitor-hint" style={{ padding: '10px 12px' }}>
-            点击“打开 {provider.label} 登录”后，在自动弹出的浏览器窗口完成登录
-            {provider.id === 'linuxdo' ? '（含 Cloudflare 校验）' : ''}。
-            登录一次即可，后续该窗口会保持会话。
+            已使用导入的会话，服务器不会再启动浏览器。探测遇到限流或风控时会沿用上次验证结果，并在后面标注错误码；只有显示“未登录”时才需要重新复制 Cookie 导入。
           </div>
         )}
       </div>
@@ -242,7 +342,7 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
               跳过模型拉取
             </label>
           )}
-          <button type="button" className="btn btn-primary" onClick={handleCapture} disabled={capturing || !selectedSiteId || !browser?.available}>
+          <button type="button" className="btn btn-primary" onClick={handleCapture} disabled={capturing || !selectedSiteId}>
             {capturing ? '授权中…' : '快捷登录并捕获凭证'}
           </button>
         </div>
@@ -257,12 +357,12 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
           </div>
         )}
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-          流程：在受管浏览器打开站点 → 点击站点的 {provider.label} 登录 → 自动同意授权 → 读取站点下发的凭证 →
+          流程：打开站点登录页 → 使用 {provider.label} 登录并自动同意授权 → 读取站点下发的凭证 →
           {bindAccount ? '直接写入连接管理。' : '仅展示结果，不写入账号。'}
         </div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-          会话会保存在受管浏览器中并长期复用。系统每 30 分钟自动检查一次登录状态，
-          一旦检测到失效会按「通知设置」发送提醒，届时点「打开 {provider.label} 登录」重新登录即可。
+          {provider.label} 会话会被加密持久化并长期复用。系统每 30 分钟自动检查一次登录状态，
+          失效时会按「通知设置」发送提醒，届时重新粘贴一次 Cookie 即可恢复。
         </div>
       </div>
     </div>

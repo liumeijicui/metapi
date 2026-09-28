@@ -1,5 +1,5 @@
 import type { Page } from 'playwright-core';
-import type { AssistedLoginProvider, LoginState } from '../types.js';
+import type { AssistedLoginProvider, LoginState, ProviderHttpFetch } from '../types.js';
 
 const ORIGIN = 'https://github.com';
 
@@ -58,6 +58,82 @@ export const gitHubProvider: AssistedLoginProvider = {
     }
   },
   probeLoginState,
+  /**
+   * GitHub renders the `user-login` meta tag on every page for signed-in
+   * visitors, so the imported-cookie probe reads the homepage HTML directly.
+   */
+  probeLoginStateHttp: async (fetchWithSession: ProviderHttpFetch): Promise<LoginState> => {
+    let response: { status: number; body: string };
+    try {
+      response = await fetchWithSession('/', { accept: 'text/html' });
+    } catch (error) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: `网络错误：${(error as Error)?.message || '无法访问 GitHub'}`,
+      };
+    }
+
+    if (response.status === 401) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: false,
+        message: 'HTTP 401（认证被拒绝），请重新导入会话',
+      };
+    }
+    if (response.status === 403) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: 'HTTP 403（访问被拒绝）',
+      };
+    }
+    if (response.status === 429) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: 'HTTP 429（请求被限流）',
+      };
+    }
+    if (response.status !== 200) {
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: true,
+        message: `HTTP ${response.status}（非预期响应）`,
+      };
+    }
+
+    const login = normalizeText(/<meta name="user-login" content="([^"]*)"/i.exec(response.body)?.[1]);
+    const rawUserId = normalizeText(/<meta name="octolytics-dimension-user_id" content="([^"]*)"/i.exec(response.body)?.[1]);
+    const parsedUserId = Number.parseInt(rawUserId, 10);
+    if (!login) {
+      // Anonymous GitHub pages render no user-login meta, so a clean 200 without
+      // it is the site explicitly reporting a signed-out session.
+      return {
+        loggedIn: false,
+        username: null,
+        userId: null,
+        blocked: false,
+        message: '页面未包含登录信息（会话已失效），请重新导入会话',
+      };
+    }
+    return {
+      loggedIn: true,
+      username: login,
+      userId: Number.isFinite(parsedUserId) ? parsedUserId : null,
+      blocked: false,
+    };
+  },
   entryNamePattern: /git\s*hub|github/i,
   entrySelectors: ['[href*="github.com/login/oauth"]', '[href*="github"]', 'button:has-text("GitHub")', 'button:has-text("Github")'],
   entryTextSelectors: [

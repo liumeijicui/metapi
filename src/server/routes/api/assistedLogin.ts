@@ -75,6 +75,31 @@ export async function assistedLoginRoutes(app: FastifyInstance) {
     },
   );
 
+  // Imported provider session: the browser-free path for servers that cannot host
+  // a managed Chrome. The operator pastes a DevTools cookie once and the server
+  // keeps re-running the handoff with it.
+  app.get<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/session',
+    { preHandler: [limitStatus] },
+    async (request) => buildAssistedLoginHandlers(providerIdFrom(request.params)).readImportedSessionState(),
+  );
+
+  app.post<{ Params: ProviderParams; Body: unknown }>(
+    '/api/assisted-login/:provider/session',
+    { preHandler: [limitCapture] },
+    async (request, reply) => {
+      const handlers = buildAssistedLoginHandlers(providerIdFrom(request.params));
+      if (!handlers.session) return reply.code(404).send({ success: false, message: UNKNOWN_PROVIDER_MESSAGE });
+      return handlers.saveImportedSessionState(request.body, reply);
+    },
+  );
+
+  app.delete<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/session',
+    { preHandler: [limitCapture] },
+    async (request) => buildAssistedLoginHandlers(providerIdFrom(request.params)).clearImportedSessionState(),
+  );
+
   // Re-fetch credentials for an existing account. The account page calls this
   // when a token expired, so recovery is a button click instead of hand-editing
   // a token.
@@ -116,6 +141,15 @@ export async function assistedLoginRoutes(app: FastifyInstance) {
 
     app.post(`${prefix}/check-session`, { preHandler: [limitStatus] }, async () =>
       buildAssistedLoginHandlers(providerId).checkSession());
+
+    app.get(`${prefix}/session`, { preHandler: [limitStatus] }, async () =>
+      buildAssistedLoginHandlers(providerId).readImportedSessionState());
+
+    app.post<{ Body: unknown }>(`${prefix}/session`, { preHandler: [limitCapture] }, async (request, reply) =>
+      buildAssistedLoginHandlers(providerId).saveImportedSessionState(request.body, reply));
+
+    app.delete(`${prefix}/session`, { preHandler: [limitCapture] }, async () =>
+      buildAssistedLoginHandlers(providerId).clearImportedSessionState());
 
     app.post<{ Body: unknown }>(`${prefix}/capture`, { preHandler: [limitCapture] }, async (request, reply) =>
       buildAssistedLoginHandlers(providerId).capture(request.body, reply));

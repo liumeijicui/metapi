@@ -242,7 +242,7 @@ export function createAssistedLoginSession(input: {
         loggedIn: false,
         username: null,
         userId: null,
-        blocked: false,
+        blocked: true,
         message: (error as Error)?.message || `无法读取 ${provider.label} 登录状态`,
       };
     }

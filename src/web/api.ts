@@ -1452,6 +1452,22 @@ export const api = {
       method: "POST",
       timeoutMs: 90_000,
     }),
+  // Imported provider session (browser-free path: paste a DevTools cookie header).
+  getAssistedLoginSession: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/session`, {
+      timeoutMs: 60_000,
+    }),
+  saveAssistedLoginSession: (provider: string, raw: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/session`, {
+      method: "POST",
+      body: JSON.stringify({ raw }),
+      timeoutMs: 60_000,
+    }),
+  clearAssistedLoginSession: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/session`, {
+      method: "DELETE",
+      timeoutMs: 30_000,
+    }),
   captureAssistedLoginCredentials: (
     provider: string,
     data: {

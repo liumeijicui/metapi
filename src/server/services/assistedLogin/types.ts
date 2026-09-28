@@ -10,6 +10,15 @@ export type LoginState = {
   message?: string;
 };
 
+/**
+ * Minimal request surface handed to `probeLoginStateHttp`. Providers parse their
+ * own endpoints; transport, proxy, cookie header, and timeout stay with the caller.
+ */
+export type ProviderHttpFetch = (
+  path: string,
+  options?: { accept?: string },
+) => Promise<{ status: number; body: string }>;
+
 export type CapturedCredentials = {
   accessToken: string;
   refreshToken: string | null;
@@ -69,6 +78,11 @@ export type AssistedLoginProvider = {
   isAuthorizationUrl: (url: string) => boolean;
   /** Reads the provider login state from its own probe page. */
   probeLoginState: (page: Page) => Promise<LoginState>;
+  /**
+   * Reads the provider login state over plain HTTP with an imported session
+   * cookie, so a server that cannot host a browser still verifies the session.
+   */
+  probeLoginStateHttp: (fetchWithSession: ProviderHttpFetch) => Promise<LoginState>;
   /** Matchers for the provider entry button on a target site. */
   entryNamePattern: RegExp;
   entrySelectors: string[];

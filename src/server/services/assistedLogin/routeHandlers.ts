@@ -12,6 +12,17 @@ import {
 } from '../siteProxy.js';
 import { assistedLoginSessions } from './sessionRegistry.js';
 import { getAssistedLoginWatcher } from './watchers.js';
+import {
+  applyTransientFallback,
+  clearImportedSession,
+  parsePastedProviderSession,
+  probeImportedSession,
+  readImportedSession,
+  recordImportedSessionVerification,
+  saveImportedSession,
+  type ImportedProviderSession,
+} from './importedSession.js';
+import type { AssistedLoginProvider, LoginState } from './types.js';
 
 export function createAssistedLoginStatusLimiter() {
   return createRateLimitGuard({ bucket: 'assisted-login-status', max: 40, windowMs: 60_000 });
@@ -22,6 +33,41 @@ export function createAssistedLoginCaptureLimiter() {
 }
 
 const UNKNOWN_PROVIDER_MESSAGE = '未知的快捷登录提供方';
+
+/**
+ * Page-driven probes (status view, session read) reuse a recent result for a
+ * short window so navigating in and out of the page cannot hammer the provider
+ * into a rate limit. Imports and the background watcher always probe fresh.
+ * A transient failure falls back to the last verified identity and is reported
+ * as an annotation on an available session, never as a logout.
+ */
+const IMPORTED_PROBE_CACHE_MS = 60_000;
+const importedProbeCache = new Map<string, { at: number; state: LoginState }>();
+
+async function probeImportedSessionCached(
+  provider: AssistedLoginProvider,
+  imported: ImportedProviderSession,
+): Promise<LoginState> {
+  const cached = importedProbeCache.get(provider.id);
+  if (cached && Date.now() - cached.at < IMPORTED_PROBE_CACHE_MS) return cached.state;
+
+  const state = await probeImportedSession(provider, imported.cookieHeader);
+  if (state.blocked) {
+    const resolved = applyTransientFallback(state, imported);
+    importedProbeCache.set(provider.id, { at: Date.now(), state: resolved });
+    return resolved;
+  }
+  if (state.loggedIn) {
+    // Best effort: remember who the session belongs to so later transient
+    // failures can keep reporting a named, available session.
+    void recordImportedSessionVerification(provider.id, {
+      username: state.username,
+      userId: state.userId,
+    }).catch(() => undefined);
+  }
+  importedProbeCache.set(provider.id, { at: Date.now(), state });
+  return state;
+}
 
 /**
  * Confirms a captured credential against the site's own API. A value picked up
@@ -111,23 +157,40 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
       }
 
       const browserState = session.browser.getManagedBrowserState();
+      const imported = await readImportedSession(session.provider.id);
       let loginState;
-      try {
-        loginState = await session.getLoginState();
-      } catch (error) {
-        loginState = {
-          loggedIn: false,
-          username: null,
-          userId: null,
-          blocked: false,
-          message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
-        };
+      if (imported) {
+        // An imported session replaces the managed browser entirely, so a
+        // browser-less server reports the real state instead of "browser missing".
+        try {
+          loginState = await probeImportedSessionCached(session.provider, imported);
+        } catch (error) {
+          loginState = {
+            loggedIn: false,
+            username: null,
+            userId: null,
+            blocked: true,
+            message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
+          };
+        }
+      } else {
+        try {
+          loginState = await session.getLoginState();
+        } catch (error) {
+          loginState = {
+            loggedIn: false,
+            username: null,
+            userId: null,
+            blocked: true,
+            message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
+          };
+        }
       }
 
       // Any page view that confirms a live login refreshes the watcher baseline,
       // so an expiry is only ever reported for a session we saw working.
       if (loginState.loggedIn && !loginState.blocked) {
-        void watcher?.seedBaseline().catch(() => undefined);
+        void watcher?.seedBaseline(loginState).catch(() => undefined);
       }
 
       return {
@@ -140,6 +203,14 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
           profileDir: browserState.profileDir,
         },
         session: loginState,
+        importedSession: imported
+          ? {
+            cookieNames: imported.cookieNames,
+            savedAt: imported.savedAt,
+            hasCsrfToken: !!imported.csrfToken,
+            cookieHeader: imported.cookieHeader,
+          }
+          : null,
         watch: watcher
           ? await watcher.readState()
           : { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null },
@@ -154,6 +225,108 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
     async checkSession() {
       await watcher?.runPass();
       return { success: true, checkedAt: new Date().toISOString() };
+    },
+
+    /**
+     * Reads back the imported provider session and probes it over plain HTTP.
+     * This is the browser-free replacement for "open the login window": the
+     * operator pastes a cookie once and the server reuses it from then on.
+     */
+    async readImportedSessionState() {
+      if (!session) {
+        return { success: false, message: UNKNOWN_PROVIDER_MESSAGE, importedSession: null, loginState: null };
+      }
+      const imported = await readImportedSession(session.provider.id);
+      if (!imported) {
+        return { success: true, importedSession: null, loginState: null };
+      }
+      let loginState: LoginState;
+      try {
+        loginState = await probeImportedSessionCached(session.provider, imported);
+      } catch (error) {
+        loginState = {
+          loggedIn: false,
+          username: null,
+          userId: null,
+          blocked: true,
+          message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
+        };
+      }
+      return {
+        success: true,
+        importedSession: {
+          cookieNames: imported.cookieNames,
+          savedAt: imported.savedAt,
+          hasCsrfToken: !!imported.csrfToken,
+          cookieHeader: imported.cookieHeader,
+        },
+        loginState,
+      };
+    },
+
+    async saveImportedSessionState(body: unknown, reply: any) {
+      if (!session) return reply.code(404).send({ success: false, message: UNKNOWN_PROVIDER_MESSAGE });
+
+      const payload = (body ?? {}) as Record<string, unknown>;
+      const parsed = parsePastedProviderSession(
+        session.provider.id,
+        typeof payload.raw === 'string' ? payload.raw : '',
+      );
+      if (!parsed) {
+        return reply.code(400).send({
+          success: false,
+          message: `没能在粘贴内容里找到 ${session.provider.label} 的会话 Cookie，请确认复制的是已登录请求的 Cookie 头`,
+        });
+      }
+
+      // Verification runs before the write: an unusable paste must never
+      // replace a session that still works.
+      let loginState: LoginState;
+      try {
+        loginState = await probeImportedSession(session.provider, parsed.cookieHeader);
+      } catch (error) {
+        loginState = {
+          loggedIn: false,
+          username: null,
+          userId: null,
+          blocked: true,
+          message: (error as Error)?.message || `无法读取 ${session.provider.label} 登录状态`,
+        };
+      }
+      if (!loginState.loggedIn) {
+        return reply.code(400).send({
+          success: false,
+          message: `检测未通过${loginState.message ? `：${loginState.message}` : ''}，未保存（原有会话保持不变）`,
+          loginState,
+        });
+      }
+
+      const saved = await saveImportedSession(session.provider.id, parsed, {
+        username: loginState.username,
+        userId: loginState.userId,
+      });
+      importedProbeCache.set(session.provider.id, { at: Date.now(), state: loginState });
+
+      // A verified import becomes the watcher baseline, so an expiry is only ever
+      // reported for a session we actually saw working.
+      void watcher?.seedBaseline(loginState).catch(() => undefined);
+
+      return {
+        success: true,
+        importedSession: {
+          cookieNames: saved.cookieNames,
+          savedAt: saved.savedAt,
+          hasCsrfToken: !!saved.csrfToken,
+        },
+        loginState,
+      };
+    },
+
+    async clearImportedSessionState() {
+      if (!session) return { success: false, message: UNKNOWN_PROVIDER_MESSAGE };
+      await clearImportedSession(session.provider.id);
+      importedProbeCache.delete(session.provider.id);
+      return { success: true, importedSession: null };
     },
 
     async capture(body: unknown, reply: any) {
