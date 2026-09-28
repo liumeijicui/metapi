@@ -54,6 +54,8 @@ export type WatchState = {
   lastStatus: 'unknown' | 'logged_in' | 'logged_out';
   lastUsername: string | null;
   lastCheckedAt: string | null;
+  /** Last real keep-alive probe; a page view refreshes `lastCheckedAt` only. */
+  lastKeepAliveAt: string | null;
 };
 
 /**

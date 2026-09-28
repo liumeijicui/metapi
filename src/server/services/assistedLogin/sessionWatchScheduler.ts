@@ -52,7 +52,7 @@ async function readWatchState(key: string): Promise<WatchState> {
     .where(eq(schema.settings.key, key))
     .get();
   if (!row?.value) {
-    return { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null };
+    return { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null, lastKeepAliveAt: null };
   }
   try {
     const parsed = JSON.parse(row.value) as Partial<WatchState>;
@@ -63,9 +63,10 @@ async function readWatchState(key: string): Promise<WatchState> {
       lastStatus,
       lastUsername: typeof parsed.lastUsername === 'string' ? parsed.lastUsername : null,
       lastCheckedAt: typeof parsed.lastCheckedAt === 'string' ? parsed.lastCheckedAt : null,
+      lastKeepAliveAt: typeof parsed.lastKeepAliveAt === 'string' ? parsed.lastKeepAliveAt : null,
     };
   } catch {
-    return { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null };
+    return { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null, lastKeepAliveAt: null };
   }
 }
 
@@ -144,10 +145,14 @@ export function createAssistedLoginWatcher(
     const nextStatus = state.loggedIn ? 'logged_in' : 'logged_out';
     const nextFingerprint = buildUsernameFingerprint(state.username);
 
+    const checkedAt = new Date().toISOString();
     await writeWatchState(key, {
       lastStatus: nextStatus,
       lastUsername: nextFingerprint || previous.lastUsername,
-      lastCheckedAt: new Date().toISOString(),
+      lastCheckedAt: checkedAt,
+      // This pass is a real authenticated request, which is what keeps the
+      // imported token warm, so it owns the keep-alive timestamp.
+      lastKeepAliveAt: checkedAt,
     });
 
     // Only the daytime window pushes a notification: an expiry found at night is
@@ -197,10 +202,14 @@ export function createAssistedLoginWatcher(
     seedBaseline: async (state?: LoginState) => {
       const resolved = state ?? (await readLoginState());
       if (!resolved || resolved.blocked) return;
+      const previousState = await readWatchState(key);
       await writeWatchState(key, {
         lastStatus: resolved.loggedIn ? 'logged_in' : 'logged_out',
-        lastUsername: buildUsernameFingerprint(resolved.username) || (await readWatchState(key)).lastUsername,
+        lastUsername: buildUsernameFingerprint(resolved.username) || previousState.lastUsername,
         lastCheckedAt: new Date().toISOString(),
+        // Seeding a baseline is not a keep-alive pass, so the timestamp of the
+        // last real probe is preserved.
+        lastKeepAliveAt: previousState.lastKeepAliveAt,
       });
     },
     start: () => {

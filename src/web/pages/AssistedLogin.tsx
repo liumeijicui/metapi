@@ -31,6 +31,11 @@ type ImportedSessionInfo = {
   cookieHeader?: string;
 };
 
+type WatchState = {
+  lastStatus: 'unknown' | 'logged_in' | 'logged_out';
+  lastKeepAliveAt: string | null;
+};
+
 const PROVIDER_FALLBACK: Record<string, ProviderInfo> = {
   linuxdo: { id: 'linuxdo', label: 'Linux.do' },
   github: { id: 'github', label: 'GitHub' },
@@ -57,6 +62,7 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
   const [skipModelFetch, setSkipModelFetch] = useState(false);
   const [lastResult, setLastResult] = useState<string>('');
   const [importedSession, setImportedSession] = useState<ImportedSessionInfo | null>(null);
+  const [watch, setWatch] = useState<WatchState | null>(null);
   const [sessionRaw, setSessionRaw] = useState('');
   const [sessionBusy, setSessionBusy] = useState(false);
   const [cookieRevealed, setCookieRevealed] = useState(false);
@@ -70,6 +76,7 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
       ]);
       setSession(statusRes?.session ?? null);
       setImportedSession(statusRes?.importedSession ?? null);
+      setWatch(statusRes?.watch ?? null);
       const rows = Array.isArray(sitesRes) ? sitesRes : [];
       setSites(rows);
       setSelectedSiteId((prev) => {
@@ -314,6 +321,11 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
                 ? ` · ${session.message}`
                 : importedSession ? ' · 会话已加密保存，可长期复用' : ''}
           </span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+          最近保活：{watch?.lastKeepAliveAt
+            ? `${new Date(watch.lastKeepAliveAt).toLocaleString()}${watch.lastStatus === 'logged_in' ? ' · 已登录' : watch.lastStatus === 'logged_out' ? ' · 未登录' : ''}`
+            : '尚未执行（服务启动后会自动进行）'}
         </div>
         {importedSession && (
           <div className="monitor-hint" style={{ padding: '10px 12px' }}>

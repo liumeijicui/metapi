@@ -163,7 +163,7 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
         return {
           browser: { available: false, running: false, connected: false },
           session: { loggedIn: false, username: null, userId: null, blocked: false, message: UNKNOWN_PROVIDER_MESSAGE },
-          watch: { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null },
+          watch: { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null, lastKeepAliveAt: null },
         };
       }
 
@@ -225,7 +225,7 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
           : null,
         watch: watcher
           ? await watcher.readState()
-          : { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null },
+          : { lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null, lastKeepAliveAt: null },
       };
     },
 

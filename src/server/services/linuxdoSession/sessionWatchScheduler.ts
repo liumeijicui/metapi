@@ -16,7 +16,7 @@ export function runLinuxDoSessionWatchPass(): Promise<void> {
 export function readLinuxDoWatchState(): Promise<WatchState> {
   return linuxdoWatcher
     ? linuxdoWatcher.readState()
-    : Promise.resolve({ lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null });
+    : Promise.resolve({ lastStatus: 'unknown', lastUsername: null, lastCheckedAt: null, lastKeepAliveAt: null });
 }
 
 export function seedLinuxDoWatchBaseline(): Promise<void> {
