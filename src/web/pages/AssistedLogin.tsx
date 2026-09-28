@@ -367,8 +367,8 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
           {bindAccount ? '直接写入连接管理。' : '仅展示结果，不写入账号。'}
         </div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-          {provider.label} 会话会被加密持久化并长期复用。系统每 30 分钟自动检查一次登录状态，
-          失效时会按「通知设置」发送提醒，届时重新粘贴一次 Cookie 即可恢复。
+          {provider.label} 会话会被加密持久化并长期复用，系统会在 10:00–21:00 每 30–60 分钟、夜间每 2–3 小时随机保活一次；
+          若在 10:00–21:00 检测到失效，会按「通知设置」发送提醒，届时重新粘贴一次 Cookie 即可恢复。
         </div>
       </div>
     </div>

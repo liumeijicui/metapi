@@ -7,8 +7,38 @@ import { createAssistedLoginSession } from './sessionService.js';
 import { probeImportedSession, readImportedSession } from './importedSession.js';
 import type { AssistedLoginProviderId, LoginState, WatchState } from './types.js';
 
-const SESSION_WATCH_INTERVAL_MS = 30 * 60 * 1000;
 const SETTLE_TIMEOUT_MS = 90_000;
+
+/**
+ * The local-time window (10:00–21:00) that gets the frequent keep-alive cadence
+ * and is the only one allowed to push an expiry notification.
+ */
+const DAYTIME_WINDOW_START_HOUR = 10;
+const DAYTIME_WINDOW_END_HOUR = 21;
+
+/**
+ * Random keep-alive cadence: 30–60 minutes during the day, 2–3 hours at night.
+ * The jitter keeps the periodic token use from looking like a fixed schedule.
+ */
+const DAYTIME_KEEP_ALIVE_RANGE_MS = [30 * 60 * 1000, 60 * 60 * 1000] as const;
+const NIGHT_KEEP_ALIVE_RANGE_MS = [2 * 60 * 60 * 1000, 3 * 60 * 60 * 1000] as const;
+
+/** True while the local clock is inside the 10:00–21:00 window. */
+export function isWithinDaytimeWindow(now: Date = new Date()): boolean {
+  const hour = now.getHours();
+  return hour >= DAYTIME_WINDOW_START_HOUR && hour < DAYTIME_WINDOW_END_HOUR;
+}
+
+/**
+ * Delay until the next keep-alive probe of the imported session. Each probe is
+ * a real authenticated request, so the cadence is what keeps the token warm.
+ */
+export function nextKeepAliveDelayMs(now: Date = new Date()): number {
+  const [min, max] = isWithinDaytimeWindow(now)
+    ? DAYTIME_KEEP_ALIVE_RANGE_MS
+    : NIGHT_KEEP_ALIVE_RANGE_MS;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
 
 function buildUsernameFingerprint(username: string | null): string {
   if (!username) return '';
@@ -120,7 +150,9 @@ export function createAssistedLoginWatcher(
       lastCheckedAt: new Date().toISOString(),
     });
 
-    if (previous.lastStatus === 'logged_in' && nextStatus === 'logged_out') {
+    // Only the daytime window pushes a notification: an expiry found at night is
+    // still recorded in the status page, but it never wakes the operator.
+    if (previous.lastStatus === 'logged_in' && nextStatus === 'logged_out' && isWithinDaytimeWindow()) {
       await sendNotification(
         `${provider.label} 会话已失效`,
         `${provider.label} 登录状态已失效，依赖该会话的站点快捷登录将无法自动完成。\n`
@@ -137,6 +169,19 @@ export function createAssistedLoginWatcher(
       .finally(() => {
         passInFlight = null;
       });
+  }
+
+  /**
+   * Re-arms the next keep-alive pass. A one-shot timer rather than an interval
+   * because the delay depends on the hour the next pass lands in.
+   */
+  function scheduleNextPass(): void {
+    timer = setTimeout(() => {
+      timer = null;
+      schedulePass();
+      scheduleNextPass();
+    }, nextKeepAliveDelayMs());
+    timer.unref?.();
   }
 
   return {
@@ -160,8 +205,7 @@ export function createAssistedLoginWatcher(
     },
     start: () => {
       if (timer) return;
-      timer = setInterval(schedulePass, SESSION_WATCH_INTERVAL_MS);
-      timer.unref?.();
+      scheduleNextPass();
 
       // Seed the baseline shortly after boot so a restart does not fire a false
       // "session expired" notification before the first real check.
@@ -169,7 +213,7 @@ export function createAssistedLoginWatcher(
     },
     stop: () => {
       if (!timer) return;
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = null;
     },
   };
