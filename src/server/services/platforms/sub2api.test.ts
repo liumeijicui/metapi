@@ -80,10 +80,92 @@ describe('Sub2ApiAdapter', () => {
     expect(await adapter.detect(baseUrl)).toBe(false);
   });
 
-  it('returns unsupported for checkin', async () => {
-    const result = await adapter.checkin('http://localhost', 'token');
+  it('returns unsupported for checkin when the platform exposes no check-in route', async () => {
+    await startServer((_req, res) => { res.writeHead(404).end(); });
+
+    const result = await adapter.checkin(baseUrl, 'token');
     expect(result.success).toBe(false);
     expect(result.message).toContain('not supported');
+  });
+
+  it('checks in on the platform itself when the day is still claimable', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, checked_in_today: false, turnstile_required: false } }));
+        return;
+      }
+      if (req.url === '/api/v1/check-in' && req.method === 'POST') {
+        posted = true;
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          expect(JSON.parse(rawBody || '{}')).toEqual({ turnstile_token: '' });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 0, data: { checked_in_today: true, today_reward: 8 } }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(true);
+    expect(result).toMatchObject({ success: true, reward: '8' });
+    expect(result.message).toContain('8');
+  });
+
+  it('reports the already-checked-in day without posting', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, checked_in_today: true, today_reward: 8 } }));
+        return;
+      }
+      if (req.url === '/api/v1/check-in') posted = true;
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('今日已签到');
+  });
+
+  it('reports the Turnstile gate on the platform check-in', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, checked_in_today: false, turnstile_required: true } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('Turnstile');
+  });
+
+  it('reports the disabled platform check-in as unsupported', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: false, checked_in_today: false } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('未启用');
   });
 
   it('logs in with email and password via /api/v1/auth/login', async () => {

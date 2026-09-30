@@ -28,10 +28,10 @@ function normalizeBaseUrl(baseUrl: string): string {
  * Sub2API adapter.
  *
  * Sub2API uses JWT-based auth with endpoints under /api/v1/*.
- * Login accepts the site's email/password form. Check-in does not exist on the
- * platform itself: sites that run a separate welfare check-in service declare
- * it as `externalCheckinUrl` and the welfare session is captured on the account
- * (`extraConfig.externalCheckin`).
+ * Login accepts the site's email/password form. Sites that run the platform's
+ * own daily check-in are served by /api/v1/check-in; sites that delegate it to
+ * a separate welfare service declare it as `externalCheckinUrl` and the
+ * welfare session is captured on the account (`extraConfig.externalCheckin`).
  * Balance is derived from a USD amount returned by /api/v1/auth/me.
  */
 export class Sub2ApiAdapter extends BasePlatformAdapter {
@@ -827,6 +827,72 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   }
 
   /**
+   * Checks in on the platform's own daily check-in, when it exposes one.
+   *
+   * `/api/v1/check-in/status` is the only honest source for the day's state:
+   * `POST /api/v1/check-in` answers with the resulting state in both the
+   * "claimed just now" and "claimed earlier" cases, so the status gate keeps
+   * a repeat run from looking like a fresh reward. Sites without the route
+   * (the platform does not ship a check-in everywhere) keep answering the
+   * historical "not supported" verdict.
+   */
+  private async checkinOnPlatform(baseUrl: string, accessToken: string): Promise<CheckinResult> {
+    const normalizedBase = normalizeBaseUrl(baseUrl);
+    const headers = this.buildAuthHeader(accessToken);
+
+    let status: any;
+    try {
+      status = this.parseSub2ApiEnvelope<any>(
+        await this.fetchJson<any>(`${normalizedBase}/api/v1/check-in/status`, { headers }),
+        '/api/v1/check-in/status',
+      );
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes('HTTP 404')) {
+        return { success: false, message: 'Check-in is not supported by Sub2API' };
+      }
+      return { success: false, message: `check-in status failed: ${raw}` };
+    }
+
+    if (status?.enabled === false) {
+      return { success: false, message: '站点签到未启用' };
+    }
+    if (status?.checked_in_today === true) {
+      return { success: false, message: '今日已签到' };
+    }
+    if (status?.turnstile_required === true) {
+      return { success: false, message: '站点开启了 Turnstile 校验，需要人工签到' };
+    }
+
+    let payload: any;
+    try {
+      payload = this.parseSub2ApiEnvelope<any>(
+        await this.fetchJson<any>(`${normalizedBase}/api/v1/check-in`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ turnstile_token: '' }),
+        }),
+        '/api/v1/check-in',
+      );
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      return { success: false, message: `check-in failed: ${raw}` };
+    }
+
+    if (payload?.checked_in_today !== true) {
+      return { success: false, message: 'check-in did not register' };
+    }
+    const reward = typeof payload.today_reward === 'number' && Number.isFinite(payload.today_reward)
+      ? payload.today_reward
+      : 0;
+    return {
+      success: true,
+      message: reward > 0 ? `签到成功，获得 $${reward}` : '签到成功',
+      ...(reward > 0 ? { reward: String(reward) } : {}),
+    };
+  }
+
+  /**
    * Checks in on the site's external welfare service, when one is declared.
    *
    * The welfare service is not Sub2API: it authenticates through its own
@@ -835,14 +901,14 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
    * login payload reports as the platform user id).
    */
   async checkin(
-    _baseUrl: string,
-    _accessToken: string,
+    baseUrl: string,
+    accessToken: string,
     platformUserId?: number,
     context?: CheckinContext,
   ): Promise<CheckinResult> {
     const externalCheckinUrl = (context?.externalCheckinUrl || '').trim();
     if (!externalCheckinUrl) {
-      return { success: false, message: 'Check-in is not supported by Sub2API' };
+      return this.checkinOnPlatform(baseUrl, accessToken);
     }
 
     const session = getExternalCheckinSessionFromExtraConfig(context?.extraConfig);
