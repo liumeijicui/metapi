@@ -10,6 +10,7 @@ import {
   extractContextLengthsFromPayload,
   setModelContextLengths,
 } from '../modelContextLengthCache.js';
+import { normalizeCheckinReward, quotaToUsd } from './quota.js';
 
 /**
  * A refresh cookie yields a short-lived access token. Exchanging it on every
@@ -18,6 +19,9 @@ import {
  */
 const REFRESH_TOKEN_CACHE = new Map<string, { accessToken: string; expiresAtMs: number }>();
 const REFRESH_TOKEN_CACHE_LEAD_MS = 60 * 1000;
+
+/** Quota units per dollar used by new-api when it reports balances and awards. */
+const QUOTA_PER_UNIT = 500000;
 
 type JsonFetchOutcome<T> = {
   data: T | null;
@@ -514,11 +518,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private parseBalance(data: any): BalanceInfo {
-    const quota = (data?.quota || 0) / 500000;
-    const used = (data?.used_quota || 0) / 500000;
+    const quota = quotaToUsd(data?.quota || 0, QUOTA_PER_UNIT);
+    const used = quotaToUsd(data?.used_quota || 0, QUOTA_PER_UNIT);
     const total = quota + used;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 500000) : undefined;
-    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? (data.today_quota_consumption / 500000) : undefined;
+    const todayIncome = Number.isFinite(data?.today_income) ? quotaToUsd(data.today_income, QUOTA_PER_UNIT) : undefined;
+    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? quotaToUsd(data.today_quota_consumption, QUOTA_PER_UNIT) : undefined;
     return { balance: quota, used, quota: total, todayIncome, todayQuotaConsumption };
   }
 
@@ -866,12 +870,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
   /**
    * Pulls the awarded quota out of a check-in response. Official new-api
    * deployments put it in `data.reward`; the QuantumNous-style forks report it
-   * as `data.quota_awarded`.
+   * as `data.quota_awarded`. Both are raw quota, so they are scaled to the
+   * dollar-based reward column the same way `parseBalance` scales balances.
    */
   private extractCheckinReward(payload: any): string | undefined {
     const raw = payload?.data?.reward ?? payload?.data?.quota_awarded;
-    if (raw === undefined || raw === null) return undefined;
-    return String(raw);
+    return normalizeCheckinReward(raw, QUOTA_PER_UNIT);
   }
 
   private isCookieSessionFailureMessage(message?: string | null): boolean {
@@ -1479,7 +1483,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
             return {
               success: true,
               message: signInRes.message || 'checked in',
-              reward: signInRes.data?.reward?.toString(),
+              reward: this.extractCheckinReward(signInRes),
             };
           }
           const signInMessage = this.extractResponseMessage(signInRes);

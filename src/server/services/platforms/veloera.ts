@@ -4,6 +4,10 @@ import {
   extractContextLengthsFromPayload,
   setModelContextLengths,
 } from '../modelContextLengthCache.js';
+import { normalizeCheckinReward, quotaToUsd } from './quota.js';
+
+/** Quota units per dollar used by veloera when it reports balances and awards. */
+const QUOTA_PER_UNIT = 1000000;
 
 export class VeloeraAdapter extends BasePlatformAdapter {
   readonly platformName = 'veloera';
@@ -38,7 +42,11 @@ export class VeloeraAdapter extends BasePlatformAdapter {
         headers: this.veloeraHeaders(accessToken, platformUserId),
       });
       if (res?.success) {
-        return { success: true, message: res.message || 'Check-in successful', reward: res.data?.reward?.toString() };
+        return {
+          success: true,
+          message: res.message || 'Check-in successful',
+          reward: normalizeCheckinReward(res.data?.reward, QUOTA_PER_UNIT),
+        };
       }
       return { success: false, message: res?.message || 'Check-in failed' };
     } catch (err: any) {
@@ -51,10 +59,10 @@ export class VeloeraAdapter extends BasePlatformAdapter {
       headers: this.veloeraHeaders(accessToken, platformUserId),
     });
     const data = res?.data;
-    const quota = (data?.quota || 0) / 1000000;
-    const used = (data?.used_quota || 0) / 1000000;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 1000000) : undefined;
-    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? (data.today_quota_consumption / 1000000) : undefined;
+    const quota = quotaToUsd(data?.quota || 0, QUOTA_PER_UNIT);
+    const used = quotaToUsd(data?.used_quota || 0, QUOTA_PER_UNIT);
+    const todayIncome = Number.isFinite(data?.today_income) ? quotaToUsd(data.today_income, QUOTA_PER_UNIT) : undefined;
+    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? quotaToUsd(data.today_quota_consumption, QUOTA_PER_UNIT) : undefined;
     return { balance: quota - used, used, quota, todayIncome, todayQuotaConsumption };
   }
 

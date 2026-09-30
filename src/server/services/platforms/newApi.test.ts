@@ -951,7 +951,7 @@ describe('NewApiAdapter', () => {
     expect(result).toEqual({
       success: true,
       message: '签到成功',
-      reward: '1787510',
+      reward: '3.57502',
     });
     expect(requests.some((r) => r.url === '/api/user/daily')).toBe(true);
     expect(requests.some((r) => r.url === '/api/user/checkin')).toBe(false);
@@ -973,7 +973,7 @@ describe('NewApiAdapter', () => {
     expect(result).toEqual({
       success: true,
       message: 'checked-in-legacy',
-      reward: '123',
+      reward: '0.000246',
     });
     const dailyIndex = requests.findIndex((r) => r.url === '/api/user/daily');
     const legacyIndex = requests.findIndex((r) => r.url === '/api/user/checkin');
@@ -988,7 +988,7 @@ describe('NewApiAdapter', () => {
     expect(result).toEqual({
       success: true,
       message: 'checked-in-daily-cookie',
-      reward: '555',
+      reward: '0.00111',
     });
     expect(requests.some((r) => r.url === '/api/user/checkin')).toBe(false);
   });
