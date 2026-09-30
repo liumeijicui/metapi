@@ -28,6 +28,10 @@ export const SITES_REQUIRING_SYSTEM_PROXY: readonly string[] = [
   // the proxy exit keeps daily balance and check-in calls stable.
   'kunyou.asia',
   'cloudcode-pa.googleapis.com',
+  // The site answers direct requests, but its Turnstile challenge loads from
+  // brunhild.challenges.cloudflare.com, which does not resolve on this network.
+  // The browser check-in therefore needs the proxy for the challenge script.
+  'chinahk.qzz.io',
 ];
 
 function normalizeHost(value: string): string {

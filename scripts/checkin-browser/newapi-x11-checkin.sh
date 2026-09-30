@@ -35,19 +35,47 @@ PROXY=${CHECKIN_PROXY_URL:-}
 WANTED_DISPLAY=${CHECKIN_DISPLAY:-:99}
 BIN=${CHROMIUM_BIN:-/usr/bin/chromium-browser}
 
-# Pixel coordinates of the elements this flow drives. They belong to the
-# window geometry set below (1280x900 at 0,0 on a 1440x1000 display) and must
-# be revisited if that geometry ever changes.
-USERNAME_XY="640 546"
-PASSWORD_XY="640 616"
-LOGIN_SHIELD_XY="458 745"
-LOGIN_BUTTON_XY="640 672"
-CHECKIN_BUTTON_XY="1166 506"
-MODAL_SHIELD_XY="509 550"
-CHECKIN_BUTTON_BOX="1120 498 92 20"
-MODAL_TITLE_BOX="437 425 150 26"
-PROFILE_MARKER_BOX="960 497 130 22"
-LOGIN_TICK_BOX="441 734 24 24"
+# Pixel coordinates of the elements this flow drives. They belong to the window
+# geometry set below (1280x900 at 0,0 on a 1440x1000 display) and must be
+# revisited if that geometry ever changes.
+#
+# Two front-end families are in the wild: the classic dashboard shipped with
+# older New API builds, and the React one whose sign-in form is centred. They
+# put the same controls at different coordinates, so each family has its own
+# preset and `classic` stays the default.
+apply_layout() {
+  case "$1" in
+    rc)
+      USERNAME_XY="640 442"
+      PASSWORD_XY="640 512"
+      LOGIN_SHIELD_XY="455 641"
+      LOGIN_BUTTON_XY="640 567"
+      CHECKIN_BUTTON_XY="1192 454"
+      MODAL_SHIELD_XY="509 525"
+      CHECKIN_BUTTON_BOX="1150 437 90 34"
+      MODAL_TITLE_BOX="440 398 90 24"
+      PROFILE_MARKER_BOX="340 192 220 22"
+      LOGIN_TICK_BOX="441 625 28 28"
+      ;;
+    *)
+      USERNAME_XY="640 546"
+      PASSWORD_XY="640 616"
+      LOGIN_SHIELD_XY="458 745"
+      LOGIN_BUTTON_XY="640 672"
+      CHECKIN_BUTTON_XY="1166 506"
+      MODAL_SHIELD_XY="509 550"
+      CHECKIN_BUTTON_BOX="1120 498 92 20"
+      MODAL_TITLE_BOX="437 425 150 26"
+      PROFILE_MARKER_BOX="960 497 130 22"
+      LOGIN_TICK_BOX="441 734 24 24"
+      ;;
+  esac
+}
+
+case "$SITE" in
+  *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
+  *) apply_layout classic ;;
+esac
 
 mkdir -p "$LOG"
 say() { echo "[$(date '+%F %T')] $*" >> "$LOG/run.log"; }
@@ -233,21 +261,34 @@ login() {
 }
 
 nav "$SITE/profile" 8
-snap cur; measure; rm -f "$LOG/cur.ppm"
+
+# Waits for the profile page to render after a navigation.
+wait_profile() {
+  local n=0
+  snap cur; measure; rm -f "$LOG/cur.ppm"
+  while [ "$profile" = 0 ] && [ "$n" -lt 2 ]; do
+    sleep 3
+    snap cur; measure; rm -f "$LOG/cur.ppm"
+    n=$((n+1))
+  done
+}
+
+wait_profile
 say "state1=$st modal=$modal profile=$profile"
-n=0
-while [ "$profile" = 0 ] && [ "$n" -lt 2 ]; do sleep 3; snap cur; measure; rm -f "$LOG/cur.ppm"; n=$((n+1)); done
 
 if [ "$profile" = 0 ]; then
-  if ! login; then
-    nav "$SITE/profile" 8
-    snap cur; measure; rm -f "$LOG/cur.ppm"
-    if [ "$profile" = 0 ]; then
-      snap result
-      say "sign-in never reached the profile page"
-      emit false false login_failed
-      exit 1
-    fi
+  # Always return to the page that carries the check-in card afterwards: the
+  # sign-in may land on a different start page (the rc build opens its
+  # overview), and even a failed attempt deserves one last look before the
+  # flow gives up.
+  login || true
+  nav "$SITE/profile" 8
+  wait_profile
+  if [ "$profile" = 0 ]; then
+    snap result
+    say "sign-in never reached the profile page"
+    emit false false login_failed
+    exit 1
   fi
 fi
 
