@@ -98,7 +98,7 @@ export class AgentRouterAdapter extends NewApiAdapter {
     for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt += 1) {
       const login = provider === 'github'
         ? await this.loginWithGitHub(baseUrl)
-        : await this.loginWithLinuxDo(baseUrl);
+        : await this.loginWithLinuxDo(baseUrl, platformUserId);
       if (!login.ok) {
         lastMessage = login.message;
         continue;
@@ -220,22 +220,15 @@ export class AgentRouterAdapter extends NewApiAdapter {
   }
 
   /** Replays the Linux.do OAuth login in the managed Linux.do browser. */
-  private async loginWithLinuxDo(baseUrl: string): Promise<LoginOutcome> {
+  private async loginWithLinuxDo(baseUrl: string, platformUserId?: number): Promise<LoginOutcome> {
     const clientId = await this.readOAuthClientId(baseUrl, 'linuxdo');
     if (!clientId) return { ok: false, message: '站点未启用 Linux.do 登录' };
-    const state = await this.readOAuthState(baseUrl);
-    if (!state) return { ok: false, message: '站点未返回 OAuth state' };
 
-    const authorize = new URL('https://connect.linux.do/oauth2/authorize');
-    authorize.search = new URLSearchParams({
-      response_type: 'code',
-      client_id: clientId,
-      state,
-    }).toString();
-
-    // Imported lazily: the browser stack is only needed for Linux.do accounts.
+    // The state and the sign-out both have to happen inside the browser, so the
+    // whole handshake is delegated. Imported lazily: the browser stack is only
+    // needed for Linux.do accounts.
     const { loginAgentRouterWithLinuxDo } = await import('../assistedLogin/sites/agentRouter.js');
-    return loginAgentRouterWithLinuxDo(String(authorize));
+    return loginAgentRouterWithLinuxDo({ baseUrl, clientId, expectedUserId: platformUserId });
   }
 
   private async readOAuthState(baseUrl: string): Promise<string | null> {

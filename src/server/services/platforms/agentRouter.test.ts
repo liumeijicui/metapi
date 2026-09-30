@@ -210,10 +210,11 @@ describe('AgentRouterAdapter', () => {
     expect(result.success).toBe(true);
     expect(githubAuthorizeCalls()).toHaveLength(0);
     expect(linuxdoLoginMock).toHaveBeenCalledTimes(1);
-    const authorizeUrl = String(linuxdoLoginMock.mock.calls[0][0]);
-    expect(authorizeUrl).toContain('connect.linux.do/oauth2/authorize');
-    expect(authorizeUrl).toContain('client_id=linuxdo-client-id');
-    expect(authorizeUrl).toContain('state=state-token');
+    expect(linuxdoLoginMock.mock.calls[0][0]).toEqual({
+      baseUrl: BASE_URL,
+      clientId: 'linuxdo-client-id',
+      expectedUserId: 116261,
+    });
   });
 
   it('surfaces a failed Linux.do browser login', async () => {
