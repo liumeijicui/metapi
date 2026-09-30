@@ -56,6 +56,11 @@ apply_layout() {
       MODAL_TITLE_BOX="440 398 90 24"
       PROFILE_MARKER_BOX="340 192 220 22"
       LOGIN_TICK_BOX="441 625 28 28"
+      # The rc builds render fine without the "unsupported command-line flag"
+      # infobar, and that bar would shift every element below it. The classic
+      # preset was measured with the bar visible, so only this layout asks for
+      # --test-type, which is the switch that suppresses it.
+      EXTRA_LAUNCH_FLAGS="--test-type"
       ;;
     *)
       USERNAME_XY="640 546"
@@ -68,6 +73,7 @@ apply_layout() {
       MODAL_TITLE_BOX="437 425 150 26"
       PROFILE_MARKER_BOX="960 497 130 22"
       LOGIN_TICK_BOX="441 734 24 24"
+      EXTRA_LAUNCH_FLAGS=""
       ;;
   esac
 }
@@ -152,14 +158,14 @@ rm -f "$PROFILE"/Singleton*
 mkdir -p "$PROFILE"
 
 if [ -n "$PROXY" ]; then
-  setsid "$BIN" --user-data-dir="$PROFILE" --proxy-server="$PROXY" \
+  setsid "$BIN" --user-data-dir="$PROFILE" --proxy-server="$PROXY" $EXTRA_LAUNCH_FLAGS \
     --no-first-run --no-default-browser-check \
     --hide-crash-restore-bubble --disable-save-password-bubble --password-store=basic \
     --disable-blink-features=AutomationControlled \
     --window-size=1280,900 --window-position=0,0 \
     about:blank < /dev/null > /dev/null 2>&1 &
 else
-  setsid "$BIN" --user-data-dir="$PROFILE" \
+  setsid "$BIN" --user-data-dir="$PROFILE" $EXTRA_LAUNCH_FLAGS \
     --no-first-run --no-default-browser-check \
     --hide-crash-restore-bubble --disable-save-password-bubble --password-store=basic \
     --disable-blink-features=AutomationControlled \
