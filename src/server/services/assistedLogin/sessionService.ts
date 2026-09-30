@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { createManagedBrowser } from './browserManager.js';
+import { captureHyperGithubCredentials, supportsHyperGithubLogin } from './sites/hyper.js';
 import type { AssistedLoginProvider, CaptureResult, CapturedCredentials, LoginState } from './types.js';
 
 const NAVIGATION_TIMEOUT_MS = 45_000;
@@ -721,6 +722,8 @@ export function createAssistedLoginSession(input: {
     name: string;
     value: string;
   }): Promise<boolean> {
+    // HTTP captures have no browser cookie jar; the account already holds the rotated value.
+    if (supportsHyperGithubLogin(input.siteUrl, provider.id)) return false;
     const name = (input.name || '').trim();
     const value = (input.value || '').trim();
     if (!name || !value) return false;
@@ -791,6 +794,10 @@ export function createAssistedLoginSession(input: {
       .get();
     if (!site) {
       return { status: 'site_not_found', credentials: null, message: '站点不存在' };
+    }
+
+    if (supportsHyperGithubLogin(site.url, provider.id)) {
+      return withFlowLock(flowLock, captureHyperGithubCredentials);
     }
 
     let context: import('playwright-core').BrowserContext;

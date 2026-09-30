@@ -1,7 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
-import { listOAuthProviderDefinitions, type OAuthProviderDefinition } from './providers.js';
+import type { OAuthProviderDefinition } from './providers.js';
 
 function isUniqueConstraintError(error: unknown): boolean {
   if (!error) return false;
@@ -51,12 +51,5 @@ export async function ensureOauthProviderSite(definition: OAuthProviderDefinitio
     )).get();
     if (recovered) return recovered;
     throw error;
-  }
-}
-
-export async function ensureOauthProviderSitesExist(): Promise<void> {
-  const definitions = listOAuthProviderDefinitions();
-  for (const definition of definitions) {
-    await ensureOauthProviderSite(definition);
   }
 }
