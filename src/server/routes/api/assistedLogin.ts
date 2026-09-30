@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { assistedLoginSessions } from '../../services/assistedLogin/sessionRegistry.js';
 import { getAssistedLoginWatcher } from '../../services/assistedLogin/watchers.js';
 import {
@@ -6,9 +7,21 @@ import {
   createAssistedLoginCaptureLimiter,
   createAssistedLoginStatusLimiter,
 } from '../../services/assistedLogin/routeHandlers.js';
+import {
+  startLiveLogin,
+  getLiveLoginStatus,
+  getLiveLoginFrame,
+  sendLiveLoginInput,
+  finishLiveLogin,
+  stopLiveLogin,
+} from '../../services/assistedLogin/liveLogin.js';
 
 const limitStatus = createAssistedLoginStatusLimiter();
 const limitCapture = createAssistedLoginCaptureLimiter();
+
+// The remote-login view polls frames as fast as it can paint, so this bucket is
+// deliberately far larger than the interactive limits above.
+const limitLiveFrame = createRateLimitGuard({ bucket: 'assisted-login-live-frame', max: 1800, windowMs: 60_000 });
 
 const UNKNOWN_PROVIDER_MESSAGE = '未知的快捷登录提供方';
 
@@ -123,6 +136,88 @@ export async function assistedLoginRoutes(app: FastifyInstance) {
     },
   );
 
+  app.post<{ Params: ProviderParams; Body: unknown }>(
+    '/api/assisted-login/:provider/live/start',
+    { preHandler: [limitStatus] },
+    async (request, reply) => {
+      const providerId = providerIdFrom(request.params);
+      if (!buildAssistedLoginHandlers(providerId).session) {
+        return reply.code(404).send({ success: false, message: UNKNOWN_PROVIDER_MESSAGE });
+      }
+      const payload = (request.body ?? {}) as Record<string, unknown>;
+      const targetUrl = typeof payload.url === 'string' ? payload.url : undefined;
+      try {
+        return { success: true, ...(await startLiveLogin(providerId, targetUrl)) };
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '无法启动远程登录' });
+      }
+    },
+  );
+
+  app.post<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/live/status',
+    { preHandler: [limitStatus] },
+    async (request) => ({ success: true, ...getLiveLoginStatus(providerIdFrom(request.params)) }),
+  );
+
+  // Returns a raw JPEG so the client can paint it straight into an <img>.
+  app.get<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/live/frame',
+    { preHandler: [limitLiveFrame] },
+    async (request, reply) => {
+      const providerId = providerIdFrom(request.params);
+      if (!buildAssistedLoginHandlers(providerId).session) {
+        return reply.code(404).send({ success: false, message: UNKNOWN_PROVIDER_MESSAGE });
+      }
+      try {
+        const result = await getLiveLoginFrame(providerId);
+        if (!result) return reply.code(409).send({ success: false, message: '远程登录窗口未打开' });
+        return reply
+          .header('Content-Type', 'image/jpeg')
+          .header('Cache-Control', 'no-store, no-cache, must-revalidate')
+          .header('X-Live-Url', encodeURIComponent(result.url))
+          .send(result.frame);
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '截取画面失败' });
+      }
+    },
+  );
+
+  app.post<{ Params: ProviderParams; Body: unknown }>(
+    '/api/assisted-login/:provider/live/input',
+    { preHandler: [limitStatus] },
+    async (request, reply) => {
+      try {
+        return { success: true, ...(await sendLiveLoginInput(providerIdFrom(request.params), request.body)) };
+      } catch (error) {
+        return reply.code(400).send({ success: false, message: (error as Error)?.message || '输入转发失败' });
+      }
+    },
+  );
+
+  // Detects the completed provider login, harvests the cookies it produced and
+  // stores them as the imported session.
+  app.post<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/live/finish',
+    { preHandler: [limitStatus] },
+    async (request, reply) => {
+      try {
+        return { success: true, ...(await finishLiveLogin(providerIdFrom(request.params))) };
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '获取会话失败' });
+      }
+    },
+  );
+
+  app.post<{ Params: ProviderParams }>(
+    '/api/assisted-login/:provider/live/stop',
+    { preHandler: [limitStatus] },
+    async (request) => {
+      await stopLiveLogin(providerIdFrom(request.params));
+      return { success: true };
+    },
+  );
+
   // Legacy aliases (identical handlers, fixed provider id).
   for (const providerId of ['linuxdo', 'github'] as const) {
     const prefix = `/api/${providerId}`;
@@ -159,5 +254,55 @@ export async function assistedLoginRoutes(app: FastifyInstance) {
 
     app.post<{ Body: unknown }>(`${prefix}/refresh-account`, { preHandler: [limitCapture] }, async (request, reply) =>
       buildAssistedLoginHandlers(providerId).refreshAccount(request.body, reply));
+
+    app.post(`${prefix}/live/start`, { preHandler: [limitStatus] }, async (request, reply) => {
+      const payload = (request.body ?? {}) as Record<string, unknown>;
+      const targetUrl = typeof payload.url === 'string' ? payload.url : undefined;
+      try {
+        return { success: true, ...(await startLiveLogin(providerId, targetUrl)) };
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '无法启动远程登录' });
+      }
+    });
+
+    app.post(`${prefix}/live/status`, { preHandler: [limitStatus] }, async () => ({
+      success: true,
+      ...getLiveLoginStatus(providerId),
+    }));
+
+    app.get(`${prefix}/live/frame`, { preHandler: [limitLiveFrame] }, async (_request, reply) => {
+      try {
+        const result = await getLiveLoginFrame(providerId);
+        if (!result) return reply.code(409).send({ success: false, message: '远程登录窗口未打开' });
+        return reply
+          .header('Content-Type', 'image/jpeg')
+          .header('Cache-Control', 'no-store, no-cache, must-revalidate')
+          .header('X-Live-Url', encodeURIComponent(result.url))
+          .send(result.frame);
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '截取画面失败' });
+      }
+    });
+
+    app.post(`${prefix}/live/input`, { preHandler: [limitStatus] }, async (request, reply) => {
+      try {
+        return { success: true, ...(await sendLiveLoginInput(providerId, request.body)) };
+      } catch (error) {
+        return reply.code(400).send({ success: false, message: (error as Error)?.message || '输入转发失败' });
+      }
+    });
+
+    app.post(`${prefix}/live/finish`, { preHandler: [limitStatus] }, async (_request, reply) => {
+      try {
+        return { success: true, ...(await finishLiveLogin(providerId)) };
+      } catch (error) {
+        return reply.code(500).send({ success: false, message: (error as Error)?.message || '获取会话失败' });
+      }
+    });
+
+    app.post(`${prefix}/live/stop`, { preHandler: [limitStatus] }, async () => {
+      await stopLiveLogin(providerId);
+      return { success: true };
+    });
   }
 }

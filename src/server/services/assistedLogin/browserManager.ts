@@ -24,6 +24,8 @@ export type ManagedBrowser = {
   ensureManagedBrowserContext: () => Promise<BrowserContext>;
   getManagedBrowserState: () => ManagedBrowserState;
   closeManagedBrowser: () => Promise<void>;
+  /** Postpones the idle shutdown while an interactive view is still in use. */
+  keepAlive: () => void;
 };
 
 type Runtime = {
@@ -35,6 +37,13 @@ type Runtime = {
 };
 
 const PORT_FILE_NAME = 'debug-port';
+
+/**
+ * How long a managed Chrome may sit unused before it is shut down. Login is an
+ * interactive, minute-scale task, so a short window keeps the session usable
+ * without paying ~800 MB of resident Chromium around the clock.
+ */
+const BROWSER_IDLE_CLOSE_MS = 5 * 60 * 1000;
 
 /**
  * A cookie that records which profile owns a browser. It lives on a hostname
@@ -70,6 +79,15 @@ export function createManagedBrowser(input: {
   };
 
   let launchPromise: Promise<BrowserContext> | null = null;
+
+  /**
+   * A managed Chrome holds a few hundred megabytes, and a login window is only
+   * needed for the seconds it takes someone to sign in. Leaving it resident on a
+   * small server is what previously pushed this host into swap, so the browser is
+   * closed once nothing has touched it for a while. Anything that needs it again
+   * simply relaunches through `ensureManagedBrowserContext`.
+   */
+  let idleTimer: NodeJS.Timeout | null = null;
 
   function getBrowserProfileDir(): string {
     return resolve(config.dataDir, input.profileDirName);
@@ -212,12 +230,33 @@ export function createManagedBrowser(input: {
     throw new Error(`Unable to attach to the managed browser: ${(lastError as Error)?.message || 'timeout'}`);
   }
 
+  function cancelIdleClose(): void {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  }
+
+  function scheduleIdleClose(): void {
+    cancelIdleClose();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      void closeManagedBrowser().catch(() => undefined);
+    }, BROWSER_IDLE_CLOSE_MS);
+    idleTimer.unref?.();
+  }
+
   function isRuntimeUsable(): boolean {
     return !!runtime.browser?.isConnected() && !!runtime.context;
   }
 
   async function ensureManagedBrowserContext(): Promise<BrowserContext> {
-    if (isRuntimeUsable()) return runtime.context as BrowserContext;
+    // Any caller that needs the browser counts as activity, so the idle window is
+    // measured from the last real use rather than from launch.
+    if (isRuntimeUsable()) {
+      scheduleIdleClose();
+      return runtime.context as BrowserContext;
+    }
     if (launchPromise) return launchPromise;
 
     launchPromise = (async () => {
@@ -257,6 +296,9 @@ export function createManagedBrowser(input: {
             runtime.context = adoptedContext;
             runtime.port = rememberedPort;
             runtime.launchedAt = Date.now();
+            // A browser adopted from a previous process is by definition idle at
+            // this point, so it must be armed for shutdown like a fresh one.
+            scheduleIdleClose();
             return adoptedContext;
           }
           // Another metapi profile owns this port. Disconnecting only closes the
@@ -295,6 +337,7 @@ export function createManagedBrowser(input: {
       runtime.context = context;
       runtime.port = port;
       runtime.launchedAt = Date.now();
+      scheduleIdleClose();
       return context;
     })();
 
@@ -319,7 +362,17 @@ export function createManagedBrowser(input: {
     };
   }
 
+  /**
+   * Called by the remote-login view on every frame it paints. Without this the
+   * idle timer would count a browser as unused while someone is actively typing
+   * into it, and the window would vanish mid-login.
+   */
+  function keepAlive(): void {
+    if (isRuntimeUsable()) scheduleIdleClose();
+  }
+
   async function closeManagedBrowser(): Promise<void> {
+    cancelIdleClose();
     const browser = runtime.browser;
     runtime.browser = null;
     runtime.context = null;
@@ -352,5 +405,6 @@ export function createManagedBrowser(input: {
     ensureManagedBrowserContext,
     getManagedBrowserState,
     closeManagedBrowser,
+    keepAlive,
   };
 }

@@ -1484,6 +1484,51 @@ export const api = {
       timeoutMs: 180_000,
     }),
 
+  // Remote-browser login. The server's managed browser is exposed as pollable
+  // JPEG frames plus an input channel, which is what lets a phone complete a
+  // provider login without copying cookies out of another machine.
+  startAssistedLoginLive: (provider: string, url?: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/live/start`, {
+      method: "POST",
+      body: JSON.stringify(url ? { url } : {}),
+      timeoutMs: 120_000,
+    }),
+  getAssistedLoginLiveStatus: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/live/status`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 30_000,
+    }),
+  sendAssistedLoginLiveInput: (provider: string, input: Record<string, unknown>) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/live/input`, {
+      method: "POST",
+      body: JSON.stringify(input),
+      timeoutMs: 30_000,
+    }),
+  finishAssistedLoginLive: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/live/finish`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 120_000,
+    }),
+  stopAssistedLoginLive: (provider: string) =>
+    request(`/api/assisted-login/${encodeURIComponent(provider)}/live/stop`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 30_000,
+    }),
+  // Returns null when no remote window is open, so callers can distinguish
+  // "not started yet" from a real transport failure.
+  fetchAssistedLoginLiveFrame: async (provider: string): Promise<Blob | null> => {
+    const res = await fetchAuthenticatedResponse(
+      `/api/assisted-login/${encodeURIComponent(provider)}/live/frame`,
+      { method: "GET", timeoutMs: 30_000 },
+    );
+    if (res.status === 409) return null;
+    if (!res.ok) throw new Error(await extractResponseErrorMessage(res));
+    return res.blob();
+  },
+
   // Re-run the assisted-login handoff for an account whose credential expired.
   refreshAssistedLoginAccount: (provider: string, accountId: number) =>
     request(`/api/assisted-login/${encodeURIComponent(provider)}/refresh-account`, {

@@ -36,6 +36,19 @@ const PROVIDER_COOKIES: Record<AssistedLoginProviderId, ProviderCookieSpec> = {
 const PROBE_TIMEOUT_MS = 20_000;
 
 /**
+ * The cookie names that only appear once a provider session actually exists.
+ *
+ * Callers that poll for a completed login use this as a cheap local gate: while
+ * none of these are present there is nothing to verify, so they can avoid the
+ * page load that identity probing would otherwise trigger on every tick.
+ */
+export function getProviderRequiredCookieNames(
+  providerId: AssistedLoginProviderId,
+): string[] {
+  return [...(PROVIDER_COOKIES[providerId]?.required ?? [])];
+}
+
+/**
  * Cloudflare binds `cf_clearance` to the browser that earned it, so the probe has
  * to look like that browser rather than like a script.
  */

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
+import LiveLoginPanel from '../components/LiveLoginPanel.js';
 import { tr } from '../i18n.js';
 
 type SessionStatus = {
@@ -232,8 +233,14 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
         </div>
       </div>
 
+      <LiveLoginPanel
+        providerId={provider.id}
+        providerLabel={provider.label}
+        onSessionSaved={loadAll}
+      />
+
       <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ fontWeight: 600 }}>导入 {provider.label} 会话（推荐，无需浏览器）</div>
+        <div style={{ fontWeight: 600 }}>导入 {provider.label} 会话（手动粘贴 Cookie）</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
           在本机浏览器登录 {provider.label} 后，打开开发者工具 → 网络 → 任一条已登录请求 →
           复制请求头里的 Cookie（或直接“Copy as cURL”），粘贴到下面。
