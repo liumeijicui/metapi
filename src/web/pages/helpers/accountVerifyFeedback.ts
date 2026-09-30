@@ -2,6 +2,8 @@ type VerifyResultLike = {
   success?: boolean;
   needsUserId?: boolean;
   invalidUserId?: boolean;
+  /** The site throttled the call, so the credential itself was never judged. */
+  rateLimited?: boolean;
   message?: string | null;
 } | null | undefined;
 
@@ -42,6 +44,9 @@ export function buildVerifyFailureHint(result: VerifyResultLike): string | null 
   if (result.invalidUserId) {
     return '这不是 Token 错误判断。请检查填写的用户 ID 是否与当前 Token / Cookie 属于同一账号。';
   }
+  if (result.rateLimited) {
+    return '这不是 Token 错误判断。站点当前限流（共享出口访问量过大），可直接添加，后台会在限流解除后自动同步。';
+  }
   if (isNetworkFailureMessage(result.message)) {
     return '这不是 Token 错误判断。请检查 metapi 服务是否在线，以及目标站点或代理是否可达。';
   }
@@ -61,6 +66,9 @@ export function buildAddAccountPrereqHint(result: VerifyResultLike): string {
   }
   if (result.invalidUserId) {
     return '请先修正用户 ID 并重新验证，验证成功后才能添加账号。';
+  }
+  if (result.rateLimited) {
+    return '站点当前限流，Token 未被判定无效，可直接添加账号并由后台自动同步。';
   }
   if (isNetworkFailureMessage(result.message)) {
     return '验证请求未成功完成，请先检查 metapi 服务、站点网络或代理配置。';

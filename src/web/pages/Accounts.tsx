@@ -156,6 +156,7 @@ export default function Accounts() {
     isPinned: false,
     refreshToken: "",
     tokenExpiresAt: "",
+    externalCheckinCookie: "",
     proxyUrl: "",
   });
   const [savingEdit, setSavingEdit] = useState(false);
@@ -453,7 +454,8 @@ export default function Accounts() {
     if (
       !isBatchApiKeyInput &&
       !verifyResult?.success &&
-      !tokenForm.skipModelFetch
+      !tokenForm.skipModelFetch &&
+      !canAddThrottledSession
     ) {
       toast.error("请先验证 Token 成功后再添加账号");
       return;
@@ -934,6 +936,11 @@ export default function Accounts() {
     };
   };
 
+  const extractExternalCheckinCookie = (account: any): string => {
+    const session = parseAccountExtraConfig(account)?.externalCheckin || {};
+    return typeof session.cookieHeader === "string" ? session.cookieHeader : "";
+  };
+
   const openEditPanel = (account: any) => {
     const managedAuth = extractManagedSub2ApiAuth(account);
     const proxyUrl = parseAccountExtraConfig(account)?.proxyUrl || "";
@@ -953,6 +960,7 @@ export default function Accounts() {
       isPinned: !!account?.isPinned,
       refreshToken: managedAuth.refreshToken,
       tokenExpiresAt: managedAuth.tokenExpiresAt,
+      externalCheckinCookie: extractExternalCheckinCookie(account),
       proxyUrl,
     });
   };
@@ -980,6 +988,7 @@ export default function Accounts() {
         tokenExpiresAt: editForm.tokenExpiresAt.trim()
           ? Number.parseInt(editForm.tokenExpiresAt.trim(), 10)
           : null,
+        externalCheckinCookie: editForm.externalCheckinCookie.trim() || null,
         proxyUrl: editForm.proxyUrl.trim() || null,
       });
       toast.success("账号已更新");
@@ -1138,6 +1147,10 @@ export default function Accounts() {
         toast.success("Session Token 验证成功，可以重新绑定");
       } else if (result.success && result.tokenType !== "session") {
         toast.error("当前是 API Key，不是 Session Token");
+      } else if (result.rateLimited) {
+        toast.info(
+          "站点当前限流，Token 未被判定无效，可先重新绑定并由后台自动确认",
+        );
       } else {
         toast.error(
           normalizeVerifyFailureMessage(result.message || "Token 无效"),
@@ -1157,7 +1170,8 @@ export default function Accounts() {
       !(
         rebindVerifyResult?.success &&
         rebindVerifyResult?.tokenType === "session"
-      )
+      ) &&
+      !rebindVerifyResult?.rateLimited
     ) {
       toast.error("请先验证新的 Session Token 成功");
       return;
@@ -1274,12 +1288,21 @@ export default function Accounts() {
     ((activeSegment === "apikey" && verifyResult.tokenType === "apikey") ||
       (activeSegment === "session" && verifyResult.tokenType === "session")),
   );
+  // A throttled site never judged the credential, so a session bind is still
+  // allowed and the background sync confirms the token once the site frees up.
+  const canAddThrottledSession = Boolean(
+    activeSegment === "session" &&
+      !verifyResult?.success &&
+      verifyResult?.rateLimited,
+  );
+  const canSubmitTokenConnection =
+    canAddVerifiedConnection || canAddThrottledSession;
   const canSubmitApiKeyConnection =
     activeSegment === "apikey"
       ? isBatchApiKeyInput ||
         canAddVerifiedConnection ||
         !!tokenForm.skipModelFetch
-      : canAddVerifiedConnection;
+      : canSubmitTokenConnection;
 
   return (
     <div className="animate-fade-in">
@@ -1945,7 +1968,9 @@ export default function Accounts() {
                     {verifyResult &&
                       !verifyResult.success &&
                       !verifyResult.needsUserId && (
-                        <div className="alert alert-error animate-scale-in">
+                        <div
+                          className={`alert animate-scale-in ${verifyResult.rateLimited ? "alert-warning" : "alert-error"}`}
+                        >
                           <div className="alert-title">
                             {normalizeVerifyFailureMessage(
                               verifyResult.message,
@@ -1991,7 +2016,7 @@ export default function Accounts() {
                           saving ||
                           !tokenForm.siteId ||
                           !tokenForm.accessToken ||
-                          !canAddVerifiedConnection
+                          !canSubmitTokenConnection
                         }
                         className="btn btn-success"
                       >
@@ -2767,6 +2792,34 @@ export default function Accounts() {
                     />
                   </>
                 )}
+                {(editingAccount?.site?.platform || "").toLowerCase() ===
+                  "sub2api" &&
+                  editingAccount?.site?.externalCheckinUrl ? (
+                  <>
+                    <input
+                      placeholder="外部签到站会话 Cookie（如 sidv=xxx，留空则解绑）"
+                      value={editForm.externalCheckinCookie}
+                      onChange={(e) =>
+                        setEditForm((prev) => ({
+                          ...prev,
+                          externalCheckinCookie: e.target.value,
+                        }))
+                      }
+                      style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+                    />
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--color-text-muted)",
+                        marginTop: -4,
+                      }}
+                    >
+                      用于 {editingAccount?.site?.externalCheckinUrl}{" "}
+                      的每日签到。会话过期后，在浏览器登录该签到站，从开发者工具复制新
+                      Cookie 粘贴到这里即可恢复正常签到。
+                    </div>
+                  </>
+                ) : null}
               </ResponsiveFormGrid>
             ) : null}
           </CenteredModal>

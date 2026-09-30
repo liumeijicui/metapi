@@ -86,6 +86,162 @@ describe('Sub2ApiAdapter', () => {
     expect(result.message).toContain('not supported');
   });
 
+  it('logs in with email and password via /api/v1/auth/login', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          const body = JSON.parse(rawBody || '{}');
+          expect(body.email).toBe('user@example.com');
+          expect(body.password).toBe('secret');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            code: 0,
+            message: 'success',
+            data: {
+              access_token: 'jwt-access',
+              refresh_token: 'rt-1',
+              expires_in: 86400,
+              user: { id: 341, username: '柳眉积翠', email: 'user@example.com' },
+            },
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.login(baseUrl, 'user@example.com', 'secret');
+    expect(result).toMatchObject({
+      success: true,
+      accessToken: 'jwt-access',
+      username: '柳眉积翠',
+      platformUserId: 341,
+    });
+  });
+
+  it('surfaces the site message when login is rejected', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 401, message: 'invalid email or password', reason: 'INVALID_CREDENTIALS' }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.login(baseUrl, 'user@example.com', 'wrong');
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('invalid email or password');
+  });
+
+  it('checks in on the external welfare site with the captured session', async () => {
+    let seenCookie = '';
+    let seenBody: any = null;
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        seenCookie = String(req.headers.cookie || '');
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          seenBody = JSON.parse(rawBody || '{}');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, amount: 10, userId: '341' }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { cookieHeader: 'sidv=abc' } }),
+    });
+
+    expect(result).toMatchObject({ success: true, reward: '10' });
+    expect(result.message).toContain('10');
+    expect(seenCookie).toBe('sidv=abc');
+    expect(seenBody).toEqual({ userId: '341', mode: 'normal' });
+  });
+
+  it('passes the configured check-in mode through to the welfare site', async () => {
+    let seenBody: any = null;
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          seenBody = JSON.parse(rawBody || '{}');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, amount: 7, userId: '341' }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({
+        platformUserId: 341,
+        externalCheckin: { cookieHeader: 'sidv=abc', mode: 'lucky' },
+      }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(seenBody).toEqual({ userId: '341', mode: 'lucky' });
+  });
+
+  it('reports the already-checked-in message from the welfare site', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, already: true, error: '今天已经签到过了，明天再来吧' }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { cookieHeader: 'sidv=abc' } }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('已经签到');
+  });
+
+  it('reports an expired welfare session on HTTP 401', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '未登录' }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { cookieHeader: 'sidv=stale' } }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('401');
+    expect(result.message).toContain('LinuxDo');
+  });
+
+  it('asks for the welfare session when none is bound', async () => {
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
+      externalCheckinUrl: 'https://checkin.example.com',
+      extraConfig: JSON.stringify({ platformUserId: 341 }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('未绑定');
+  });
+
   it('fetches balance from /api/v1/auth/me', async () => {
     await startServer((req, res) => {
       if (req.url === '/api/v1/auth/me') {

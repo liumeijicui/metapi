@@ -2,7 +2,7 @@ import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
-import { fetchJsonWithShieldCookieRetry } from './newApiShield.js';
+import { fetchJsonWithShieldCookieRetry, isEdgeRateLimitResponse } from './newApiShield.js';
 import { getAccountCredentialContext, recordRotatedCredential } from '../siteProxy.js';
 import { persistRotatedRefreshCookie } from '../accountCredentialRotation.js';
 import {
@@ -19,8 +19,44 @@ import {
 const REFRESH_TOKEN_CACHE = new Map<string, { accessToken: string; expiresAtMs: number }>();
 const REFRESH_TOKEN_CACHE_LEAD_MS = 60 * 1000;
 
+type JsonFetchOutcome<T> = {
+  data: T | null;
+  cookieHeader: string;
+  /** The site's edge refused this call while the shared egress IP was throttled. */
+  edgeRateLimited: boolean;
+};
+
+/**
+ * Verdict collected during one verification attempt. Throttling is observed
+ * deep inside the fetch funnel, so the fact is carried back out instead of
+ * being re-derived with another upstream round trip.
+ */
+type EdgeRateLimitProbe = { edgeRateLimited: boolean };
+
+function recordEdgeRateLimit(
+  probe: EdgeRateLimitProbe | undefined,
+  outcome: JsonFetchOutcome<unknown>,
+): void {
+  if (probe && outcome.edgeRateLimited) probe.edgeRateLimited = true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
+
+  /**
+   * Backoff applied when the site's edge throttles a management call. Empty by
+   * default so ordinary sites fail fast; adapters for shared/free relays
+   * override it (see AnyRouterAdapter).
+   */
+  protected get edgeRateLimitRetryDelaysMs(): readonly number[] {
+    return [];
+  }
 
   async detect(url: string): Promise<boolean> {
     try {
@@ -789,7 +825,8 @@ export class NewApiAdapter extends BasePlatformAdapter {
       text.includes('not login') ||
       text.includes('not logged') ||
       text.includes('invalid url (post /api/user/checkin)') ||
-      (text.includes('http 404') && text.includes('/api/user/checkin')) ||
+      text.includes('invalid url (post /api/user/daily)') ||
+      (text.includes('http 404') && (text.includes('/api/user/checkin') || text.includes('/api/user/daily'))) ||
       text.includes('未登录') ||
       text.includes('未提供')
     );
@@ -800,7 +837,8 @@ export class NewApiAdapter extends BasePlatformAdapter {
     const text = message.toLowerCase();
     return (
       text.includes('invalid url (post /api/user/checkin)') ||
-      (text.includes('http 404') && text.includes('/api/user/checkin')) ||
+      text.includes('invalid url (post /api/user/daily)') ||
+      (text.includes('http 404') && (text.includes('/api/user/checkin') || text.includes('/api/user/daily'))) ||
       text.includes('checkin endpoint not found') ||
       text.includes('check-in is not supported') ||
       text.includes('checkin is not supported') ||
@@ -813,14 +851,27 @@ export class NewApiAdapter extends BasePlatformAdapter {
    * True for a route that simply does not exist on this deployment.
    *
    * Deployments disagree on the check-in route (`/api/user/sign_in` on older
-   * forks, `/api/user/checkin` on newer ones), so the probe that walks both always
-   * gets one 404. That 404 must never outrank a real answer from the other route.
+   * forks, `/api/user/checkin` on newer ones, `/api/user/daily` on the
+   * QuantumNous-style forks), so the probe that walks them always gets a 404
+   * for the foreign routes. That 404 must never outrank a real answer from the
+   * route the deployment actually exposes.
    */
   private isMissingRouteMessage(message?: string | null): boolean {
     if (!message) return false;
     const text = message.toLowerCase();
     if (/^http\s+404:/i.test(text)) return true;
-    return /invalid url \(post \/api\/user\/(sign_in|checkin)\)/.test(text);
+    return /invalid url \(post \/api\/user\/(sign_in|checkin|daily)\)/.test(text);
+  }
+
+  /**
+   * Pulls the awarded quota out of a check-in response. Official new-api
+   * deployments put it in `data.reward`; the QuantumNous-style forks report it
+   * as `data.quota_awarded`.
+   */
+  private extractCheckinReward(payload: any): string | undefined {
+    const raw = payload?.data?.reward ?? payload?.data?.quota_awarded;
+    if (raw === undefined || raw === null) return undefined;
+    return String(raw);
   }
 
   private isCookieSessionFailureMessage(message?: string | null): boolean {
@@ -906,7 +957,21 @@ export class NewApiAdapter extends BasePlatformAdapter {
   private async fetchJsonRawWithCookie<T>(
     url: string,
     options?: UndiciRequestInit,
-  ): Promise<{ data: T | null; cookieHeader: string }> {
+  ): Promise<JsonFetchOutcome<T>> {
+    const retryDelays = this.edgeRateLimitRetryDelaysMs;
+    let outcome = await this.performJsonFetch<T>(url, options);
+    for (const delayMs of retryDelays) {
+      if (!outcome.edgeRateLimited) break;
+      await sleep(delayMs);
+      outcome = await this.performJsonFetch<T>(url, options);
+    }
+    return outcome;
+  }
+
+  private async performJsonFetch<T>(
+    url: string,
+    options?: UndiciRequestInit,
+  ): Promise<JsonFetchOutcome<T>> {
     const { fetch } = await import('undici');
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -946,24 +1011,31 @@ export class NewApiAdapter extends BasePlatformAdapter {
         cookieHeader = this.mergeSetCookiePairs(cookieHeader, getSetCookie.call(res.headers) || []);
       }
       const parsed = this.parseJsonSafe<T>(text);
-      if (parsed) return { data: parsed, cookieHeader };
+      if (parsed) return { data: parsed, cookieHeader, edgeRateLimited: false };
+
+      // The edge rejects throttled calls before the shield dance runs, so the
+      // throttled verdict is checked first: solving another challenge would
+      // only spend the quota the edge just refused.
+      if (isEdgeRateLimitResponse(res.status, res.headers.get('x-tengine-error'), text)) {
+        return { data: null, cookieHeader, edgeRateLimited: true };
+      }
 
       if (!this.isShieldChallenge(res.headers.get('content-type') || '', text)) {
-        return { data: null, cookieHeader };
+        return { data: null, cookieHeader, edgeRateLimited: false };
       }
       if (!cookieHeader) {
-        return { data: null, cookieHeader };
+        return { data: null, cookieHeader, edgeRateLimited: false };
       }
 
       const acwScV2 = this.solveAcwScV2(text);
       if (!acwScV2) {
-        return { data: null, cookieHeader };
+        return { data: null, cookieHeader, edgeRateLimited: false };
       }
       cookieHeader = this.upsertCookie(cookieHeader, 'acw_sc__v2', acwScV2);
       headers['Cookie'] = cookieHeader;
     }
 
-    return { data: null, cookieHeader };
+    return { data: null, cookieHeader, edgeRateLimited: false };
   }
 
   private async fetchJsonRaw<T>(url: string, options?: UndiciRequestInit): Promise<T | null> {
@@ -976,12 +1048,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
     token: string,
     platformUserId?: number,
     onFailureMessage?: (message: string) => void,
+    edgeProbe?: EdgeRateLimitProbe,
   ): Promise<any | null> {
     for (const cookie of this.buildCookieCandidates(token)) {
       try {
         const headers: Record<string, string> = { Cookie: cookie };
         this.appendUserIdCompatibilityHeaders(headers, platformUserId);
-        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, { headers });
+        const outcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/self`, { headers });
+        recordEdgeRateLimit(edgeProbe, outcome);
+        const res = outcome.data;
         if (res?.success && res?.data) return res;
         if (typeof res?.message === 'string' && res.message.trim()) {
           onFailureMessage?.(res.message.trim());
@@ -991,14 +1066,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return null;
   }
 
-  private async probeUserIdByCookie(baseUrl: string, token: string): Promise<number | null> {
+  private async probeUserIdByCookie(
+    baseUrl: string,
+    token: string,
+    edgeProbe?: EdgeRateLimitProbe,
+  ): Promise<number | null> {
     const candidates = this.buildUserIdProbeCandidates(token);
     for (const cookie of this.buildCookieCandidates(token)) {
       for (const id of candidates) {
         try {
           const headers: Record<string, string> = { Cookie: cookie };
           this.appendUserIdCompatibilityHeaders(headers, id);
-          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, { headers });
+          const outcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/self`, { headers });
+          recordEdgeRateLimit(edgeProbe, outcome);
+          const res = outcome.data;
           if (res?.success && res?.data) return id;
         } catch {}
       }
@@ -1010,8 +1091,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
     baseUrl: string,
     token: string,
     currentUserId?: number | null,
+    edgeProbe?: EdgeRateLimitProbe,
   ): Promise<number | null> {
-    const probed = await this.probeUserIdByCookie(baseUrl, token);
+    const probed = await this.probeUserIdByCookie(baseUrl, token, edgeProbe);
     if (!probed) return null;
     if (typeof currentUserId === 'number' && currentUserId > 0 && probed === currentUserId) {
       return null;
@@ -1205,6 +1287,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     // A `new_api_refresh` cookie is not itself a usable credential; swap it for
     // a bearer token first so downstream calls see a normal session.
     const resolvedToken = await this.resolveBearerToken(baseUrl, token);
+    const edgeProbe: EdgeRateLimitProbe = { edgeRateLimited: false };
 
     const openAiModels = await this.getOpenAiModels(baseUrl, resolvedToken);
     if (openAiModels.length > 0) {
@@ -1212,9 +1295,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     try {
-      const directRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
+      const directOutcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/self`, {
         headers: { Authorization: `Bearer ${resolvedToken}` },
       });
+      recordEdgeRateLimit(edgeProbe, directOutcome);
+      const directRes = directOutcome.data;
       if (directRes?.success && directRes?.data) {
         const userId = directRes.data.id;
         const userInfo = this.parseUserInfo(directRes.data);
@@ -1227,9 +1312,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
       if (directRes?.message?.includes('New-Api-User')) {
         const userId = platformUserId || await this.probeUserId(baseUrl, token);
         if (userId) {
-          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
+          const retryOutcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/self`, {
             headers: this.authHeaders(token, userId),
           });
+          recordEdgeRateLimit(edgeProbe, retryOutcome);
+          const res = retryOutcome.data;
           if (res?.success && res?.data) {
             const userInfo = this.parseUserInfo(res.data);
             const balance = this.parseBalance(res.data);
@@ -1248,7 +1335,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
       }
     } catch {}
 
-    const cookieRes = await this.fetchUserSelfByCookie(baseUrl, token, platformUserId);
+    const cookieRes = await this.fetchUserSelfByCookie(baseUrl, token, platformUserId, undefined, edgeProbe);
     if (cookieRes?.success && cookieRes?.data) {
       const userId = cookieRes.data.id;
       const userInfo = this.parseUserInfo(cookieRes.data);
@@ -1258,9 +1345,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
       return { tokenType: 'session', userInfo, balance, apiToken };
     }
 
-    const cookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, token, platformUserId);
+    const cookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, token, platformUserId, edgeProbe);
     if (cookieUserId) {
-      const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, token, cookieUserId);
+      const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, token, cookieUserId, undefined, edgeProbe);
       if (cookieRetry?.success && cookieRetry?.data) {
         const userInfo = this.parseUserInfo(cookieRetry.data);
         const balance = this.parseBalance(cookieRetry.data);
@@ -1270,6 +1357,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
       }
     }
 
+    // Throttling is a statement about the site, not about the credential, so it
+    // is reported separately instead of being folded into "unknown".
+    if (edgeProbe.edgeRateLimited) {
+      return { tokenType: 'unknown', failureReason: 'rate-limited' };
+    }
     return { tokenType: 'unknown' };
   }
 
@@ -1313,21 +1405,56 @@ export class NewApiAdapter extends BasePlatformAdapter {
       ? (accessToken || '').trim().slice(7).trim()
       : (accessToken || '').trim();
     if (!this.isCookieHeaderCredential(rawCredential)) {
-      try {
-        const headers = this.authHeaders(accessToken, resolvedUserId || undefined);
+      const headers = this.authHeaders(accessToken, resolvedUserId || undefined);
 
-        const res = await this.fetchJson<any>(`${baseUrl}/api/user/checkin`, {
+      // QuantumNous-style forks moved the real check-in endpoint to
+      // /api/user/daily; their legacy /api/user/checkin answers "success"
+      // without persisting anything. Prefer daily, and only fall through to
+      // the legacy route when daily is missing or gives no verdict.
+      let dailyRouteMissing = false;
+      let dailyRouteAnswered = false;
+      try {
+        const dailyRes = await this.fetchJson<any>(`${baseUrl}/api/user/daily`, {
           method: 'POST',
           headers,
         });
-        if (res?.success) {
-          return { success: true, message: res.message || 'checkin success', reward: res.data?.reward?.toString() };
+        if (dailyRes?.success) {
+          return {
+            success: true,
+            message: dailyRes.message || 'checkin success',
+            reward: this.extractCheckinReward(dailyRes),
+          };
         }
-        const directMessage = this.extractResponseMessage(res);
-        rememberFailure(directMessage);
+        const dailyMessage = this.extractResponseMessage(dailyRes);
+        dailyRouteMissing = this.isMissingRouteMessage(dailyMessage);
+        dailyRouteAnswered = !!dailyMessage && !dailyRouteMissing;
+        if (!dailyRouteMissing) rememberFailure(dailyMessage);
       } catch (err) {
         const parsed = this.formatRequestErrorMessage(err);
-        rememberFailure(parsed);
+        dailyRouteMissing = this.isMissingRouteMessage(parsed);
+        dailyRouteAnswered = !!parsed && !dailyRouteMissing;
+        if (!dailyRouteMissing) rememberFailure(parsed);
+      }
+
+      if (!dailyRouteAnswered) {
+        try {
+          const res = await this.fetchJson<any>(`${baseUrl}/api/user/checkin`, {
+            method: 'POST',
+            headers,
+          });
+          if (res?.success) {
+            return {
+              success: true,
+              message: res.message || 'checkin success',
+              reward: this.extractCheckinReward(res),
+            };
+          }
+          const directMessage = this.extractResponseMessage(res);
+          rememberFailure(directMessage);
+        } catch (err) {
+          const parsed = this.formatRequestErrorMessage(err);
+          rememberFailure(parsed);
+        }
       }
     }
 
@@ -1362,21 +1489,59 @@ export class NewApiAdapter extends BasePlatformAdapter {
           rememberFailure(parsed);
         }
 
+        // Same fork split as the bearer path: consult /api/user/daily before
+        // the legacy route, which cannot be trusted on these forks.
+        let dailyMissing = false;
+        let dailyAnswered = false;
         try {
-          const headers: Record<string, string> = { Cookie: cookie };
+          const headers: Record<string, string> = {
+            Cookie: cookie,
+            'X-Requested-With': 'XMLHttpRequest',
+          };
           this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
-          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin`, {
+          const dailyRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/daily`, {
             method: 'POST',
             headers,
           });
-          if (res?.success) {
-            return { success: true, message: res.message || 'checkin success', reward: res.data?.reward?.toString() };
+          if (dailyRes?.success) {
+            return {
+              success: true,
+              message: dailyRes.message || 'checkin success',
+              reward: this.extractCheckinReward(dailyRes),
+            };
           }
-          const cookieMessage = this.extractResponseMessage(res);
-          rememberFailure(cookieMessage);
+          const dailyMessage = this.extractResponseMessage(dailyRes);
+          dailyMissing = this.isMissingRouteMessage(dailyMessage);
+          dailyAnswered = !!dailyMessage && !dailyMissing;
+          if (!dailyMissing) rememberFailure(dailyMessage);
         } catch (err) {
           const parsed = this.formatRequestErrorMessage(err);
-          rememberFailure(parsed);
+          dailyMissing = this.isMissingRouteMessage(parsed);
+          dailyAnswered = !!parsed && !dailyMissing;
+          if (!dailyMissing) rememberFailure(parsed);
+        }
+
+        if (!dailyAnswered) {
+          try {
+            const headers: Record<string, string> = { Cookie: cookie };
+            this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
+            const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin`, {
+              method: 'POST',
+              headers,
+            });
+            if (res?.success) {
+              return {
+                success: true,
+                message: res.message || 'checkin success',
+                reward: this.extractCheckinReward(res),
+              };
+            }
+            const cookieMessage = this.extractResponseMessage(res);
+            rememberFailure(cookieMessage);
+          } catch (err) {
+            const parsed = this.formatRequestErrorMessage(err);
+            rememberFailure(parsed);
+          }
         }
       }
 

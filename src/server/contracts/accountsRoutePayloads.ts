@@ -26,6 +26,7 @@ const accountUpdatePayloadSchema = z.object({
   extraConfig: z.union([z.string(), z.record(z.string(), z.unknown()), z.null()]).optional(),
   refreshToken: z.union([z.string(), z.null()]).optional(),
   tokenExpiresAt: z.union([z.number(), z.string(), z.null()]).optional(),
+  externalCheckinCookie: z.union([z.string(), z.null()]).optional(),
   isPinned: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),

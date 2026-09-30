@@ -229,6 +229,37 @@ describe('accounts verify-token shield detection', () => {
     expect(undiciFetchMock).toHaveBeenCalled();
   });
 
+  it('reports site throttling instead of blaming the credential when the edge rate limits', async () => {
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown', failureReason: 'rate-limited' });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'AnyRouter Busy',
+      url: 'https://anyrouter-busy.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'throttled-session-token',
+        platformUserId: 166294,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      rateLimited: true,
+    });
+    expect(response.json()).not.toMatchObject({
+      shieldBlocked: true,
+      needsUserId: true,
+      invalidUserId: true,
+    });
+  });
+
   it('falls back to needsUserId diagnosis when verifyToken hangs', async () => {
     vi.useFakeTimers();
     verifyTokenMock.mockImplementationOnce(() => new Promise(() => {}));

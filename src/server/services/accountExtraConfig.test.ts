@@ -9,6 +9,7 @@ import {
   resolveProxyUrlFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   getSub2ApiSubscriptionFromExtraConfig,
+  getExternalCheckinSessionFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
   normalizeCredentialMode,
@@ -103,6 +104,22 @@ describe('accountExtraConfig', () => {
     expect(getSub2ApiAuthFromExtraConfig(JSON.stringify({
       sub2apiAuth: { refreshToken: '  ' },
     }))).toBeNull();
+  });
+
+  it('parses the external check-in session from extra config', () => {
+    expect(getExternalCheckinSessionFromExtraConfig(JSON.stringify({
+      externalCheckin: { cookieHeader: 'sidv=abc', userId: 341, mode: 'lucky', savedAt: '2026-09-29T07:00:00.000Z' },
+    }))).toEqual({
+      cookieHeader: 'sidv=abc',
+      userId: 341,
+      mode: 'lucky',
+      savedAt: '2026-09-29T07:00:00.000Z',
+    });
+    expect(getExternalCheckinSessionFromExtraConfig(JSON.stringify({
+      externalCheckin: { userId: 341 },
+    }))).toBeNull();
+    expect(getExternalCheckinSessionFromExtraConfig(JSON.stringify({}))).toBeNull();
+    expect(getExternalCheckinSessionFromExtraConfig(null)).toBeNull();
   });
 
   it('reads proxyUrl from extra config', () => {

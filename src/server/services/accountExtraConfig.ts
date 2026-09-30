@@ -19,6 +19,13 @@ type Sub2ApiSubscriptionConfig = {
   subscriptions?: unknown;
 };
 
+type ExternalCheckinConfig = {
+  cookieHeader?: unknown;
+  userId?: unknown;
+  mode?: unknown;
+  savedAt?: unknown;
+};
+
 export type AccountCredentialMode = 'auto' | 'session' | 'apikey';
 
 const VALID_CREDENTIAL_MODES = new Set<AccountCredentialMode>([
@@ -38,6 +45,7 @@ type AccountExtraConfig = {
   autoRelogin?: AutoReloginConfig;
   sub2apiAuth?: Sub2ApiAuthConfig;
   sub2apiSubscription?: Sub2ApiSubscriptionConfig;
+  externalCheckin?: ExternalCheckinConfig;
   [key: string]: unknown;
 };
 
@@ -331,6 +339,43 @@ export function getSub2ApiSubscriptionFromExtraConfig(
 ): StoredSub2ApiSubscriptionSummary | null {
   const parsed = parseExtraConfig(extraConfig);
   return normalizeSub2ApiSubscriptionSummary(parsed.sub2apiSubscription);
+}
+
+export type ManagedExternalCheckinSession = {
+  /** Cookie header for the welfare site, e.g. `sidv=...`. */
+  cookieHeader: string;
+  /** Welfare site user id; callers fall back to the account's platform user id. */
+  userId?: number;
+  /** Site-specific check-in mode, e.g. `normal` or `lucky`. */
+  mode?: string;
+  /** When this session was captured; useful for diagnostics only. */
+  savedAt?: string;
+};
+
+/**
+ * Reads the session captured for a site's external check-in/welfare service.
+ *
+ * The session is not a Sub2API credential: it belongs to whatever separate
+ * service the site delegates its daily check-in to, so it is stored under its
+ * own key and only the welfare check-in path consumes it.
+ */
+export function getExternalCheckinSessionFromExtraConfig(
+  extraConfig?: ExtraConfigInput,
+): ManagedExternalCheckinSession | null {
+  const parsed = parseExtraConfig(extraConfig);
+  const raw = parsed.externalCheckin;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const cookieHeader = normalizeNonEmptyString(raw.cookieHeader);
+  if (!cookieHeader) return null;
+  const userId = normalizeUserId(raw.userId);
+  const mode = normalizeNonEmptyString(raw.mode);
+  const savedAt = normalizeNonEmptyString(raw.savedAt);
+  return {
+    cookieHeader,
+    ...(userId ? { userId } : {}),
+    ...(mode ? { mode } : {}),
+    ...(savedAt ? { savedAt } : {}),
+  };
 }
 
 export function guessPlatformUserIdFromUsername(username?: string | null): number | undefined {

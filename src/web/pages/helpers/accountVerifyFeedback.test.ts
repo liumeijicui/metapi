@@ -48,4 +48,15 @@ describe('account verify feedback', () => {
     expect(invalidUserIdPrereq).toMatch(/ID/i);
     expect(invalidUserIdPrereq).not.toBe(genericPrereq);
   });
+
+  it('treats site throttling as a busy site instead of a token mistake', () => {
+    const throttled = { success: false, rateLimited: true, message: '站点当前限流（共享出口访问量过大）' };
+    const throttledHint = buildVerifyFailureHint(throttled);
+    const throttledPrereq = buildAddAccountPrereqHint(throttled);
+
+    expect(throttledHint).toMatch(/限流/);
+    expect(throttledHint).not.toMatch(/请检查 Token/);
+    expect(throttledPrereq).toMatch(/限流/);
+    expect(throttledPrereq).not.toBe(buildAddAccountPrereqHint({ success: false, message: 'Token invalid' }));
+  });
 });

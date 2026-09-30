@@ -10,6 +10,7 @@ import {
 } from "../../services/accountMutationWorkflow.js";
 import {
   getCredentialModeFromExtraConfig,
+  getExternalCheckinSessionFromExtraConfig,
   getProxyUrlFromExtraConfig,
   hasOauthProvider,
   getSub2ApiAuthFromExtraConfig,
@@ -970,6 +971,17 @@ export async function accountsRoutes(app: FastifyInstance) {
         };
       }
 
+      // A throttled edge answers on the site's behalf before the token is ever
+      // judged, so report the site as busy instead of blaming the credential.
+      if (result.failureReason === "rate-limited") {
+        return {
+          success: false,
+          rateLimited: true,
+          message:
+            "站点当前限流（共享出口访问量过大），Token 未被判定无效，请稍后重试或直接添加后等待后台同步",
+        };
+      }
+
       // Try to explain unknown failures: missing user id vs anti-bot challenge page.
       const detectVerifyFailureReason =
         async (): Promise<VerifyFailureReason> => {
@@ -1185,7 +1197,12 @@ export async function accountsRoutes(app: FastifyInstance) {
         });
       }
 
-      if (verifyResult?.tokenType !== "session") {
+      // The same throttle that blocks a fresh bind must not block a rebind: the
+      // edge refused the call before the token was judged, so keep the caller's
+      // credential and let the scheduled sync confirm it later.
+      const edgeRateLimitedRebind =
+        verifyResult?.failureReason === "rate-limited";
+      if (verifyResult?.tokenType !== "session" && !edgeRateLimitedRebind) {
         return reply.code(400).send({
           success: false,
           message: "新的 Token 验证失败：请提供可用的 Session Token",
@@ -1539,6 +1556,31 @@ export async function accountsRoutes(app: FastifyInstance) {
         }
         updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
           proxyUrl: normalizedProxy ?? undefined,
+        });
+      }
+
+      // External welfare/check-in session. The session cookie belongs to a
+      // different host than the relay, so it cannot be rotated by any adapter:
+      // the operator pastes a fresh one when the welfare site expires it. An
+      // empty value clears the binding instead of storing a dead cookie.
+      if (Object.prototype.hasOwnProperty.call(body, "externalCheckinCookie")) {
+        const baseExtraConfig =
+          typeof updates.extraConfig === "string"
+            ? updates.extraConfig
+            : account.extraConfig;
+        const rawCookie =
+          typeof body.externalCheckinCookie === "string"
+            ? body.externalCheckinCookie.trim()
+            : "";
+        const existingSession = getExternalCheckinSessionFromExtraConfig(baseExtraConfig);
+        updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
+          externalCheckin: rawCookie
+            ? {
+                ...(existingSession || {}),
+                cookieHeader: rawCookie,
+                savedAt: new Date().toISOString(),
+              }
+            : undefined,
         });
       }
 

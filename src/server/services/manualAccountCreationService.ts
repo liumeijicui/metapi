@@ -142,7 +142,11 @@ async function initializeAccountInBackground({
 function buildQueuedAccountInitializationMessage(
   tokenType: 'session' | 'apikey' | 'unknown',
   skipModelFetch?: boolean,
+  edgeRateLimitedBind?: boolean,
 ) {
+  if (edgeRateLimitedBind === true) {
+    return '账号已添加；站点当前限流（公益站共享出口访问量过大），后台会在限流解除后自动同步令牌、余额和模型信息。';
+  }
   if (tokenType === 'session' && skipModelFetch === true) {
     return '账号已添加，后台正在同步令牌和余额信息。';
   }
@@ -186,6 +190,7 @@ async function createManualAccountInner({
   let accessToken = rawAccessToken;
   let apiToken = (body.apiToken || '').trim();
   let tokenType: 'session' | 'apikey' | 'unknown' = 'unknown';
+  let edgeRateLimitedBind = false;
   let verifiedModels: string[] = [];
 
   if (credentialMode === 'apikey') {
@@ -221,9 +226,18 @@ async function createManualAccountInner({
     );
     tokenType = verifyResult.tokenType;
     if (tokenType === 'unknown') {
-      const error = new Error('Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号');
-      (error as Error & { requiresVerification?: boolean }).requiresVerification = true;
-      throw error;
+      if (verifyResult.failureReason === 'rate-limited') {
+        // A shared free relay throttles by egress IP, so this says the site is
+        // busy rather than that the credential is wrong. Bind it as the session
+        // the caller asked for and let the background initialisation confirm the
+        // token once the throttle window clears.
+        tokenType = 'session';
+        edgeRateLimitedBind = true;
+      } else {
+        const error = new Error('Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号');
+        (error as Error & { requiresVerification?: boolean }).requiresVerification = true;
+        throw error;
+      }
     }
 
     if (credentialMode === 'session' && tokenType !== 'session') {
@@ -313,7 +327,7 @@ async function createManualAccountInner({
       ),
     );
     queuedTaskId = task.id;
-    queuedMessage = buildQueuedAccountInitializationMessage(tokenType, body.skipModelFetch);
+    queuedMessage = buildQueuedAccountInitializationMessage(tokenType, body.skipModelFetch, edgeRateLimitedBind);
   }
 
   const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();

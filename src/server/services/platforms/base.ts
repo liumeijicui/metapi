@@ -8,6 +8,22 @@ export interface CheckinResult {
   reward?: string;
 }
 
+/**
+ * Extra inputs a check-in call needs beyond the account credential.
+ *
+ * A site may hand its daily check-in to a separate welfare service
+ * (`externalCheckinUrl`), whose session material is captured on the account
+ * (`extraConfig`). Neither value is reachable from the adapter signature alone,
+ * so the caller threads them through explicitly instead of the adapter
+ * re-reading the database.
+ */
+export interface CheckinContext {
+  /** Welfare/check-in site declared on the site record. */
+  externalCheckinUrl?: string | null;
+  /** Raw account `extraConfig` that may carry the welfare site session. */
+  extraConfig?: string | null;
+}
+
 export interface SubscriptionPlanSummary {
   id?: number;
   groupId?: number;
@@ -64,6 +80,12 @@ export interface TokenVerifyResult {
   balance?: BalanceInfo | null;
   apiToken?: string | null;
   models?: string[];
+  /**
+   * Why an `unknown` verdict was reached. `rate-limited` means the site's own
+   * edge refused the request while the site was busy, so the credential was
+   * never judged and callers must not treat it as invalid.
+   */
+  failureReason?: 'rate-limited' | null;
 }
 
 export interface ApiTokenInfo {
@@ -103,7 +125,7 @@ export interface PlatformAdapter {
   login(baseUrl: string, username: string, password: string): Promise<LoginResult>;
   getUserInfo(baseUrl: string, accessToken: string, platformUserId?: number): Promise<UserInfo | null>;
   verifyToken(baseUrl: string, token: string, platformUserId?: number): Promise<TokenVerifyResult>;
-  checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult>;
+  checkin(baseUrl: string, accessToken: string, platformUserId?: number, context?: CheckinContext): Promise<CheckinResult>;
   getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo>;
   getModels(baseUrl: string, token: string, platformUserId?: number, contextSourceScope?: string): Promise<string[]>;
   getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null>;
@@ -118,7 +140,7 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
   abstract readonly platformName: string;
 
   abstract detect(url: string): Promise<boolean>;
-  abstract checkin(baseUrl: string, accessToken: string): Promise<CheckinResult>;
+  abstract checkin(baseUrl: string, accessToken: string, platformUserId?: number, context?: CheckinContext): Promise<CheckinResult>;
   abstract getBalance(baseUrl: string, accessToken: string): Promise<BalanceInfo>;
   abstract getModels(baseUrl: string, token: string, platformUserId?: number, contextSourceScope?: string): Promise<string[]>;
 

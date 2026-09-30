@@ -24,6 +24,9 @@ export const SITES_REQUIRING_SYSTEM_PROXY: readonly string[] = [
   'anyrouter.top',
   'welfare.darkforger.com',
   'sub2api.remixjc.cn',
+  // Its edge throttles direct requests by source IP after a short burst;
+  // the proxy exit keeps daily balance and check-in calls stable.
+  'kunyou.asia',
   'cloudcode-pa.googleapis.com',
 ];
 

@@ -4,6 +4,33 @@ import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 const SHIELD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
 
+/**
+ * Alibaba ESA (and the tengine edge some New API forks sit behind) answers
+ * throttled requests before the application ever sees them and states the
+ * verdict in this marker, both as a header and inside the rejection page.
+ */
+const EDGE_RATE_LIMIT_MARKER = 'denied by http_ratelimit';
+
+/**
+ * True when the edge itself refused the request because the egress IP exceeded
+ * its share. Shared and free relays ("公益站") throttle by IP, so this says
+ * nothing about the credential that was sent: callers must not read it as an
+ * invalid token.
+ */
+export function isEdgeRateLimitResponse(
+  status: number,
+  tengineError: string | null | undefined,
+  bodyText: string,
+): boolean {
+  if ((tengineError || '').toLowerCase().includes(EDGE_RATE_LIMIT_MARKER)) {
+    return true;
+  }
+  if (!(status === 403 || status === 429 || status === 503)) {
+    return false;
+  }
+  return (bodyText || '').toLowerCase().includes(EDGE_RATE_LIMIT_MARKER);
+}
+
 export function buildNewApiCookieCandidates(token: string): string[] {
   const trimmed = (token || '').trim();
   if (!trimmed) return [];

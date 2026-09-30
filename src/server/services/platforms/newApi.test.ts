@@ -16,6 +16,10 @@ const COOKIE_SESSION_TOKEN = 'cookie-session-token';
 const COOKIE_REQUIRES_USER_TOKEN = 'cookie-requires-user';
 const COOKIE_REQUIRES_X_USER_ID_TOKEN = 'cookie-requires-x-user-id';
 const CHECKIN_ALREADY_TOKEN = 'checkin-already-token';
+const CHECKIN_DAILY_TOKEN = 'checkin-daily-token';
+const CHECKIN_DAILY_ALREADY_TOKEN = 'checkin-daily-already-token';
+const CHECKIN_DAILY_COOKIE_TOKEN = 'checkin-daily-cookie-token';
+const CHECKIN_LEGACY_TOKEN = 'checkin-legacy-token';
 const CHECKIN_INVALID_URL_TOKEN = 'checkin-invalid-url-token';
 const CHECKIN_INVALID_URL_EXPIRED_SESSION_TOKEN = 'checkin-invalid-url-expired-session-token';
 const CHECKIN_INVALID_URL_FORBIDDEN_SESSION_TOKEN = 'checkin-invalid-url-forbidden-session-token';
@@ -31,6 +35,8 @@ const COOKIE_ONLY_LOGIN_USERNAME = 'cookie-only-user';
 const COOKIE_ONLY_LOGIN_PASSWORD = 'cookie-only-pass';
 const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
 const OPENAI_MODELS_SHIELDED_TOKEN = 'openai-models-shielded-token';
+const EDGE_THROTTLED_TOKEN = 'edge-throttled-token';
+const EDGE_THROTTLE_ONCE_TOKEN = 'edge-throttle-once-token';
 const COOKIE_SHIELDED_TOKEN = Buffer.from(
   `1771864970|${Buffer.from('username=linuxdo_131936').toString('base64')}|sig`,
 ).toString('base64');
@@ -63,9 +69,11 @@ describe('NewApiAdapter', () => {
   let server: ReturnType<typeof createServer>;
   let baseUrl: string;
   let requests: RequestSnapshot[] = [];
+  let throttlePassThroughHits = 0;
 
   beforeEach(async () => {
     requests = [];
+    throttlePassThroughHits = 0;
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
       requests.push({
         method: req.method || 'GET',
@@ -294,9 +302,39 @@ describe('NewApiAdapter', () => {
           return;
         }
 
-        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${BALANCE_FAIL_TOKEN}`) {
+       if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${BALANCE_FAIL_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, message: '无权进行此操作，access token 无效' }));
+          return;
+        }
+
+        const selfCookieHeader = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+        const selfBearer = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+        if (selfBearer === `Bearer ${EDGE_THROTTLED_TOKEN}` || selfBearer === `Bearer ${EDGE_THROTTLE_ONCE_TOKEN}`) {
+          // The ESA edge answers before the application runs: the shield is
+          // solved first, and only the requests that pass it spend quota.
+          if (!selfCookieHeader.includes(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`)) {
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
+            });
+            res.end(ANYROUTER_CHALLENGE_HTML);
+            return;
+          }
+          throttlePassThroughHits += 1;
+          if (selfBearer === `Bearer ${EDGE_THROTTLED_TOKEN}` || throttlePassThroughHits === 1) {
+            res.writeHead(403, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'x-tengine-error': 'denied by http_ratelimit',
+            });
+            res.end('<html><body>denied by http_ratelimit</body></html>');
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 166294, username: 'linuxdo_166294', quota: 940000000, used_quota: 1000 },
+          }));
           return;
         }
 
@@ -470,7 +508,30 @@ describe('NewApiAdapter', () => {
         return;
       }
 
+      if (req.url === '/api/user/daily') {
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_DAILY_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: '签到成功', data: { quota_awarded: 1787510 } }));
+          return;
+        }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_DAILY_ALREADY_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: '今日已签到' }));
+          return;
+        }
+        if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${CHECKIN_DAILY_COOKIE_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'checked-in-daily-cookie', data: { quota_awarded: 555 } }));
+          return;
+        }
+      }
+
       if (req.url === '/api/user/checkin') {
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_LEGACY_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'checked-in-legacy', data: { reward: 123 } }));
+          return;
+        }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_CLOUDFLARE_530_TOKEN}`) {
           res.writeHead(530, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(CLOUDFLARE_530_HTML);
@@ -735,6 +796,31 @@ describe('NewApiAdapter', () => {
     ).toBe(true);
   });
 
+  it('reports an edge-throttled verification as rate limited instead of an invalid token', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.verifyToken(baseUrl, EDGE_THROTTLED_TOKEN);
+
+    expect(result.tokenType).toBe('unknown');
+    expect(result.failureReason).toBe('rate-limited');
+  });
+
+  it('retries an edge-throttled anyrouter call before reporting the site as busy', async () => {
+    const adapter = new AnyRouterAdapter();
+    const result = await adapter.verifyToken(baseUrl, EDGE_THROTTLE_ONCE_TOKEN);
+
+    expect(result.tokenType).toBe('session');
+    expect(result.userInfo?.username).toBe('linuxdo_166294');
+    expect(
+      requests.filter(
+        (r) =>
+          r.url === '/api/user/self' &&
+          r.headers.authorization === `Bearer ${EDGE_THROTTLE_ONCE_TOKEN}` &&
+          typeof r.headers.cookie === 'string' &&
+          r.headers.cookie.includes(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`),
+      ).length,
+    ).toBeGreaterThan(1);
+  });
+
   it('extracts gob-encoded user id from anyrouter session cookie when reading balance', async () => {
     const adapter = new NewApiAdapter();
     const balance = await adapter.getBalance(baseUrl, COOKIE_GOB_USER_TOKEN);
@@ -856,6 +942,55 @@ describe('NewApiAdapter', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toBe('今天已经签到过啦');
+  });
+
+  it('checks in through /api/user/daily on forks that moved the endpoint', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_DAILY_TOKEN, 11494);
+
+    expect(result).toEqual({
+      success: true,
+      message: '签到成功',
+      reward: '1787510',
+    });
+    expect(requests.some((r) => r.url === '/api/user/daily')).toBe(true);
+    expect(requests.some((r) => r.url === '/api/user/checkin')).toBe(false);
+  });
+
+  it('keeps the daily already-checked-in verdict instead of probing the fake legacy route', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_DAILY_ALREADY_TOKEN, 11494);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('今日已签到');
+    expect(requests.some((r) => r.url === '/api/user/checkin')).toBe(false);
+  });
+
+  it('falls back to the legacy checkin endpoint when daily is missing', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_LEGACY_TOKEN, 11494);
+
+    expect(result).toEqual({
+      success: true,
+      message: 'checked-in-legacy',
+      reward: '123',
+    });
+    const dailyIndex = requests.findIndex((r) => r.url === '/api/user/daily');
+    const legacyIndex = requests.findIndex((r) => r.url === '/api/user/checkin');
+    expect(dailyIndex).toBeGreaterThanOrEqual(0);
+    expect(legacyIndex).toBeGreaterThan(dailyIndex);
+  });
+
+  it('uses the daily endpoint for cookie credentials as well', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, `session=${CHECKIN_DAILY_COOKIE_TOKEN}`, 131936);
+
+    expect(result).toEqual({
+      success: true,
+      message: 'checked-in-daily-cookie',
+      reward: '555',
+    });
+    expect(requests.some((r) => r.url === '/api/user/checkin')).toBe(false);
   });
 
   it('returns clean groups from data object without envelope keys', async () => {

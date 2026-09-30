@@ -9,7 +9,11 @@ import {
   type SiteAnnouncement,
   UserInfo,
 } from './base.js';
+import type { CheckinContext, LoginResult } from './base.js';
 import { stripTrailingSlashes } from '../urlNormalization.js';
+import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
+import type { RequestInit as UndiciRequestInit, Response as UndiciResponse } from 'undici';
 import {
   buildEndpointModelContextLengthScope,
   extractContextLengthsFromPayload,
@@ -24,7 +28,10 @@ function normalizeBaseUrl(baseUrl: string): string {
  * Sub2API adapter.
  *
  * Sub2API uses JWT-based auth with endpoints under /api/v1/*.
- * It does NOT support: login or check-in.
+ * Login accepts the site's email/password form. Check-in does not exist on the
+ * platform itself: sites that run a separate welfare check-in service declare
+ * it as `externalCheckinUrl` and the welfare session is captured on the account
+ * (`extraConfig.externalCheckin`).
  * Balance is derived from a USD amount returned by /api/v1/auth/me.
  */
 export class Sub2ApiAdapter extends BasePlatformAdapter {
@@ -689,13 +696,61 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     return Math.round(Math.max(0, balanceUsd) * 500000);
   }
 
-  // --- Login: Not supported (JWT only) ---
+  // --- Login: the site's own email/password form ---
+
+  /** Turns a thrown `HTTP <status>: <json>` into the site's own message. */
+  private describeLoginFailure(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error);
+    const statusMatch = /^HTTP (\d+):/i.exec(raw.trim());
+    const jsonStart = raw.indexOf('{');
+    if (jsonStart >= 0) {
+      try {
+        const body = JSON.parse(raw.slice(jsonStart)) as { message?: unknown };
+        const siteMessage = typeof body?.message === 'string' ? body.message.trim() : '';
+        if (siteMessage) {
+          return statusMatch ? `${siteMessage}（HTTP ${statusMatch[1]}）` : siteMessage;
+        }
+      } catch {
+        // Not a JSON body; fall back to the raw message.
+      }
+    }
+    return raw || 'login failed';
+  }
+
   override async login(
-    _baseUrl: string,
-    _username: string,
-    _password: string,
-  ): Promise<{ success: false; message: string }> {
-    return { success: false, message: 'Sub2API uses JWT authentication; login is not supported' };
+    baseUrl: string,
+    username: string,
+    password: string,
+  ): Promise<LoginResult> {
+    let payload: any;
+    try {
+      payload = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}/api/v1/auth/login`, {
+        method: 'POST',
+        body: JSON.stringify({ email: username, password }),
+      });
+    } catch (error) {
+      return { success: false, message: this.describeLoginFailure(error) };
+    }
+
+    const data = payload?.data;
+    const accessToken = typeof data?.access_token === 'string' ? data.access_token.trim() : '';
+    if (!accessToken) {
+      const siteMessage = typeof payload?.message === 'string' ? payload.message.trim() : '';
+      return { success: false, message: siteMessage || '登录失败：站点未返回访问令牌' };
+    }
+
+    const user = data?.user;
+    const displayName = typeof user?.username === 'string' && user.username.trim()
+      ? user.username.trim()
+      : typeof user?.email === 'string' && user.email.trim()
+        ? user.email.trim()
+        : username;
+    return {
+      success: true,
+      accessToken,
+      username: displayName,
+      platformUserId: this.parsePositiveInteger(user?.id),
+    };
   }
 
   // --- User Info ---
@@ -711,12 +766,79 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
   }
 
-  // --- Check-in: Not supported ---
+  /**
+   * Checks in on the site's external welfare service, when one is declared.
+   *
+   * The welfare service is not Sub2API: it authenticates through its own
+   * LinuxDO binding, so its credential is the captured session cookie and the
+   * id it checks in with is the bound welfare user id (the same numeric id the
+   * login payload reports as the platform user id).
+   */
   async checkin(
     _baseUrl: string,
     _accessToken: string,
+    platformUserId?: number,
+    context?: CheckinContext,
   ): Promise<CheckinResult> {
-    return { success: false, message: 'Check-in is not supported by Sub2API' };
+    const externalCheckinUrl = (context?.externalCheckinUrl || '').trim();
+    if (!externalCheckinUrl) {
+      return { success: false, message: 'Check-in is not supported by Sub2API' };
+    }
+
+    const session = getExternalCheckinSessionFromExtraConfig(context?.extraConfig);
+    if (!session) {
+      return {
+        success: false,
+        message: '外部签到站会话未绑定：请先完成签到站的 LinuxDo 授权，再重试签到',
+      };
+    }
+
+    const userId = session.userId ?? platformUserId;
+    if (!userId) {
+      return { success: false, message: '外部签到缺少用户 ID：请在账号配置中补充 platformUserId' };
+    }
+
+    const endpoint = `${stripTrailingSlashes(externalCheckinUrl)}/api/checkin`;
+    const requestInit: UndiciRequestInit = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: session.cookieHeader,
+      },
+      body: JSON.stringify({ userId: String(userId), mode: session.mode || 'normal' }),
+      signal: AbortSignal.timeout(20_000),
+    };
+
+    const { fetch } = await import('undici');
+    let response: UndiciResponse;
+    try {
+      response = await fetch(endpoint, await withSiteProxyRequestInit(endpoint, requestInit));
+    } catch (error) {
+      return { success: false, message: `外部签到请求失败：${(error as Error)?.message || '网络错误'}` };
+    }
+
+    const rawBody = await response.text();
+    let payload: any = null;
+    try { payload = JSON.parse(rawBody); } catch {}
+
+    if (response.status === 401) {
+      return { success: false, message: '外部签到会话已失效（HTTP 401 未登录），请重新完成签到站的 LinuxDo 授权' };
+    }
+    if (!response.ok) {
+      const siteMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
+      return { success: false, message: `外部签到失败：HTTP ${response.status}${siteMessage ? ` ${siteMessage}` : ''}` };
+    }
+    if (payload?.ok === true) {
+      const amount = typeof payload.amount === 'number' && Number.isFinite(payload.amount) ? payload.amount : undefined;
+      return {
+        success: true,
+        message: amount === undefined ? '外部签到成功' : `外部签到成功，获得 ${amount}`,
+        ...(amount === undefined ? {} : { reward: String(amount) }),
+      };
+    }
+
+    const siteMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
+    return { success: false, message: siteMessage || `外部签到失败：HTTP ${response.status}` };
   }
 
   // --- Balance ---
