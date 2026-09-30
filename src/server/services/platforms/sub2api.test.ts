@@ -838,6 +838,79 @@ describe('Sub2ApiAdapter', () => {
     expect(created).toBe(true);
   });
 
+  it('binds an available group when creating a key without an explicit group', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/groups/available') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: [
+            { id: 5, name: 'vip', status: 'active' },
+            { id: 6, name: 'free', status: 'active' },
+          ],
+        }));
+        return;
+      }
+      if (req.url === '/api/v1/keys' && req.method === 'POST') {
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          const body = JSON.parse(rawBody || '{}');
+          expect(body.group_id).toBe(6);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            code: 0,
+            message: 'success',
+            data: { id: 1, key: 'sk-created', name: body.name, group_id: body.group_id },
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const created = await adapter.createApiToken(baseUrl, 'jwt-token', undefined, { name: 'metapi-e2e' });
+    expect(created).toBe(true);
+  });
+
+  it('falls back to a group-less create when the site rejects the group-bound payload', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/groups/available') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: [{ id: 6, name: 'free', status: 'active' }],
+        }));
+        return;
+      }
+      if (req.url === '/api/v1/keys' && req.method === 'POST') {
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          const body = JSON.parse(rawBody || '{}');
+          if (body.group_id === 6) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ code: 400, message: 'invalid group' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            code: 0,
+            message: 'success',
+            data: { id: 2, key: 'sk-created', name: body.name },
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const created = await adapter.createApiToken(baseUrl, 'jwt-token', undefined, { name: 'metapi-e2e' });
+    expect(created).toBe(true);
+  });
+
   it('deletes api key by key value via /api/v1/keys/:id', async () => {
     await startServer((req, res) => {
       if (req.url === '/api/v1/keys?page=1&page_size=100') {

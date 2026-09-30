@@ -438,6 +438,66 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     return [];
   }
 
+  /**
+   * Resolves the group a freshly created key should join when the caller did
+   * not name one.
+   *
+   * `/api/v1/groups/available` lists exactly the groups the account may use on
+   * newer deployments; older ones expose only the generic group endpoints.
+   * Preference goes to a `default` group, then `free`, then the first one;
+   * when nothing can be resolved the key is created without a group, which is
+   * what the platform accepted before.
+   */
+  private async resolveDefaultGroupId(baseUrl: string, accessToken: string): Promise<number | null> {
+    const groups: Array<{ id: number; name: string }> = [];
+    const headers = this.buildAuthHeader(accessToken);
+    const endpoints = [
+      '/api/v1/groups/available',
+      '/api/v1/groups?page=1&page_size=100',
+      '/api/v1/groups',
+    ];
+    for (const endpoint of endpoints) {
+      try {
+        const res = await this.fetchJson<any>(`${baseUrl}${endpoint}`, { headers });
+        const parsed = (() => {
+          try {
+            return this.parseSub2ApiEnvelope<any>(res, endpoint);
+          } catch {
+            return res;
+          }
+        })();
+        const source = parsed?.data ?? parsed;
+        const rawItems = (() => {
+          if (Array.isArray(source)) return source;
+          if (Array.isArray(source?.items)) return source.items;
+          if (Array.isArray(source?.list)) return source.list;
+          if (Array.isArray(source?.groups)) return source.groups;
+          if (Array.isArray(source?.data)) return source.data;
+          return [];
+        })();
+        for (const item of rawItems) {
+          if (item == null || typeof item !== 'object') continue;
+          const id = Number.parseInt(String(
+            (item as any).group_id ?? (item as any).groupId ?? (item as any).id ?? (item as any).value ?? '',
+          ), 10);
+          if (!Number.isFinite(id) || id <= 0) continue;
+          const name = String(
+            (item as any).name ?? (item as any).group_name ?? (item as any).groupName
+              ?? (item as any).title ?? (item as any).label ?? (item as any).code ?? '',
+          ).trim();
+          groups.push({ id, name });
+        }
+        if (groups.length > 0) break;
+      } catch {}
+    }
+
+    if (groups.length === 0) return null;
+    const preferred = groups.find((group) => group.name.toLowerCase() === 'default')
+      ?? groups.find((group) => group.name.toLowerCase() === 'free')
+      ?? groups[0];
+    return preferred?.id ?? null;
+  }
+
   private extractModelIds(payload: any): string[] {
     const source = payload?.data ?? payload;
     const rawModels = (() => {
@@ -958,8 +1018,15 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       name: (options?.name || '').trim() || 'metapi',
     };
 
-    const groupId = Number.parseInt((options?.group || '').trim(), 10);
-    if (Number.isFinite(groupId) && groupId > 0) {
+    const requestedGroupId = Number.parseInt((options?.group || '').trim(), 10);
+    const explicitGroupId = Number.isFinite(requestedGroupId) && requestedGroupId > 0
+      ? requestedGroupId
+      : null;
+    // Deployments that gate keys behind group membership reject a key created
+    // without one, so a group-less key would stay unusable forever. Fall back
+    // to the first group the account may actually use.
+    const groupId = explicitGroupId ?? await this.resolveDefaultGroupId(normalizedBase, accessToken);
+    if (groupId) {
       payload.group_id = groupId;
     }
 
@@ -974,16 +1041,21 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
     const endpoints = ['/api/v1/keys', '/api/v1/api-keys'];
     const headers = this.buildAuthHeader(accessToken);
-    for (const endpoint of endpoints) {
-      try {
-        const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-        });
-        this.parseSub2ApiEnvelope<any>(res, endpoint);
-        return true;
-      } catch {}
+    const groupLessPayload = { ...payload };
+    delete groupLessPayload.group_id;
+    const attempts = groupId ? [payload, groupLessPayload] : [payload];
+    for (const attempt of attempts) {
+      for (const endpoint of endpoints) {
+        try {
+          const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(attempt),
+          });
+          this.parseSub2ApiEnvelope<any>(res, endpoint);
+          return true;
+        } catch {}
+      }
     }
 
     return false;
