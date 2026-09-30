@@ -46,9 +46,11 @@ BIN=${CHROMIUM_BIN:-/usr/bin/chromium-browser}
 # has its own preset and `classic` stays the default.
 apply_layout() {
   LAYOUT="$1"
-  # Overlay detection is opt-in: only layouts that define real boxes use it.
+  # Overlay and badge detection are opt-in: only layouts that define real
+  # boxes use them.
   OVERLAY_DIALOG_BOX="0 0 0 0"
   PWD_BUBBLE_BOX="0 0 0 0"
+  CHECKIN_BADGE_BOX="0 0 0 0"
   case "$1" in
     moto)
       # The sign-in page carries a GitHub button above the form, so the whole
@@ -60,6 +62,9 @@ apply_layout() {
       CHECKIN_BUTTON_XY="1161 454"
       MODAL_SHIELD_XY="509 525"
       CHECKIN_BUTTON_BOX="1115 435 110 32"
+      # The claimed-state badge sits on the title row in the Chinese build and
+      # on its own row in the English one, so the box covers both spots.
+      CHECKIN_BADGE_BOX="960 445 115 55"
       MODAL_TITLE_BOX="490 495 305 60"
       PROFILE_MARKER_BOX="237 185 66 66"
       LOGIN_TICK_BOX="445 665 60 35"
@@ -237,21 +242,23 @@ measure() {
   local -a L=()
   mapfile -t L < <("$NODE" "$HELPER" "$LOG/cur.ppm" \
     $CHECKIN_BUTTON_BOX $MODAL_TITLE_BOX $PROFILE_MARKER_BOX $LOGIN_TICK_BOX \
-    $OVERLAY_DIALOG_BOX $PWD_BUBBLE_BOX)
-  local s=0 w=0 td=0 tb=0 pd=0 pg=0 g=0 gold=0 dull=0 og=0 pb=0 kv
+    $OVERLAY_DIALOG_BOX $PWD_BUBBLE_BOX $CHECKIN_BADGE_BOX)
+  local s=0 w=0 td=0 tb=0 pd=0 pg=0 g=0 gold=0 dull=0 og=0 pb=0 mbg=0 kv
   for kv in ${L[0]:-}; do case "$kv" in strong=*) s="${kv#strong=}";; weak=*) w="${kv#weak=}";; gold=*) gold="${kv#gold=}";; dull=*) dull="${kv#dull=}";; esac; done
   for kv in ${L[1]:-}; do case "$kv" in dark=*) td="${kv#dark=}";; bright=*) tb="${kv#bright=}";; esac; done
   for kv in ${L[2]:-}; do case "$kv" in dark=*) pd="${kv#dark=}";; green=*) pg="${kv#green=}";; esac; done
   for kv in ${L[3]:-}; do case "$kv" in green=*) g="${kv#green=}";; esac; done
   for kv in ${L[4]:-}; do case "$kv" in gold=*) og="${kv#gold=}";; esac; done
   for kv in ${L[5]:-}; do case "$kv" in bright=*) pb="${kv#bright=}";; esac; done
+  for kv in ${L[6]:-}; do case "$kv" in green=*) mbg="${kv#green=}";; esac; done
   st=BLANK; modal=0; profile=0; tsolved=0; announce_dialog=0; pwd_bubble=0
   if [ "$LAYOUT" = moto ]; then
-    # Amber palette: bright gold is the live button, the muted gold badge is
-    # the claimed state. The modal shows Cloudflare's white widget, and the
-    # green avatar disc marks the profile page on this dark theme.
-    if [ "$dull" -gt 1200 ] && [ "$gold" -lt 300 ]; then st=CHECKED
-    elif [ "$gold" -gt 1200 ]; then st=BLUE
+    # Amber palette: a bright amber button is the live control, while the
+    # claimed state is announced by the small green check-in badge next to the
+    # card title (the badge text width changes with the site language, so the
+    # pixel count of the muted button alone cannot tell the states apart).
+    if [ "$mbg" -gt 50 ]; then st=CHECKED
+    elif [ "$gold" -gt 400 ]; then st=BLUE
     fi
     if [ "$tb" -gt 2000 ]; then modal=1; fi
     if [ "$pg" -gt 1000 ]; then profile=1; fi
