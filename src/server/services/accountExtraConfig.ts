@@ -26,6 +26,11 @@ type ExternalCheckinConfig = {
   savedAt?: unknown;
 };
 
+type AgentRouterConfig = {
+  /** OAuth provider the account signs in with: 'github' or 'linuxdo'. */
+  provider?: unknown;
+};
+
 export type AccountCredentialMode = 'auto' | 'session' | 'apikey';
 
 const VALID_CREDENTIAL_MODES = new Set<AccountCredentialMode>([
@@ -46,6 +51,7 @@ type AccountExtraConfig = {
   sub2apiAuth?: Sub2ApiAuthConfig;
   sub2apiSubscription?: Sub2ApiSubscriptionConfig;
   externalCheckin?: ExternalCheckinConfig;
+  agentRouter?: AgentRouterConfig;
   [key: string]: unknown;
 };
 
@@ -428,4 +434,21 @@ export function getAutoReloginConfig(extraConfig?: ExtraConfigInput): {
   if (!username || !passwordCipher) return null;
 
   return { username, passwordCipher };
+}
+
+/**
+ * Agent Router hands out its daily $25 inside the login handler, so its
+ * check-in has to replay the account's OAuth login. The login is
+ * provider-specific (`github_*` accounts go through GitHub, `linuxdo_*`
+ * accounts through Linux.do) and nothing else on the account record says which
+ * one applies.
+ */
+export function getAgentRouterProvider(extraConfig?: ExtraConfigInput): 'github' | 'linuxdo' | null {
+  const parsed = parseExtraConfig(extraConfig);
+  const config = parsed.agentRouter;
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+
+  const raw = (config as AgentRouterConfig).provider;
+  const normalized = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return normalized === 'github' || normalized === 'linuxdo' ? normalized : null;
 }

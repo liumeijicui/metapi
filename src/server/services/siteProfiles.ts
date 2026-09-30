@@ -36,6 +36,9 @@ export const SITES_REQUIRING_SYSTEM_PROXY: readonly string[] = [
   // status endpoint (even the sign-in page transfers zero bytes), while the
   // proxy receives the normal pages and API replies.
   'motomoto.lol',
+  // Direct connections time out for every route; the proxy reaches the site,
+  // and its OAuth provider (connect.linux.do) needs the proxy as well.
+  'agentrouter.org',
 ];
 
 function normalizeHost(value: string): string {

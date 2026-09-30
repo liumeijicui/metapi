@@ -1,5 +1,6 @@
 export const PLATFORM_ALIASES = Object.assign(Object.create(null), {
   anyrouter: 'anyrouter',
+  agentrouter: 'agentrouter',
   'wong-gongyi': 'new-api',
   'vo-api': 'new-api',
   'super-api': 'new-api',
@@ -86,6 +87,7 @@ export function detectPlatformByUrlHint(url) {
   if (host === 'cloudcode-pa.googleapis.com') return 'gemini-cli';
   if ((host === '127.0.0.1' || host === 'localhost') && port === '8317') return 'cliproxyapi';
   if (host.includes('anyrouter')) return 'anyrouter';
+  if (host.includes('agentrouter')) return 'agentrouter';
   if (host.includes('donehub') || host.includes('done-hub')) return 'done-hub';
   if (host.includes('onehub') || host.includes('one-hub')) return 'one-hub';
   if (host.includes('veloera')) return 'veloera';
