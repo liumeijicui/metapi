@@ -22,7 +22,12 @@ const CONNECT_ORIGIN = 'https://connect.linux.do';
 const CONSOLE_URL_PATTERN = /agentrouter\.org\/console/i;
 const CALLBACK_URL_PATTERN = /agentrouter\.org\/oauth\/linuxdo/i;
 const CLOUDFLARE_FRAME_SELECTOR = 'iframe[src*="challenges.cloudflare.com"]';
-const AUTHORIZE_BUTTON_NAME = /授权|Authorize/i;
+/**
+ * The consent page renders its answer buttons as links labelled 允许 / 拒绝
+ * (Chinese) or Allow / Authorize (English), never as real <button> elements.
+ */
+const AUTHORIZE_BUTTON_TEXT = /允许|授权|Authorize|Allow/i;
+const AUTHORIZE_BUTTON_SELECTOR = 'button, a, input[type="submit"], input[type="button"]';
 const NAVIGATION_TIMEOUT_MS = 60_000;
 const SECURITY_CHECK_TIMEOUT_MS = 45_000;
 
@@ -116,7 +121,10 @@ async function clickWithRealPointer(page: Page, widget: Locator): Promise<void> 
 }
 
 async function clickAuthorizeButton(page: Page): Promise<void> {
-  const button = page.getByRole('button', { name: AUTHORIZE_BUTTON_NAME }).first();
+  const button = page
+    .locator(AUTHORIZE_BUTTON_SELECTOR)
+    .filter({ hasText: AUTHORIZE_BUTTON_TEXT })
+    .first();
   const deadline = Date.now() + NAVIGATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await button.isVisible().catch(() => false)) {
