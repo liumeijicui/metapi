@@ -9,6 +9,8 @@ data/*
 logs/
 tmp/*
 !tmp/.gitkeep
+.tmp/
+config.json
 .worktrees/
 
 # Local desktop/debug artifacts

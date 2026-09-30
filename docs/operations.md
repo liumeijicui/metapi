@@ -226,6 +226,33 @@ curl -sS http://localhost:4000/v1/chat/completions \
 
 执行前建议先做一次导出或数据库备份。
 
+## 浏览器签到（Turnstile 站点）
+
+少数 New API 站点把签到接口放在 Cloudflare Turnstile 之后，任何 HTTP 请求都过不去；这类站点同时会拒绝 DevTools 驱动的浏览器。Metapi 的兜底方式是：在服务器上用真实 Chromium + 虚拟显示器（Xvfb）+ 合成鼠标键盘事件完成一次人工式签到。
+
+触发条件（同时满足才会启动浏览器）：
+
+- 站点平台是 `new-api`
+- 账号签到返回 Turnstile 校验提示
+- 该账号在添加时是用「用户名 + 密码」登录的（凭证已加密存于账号配置，用于自动重登）
+- 当前机器具备浏览器签到的运行条件
+
+运行条件（Linux 服务器）：
+
+```bash
+# CentOS / RHEL
+yum install -y chromium xorg-x11-server-Xvfb xdotool xorg-x11-apps
+
+# Debian / Ubuntu
+apt install -y chromium xvfb xdotool x11-apps
+```
+
+- 若使用非默认路径的浏览器，可设置环境变量 `CHECKIN_BROWSER_PATH`
+- 若服务器已有可用显示器（例如 systemd 单元的 `DISPLAY=:99`），脚本直接复用；没有时会在 `CHECKIN_DISPLAY`（默认 `:99`）上临时启动 Xvfb
+- Windows / macOS 不启用该兜底，会保持原来的「需要人工签到」提示
+
+运行痕迹保存在数据目录下 `checkin-browser/site-<站点ID>/`：`runs/<时间戳>/` 是每次运行的日志与截图，`profiles/<站点ID>` 是浏览器配置（登录态复用在这里，通常无需每天重新登录）。
+
 ## 下一步
 
 - [常见问题](./faq.md) — 常见报错与修复

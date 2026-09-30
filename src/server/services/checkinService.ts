@@ -17,7 +17,11 @@ import {
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
-import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
+import { resolveChannelProxyUrl, withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
+import { runBrowserCheckin } from './browserCheckinRunner.js';
+import { config } from '../config.js';
+import { resolve } from 'node:path';
+import type { CheckinResult } from './platforms/base.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -165,6 +169,34 @@ async function tryAutoRelogin(account: any, site: any): Promise<AutoReloginResul
   };
 }
 
+/**
+ * Answers a browser-only check-in challenge.
+ *
+ * Some New API forks protect the check-in endpoint with Cloudflare Turnstile,
+ * which no plain HTTP call can satisfy. When the account has stored login
+ * credentials, run the same flow a person would drive in a browser on the
+ * server; otherwise return null so the original verdict (and its "needs manual
+ * verification" handling) stands.
+ */
+async function tryBrowserCheckin(site: any, account: any): Promise<CheckinResult | null> {
+  if ((site.platform || '').toLowerCase() !== 'new-api') return null;
+
+  const relogin = getAutoReloginConfig(account.extraConfig);
+  if (!relogin) return null;
+  const password = decryptAccountPassword(relogin.passwordCipher);
+  if (!password) return null;
+
+  const outcome = await runBrowserCheckin({
+    siteUrl: site.url,
+    username: relogin.username || account.username,
+    password,
+    proxyUrl: resolveChannelProxyUrl(site, account.extraConfig),
+    profileKey: `site-${site.id}`,
+    logDir: resolve(config.dataDir, 'checkin-browser', `site-${site.id}`),
+  });
+  return outcome.kind === 'result' ? outcome.result : null;
+}
+
 export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
   const rows = await db
     .select()
@@ -226,7 +258,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   let activeAccessToken = account.accessToken;
   const runCheckin = (token: string) => withAccountProxyOverride(accountProxyUrl,
     () => withAccountCredentialContext({ accountId: account.id, siteId: site.id },
-      () => adapter.checkin(site.url, token, platformUserId)));
+      () => adapter.checkin(site.url, token, platformUserId, {
+        externalCheckinUrl: site.externalCheckinUrl,
+        extraConfig: account.extraConfig,
+      })));
 
   let result = await runCheckin(activeAccessToken);
 
@@ -242,6 +277,13 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       if (relogin.extraConfig) account.extraConfig = relogin.extraConfig;
       result = await runCheckin(activeAccessToken);
     }
+  }
+
+  // A Turnstile-gated check-in cannot be answered over HTTP; when the account
+  // carries login credentials, retry it in a real browser on this machine.
+  if (isManualVerificationRequiredMessage(result.message)) {
+    const browserResult = await tryBrowserCheckin(site, account);
+    if (browserResult) result = browserResult;
   }
 
   const isCloudflare = isCloudflareChallenge(result.message);
