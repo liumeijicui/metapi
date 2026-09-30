@@ -16,11 +16,11 @@ import {
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
+import { classifyFailureReason } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
-import { resolveChannelProxyUrl, withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
-import { runBrowserCheckin } from './browserCheckinRunner.js';
+import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
+import { runBrowserSessionCheckin } from './browserSessionCredential.js';
 import { config } from '../config.js';
-import { resolve } from 'node:path';
 import type { CheckinResult } from './platforms/base.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
@@ -73,12 +73,7 @@ function isUnsupportedCheckinMessage(message?: string | null): boolean {
 }
 
 function isManualVerificationRequiredMessage(message?: string | null): boolean {
-  if (!message) return false;
-  const text = message.toLowerCase();
-  return (
-    text.includes('turnstile token \u4e3a\u7a7a') ||
-    (text.includes('turnstile') && (text.includes('token') || text.includes('\u6821\u9a8c') || text.includes('\u9a8c\u8bc1')))
-  );
+  return classifyFailureReason({ message }).code === 'manual_turnstile_required';
 }
 
 function shouldAttemptAutoRelogin(message?: string | null): boolean {
@@ -170,6 +165,17 @@ async function tryAutoRelogin(account: any, site: any): Promise<AutoReloginResul
 }
 
 /**
+ * Outcome of a browser check-in: the verdict plus the session it established.
+ *
+ * The session is what makes the run worth doing even when the site reports the
+ * day as already claimed: it is the credential the HTTP path uses from then on.
+ */
+type BrowserCheckinAttempt = {
+  result: CheckinResult;
+  accessToken?: string;
+};
+
+/**
  * Answers a browser-only check-in challenge.
  *
  * Some New API forks protect the check-in endpoint with Cloudflare Turnstile,
@@ -178,7 +184,7 @@ async function tryAutoRelogin(account: any, site: any): Promise<AutoReloginResul
  * server; otherwise return null so the original verdict (and its "needs manual
  * verification" handling) stands.
  */
-async function tryBrowserCheckin(site: any, account: any): Promise<CheckinResult | null> {
+async function tryBrowserCheckin(site: any, account: any): Promise<BrowserCheckinAttempt | null> {
   if ((site.platform || '').toLowerCase() !== 'new-api') return null;
 
   const relogin = getAutoReloginConfig(account.extraConfig);
@@ -186,15 +192,30 @@ async function tryBrowserCheckin(site: any, account: any): Promise<CheckinResult
   const password = decryptAccountPassword(relogin.passwordCipher);
   if (!password) return null;
 
-  const outcome = await runBrowserCheckin({
-    siteUrl: site.url,
+  const { outcome, accessToken } = await runBrowserSessionCheckin({
+    site,
     username: relogin.username || account.username,
     password,
-    proxyUrl: resolveChannelProxyUrl(site, account.extraConfig),
-    profileKey: `site-${site.id}`,
-    logDir: resolve(config.dataDir, 'checkin-browser', `site-${site.id}`),
+    accountExtraConfig: account.extraConfig,
   });
-  return outcome.kind === 'result' ? outcome.result : null;
+
+  // The browser signs in with credentials the HTTP path cannot use, so the
+  // session it just created is the account's live credential. Keeping it stops
+  // the account from reading as expired: balance, model and probe calls work
+  // again, and the next run only needs the browser for the check-in itself.
+  if (accessToken && accessToken !== account.accessToken) {
+    await db.update(schema.accounts)
+      .set({
+        accessToken,
+        status: account.status === 'expired' ? 'active' : account.status,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+  }
+
+  if (outcome.kind !== 'result') return null;
+  return { result: outcome.result, accessToken: accessToken || undefined };
 }
 
 export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
@@ -282,8 +303,11 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   // A Turnstile-gated check-in cannot be answered over HTTP; when the account
   // carries login credentials, retry it in a real browser on this machine.
   if (isManualVerificationRequiredMessage(result.message)) {
-    const browserResult = await tryBrowserCheckin(site, account);
-    if (browserResult) result = browserResult;
+    const browserAttempt = await tryBrowserCheckin(site, account);
+    if (browserAttempt) {
+      result = browserAttempt.result;
+      if (browserAttempt.accessToken) activeAccessToken = browserAttempt.accessToken;
+    }
   }
 
   const isCloudflare = isCloudflareChallenge(result.message);

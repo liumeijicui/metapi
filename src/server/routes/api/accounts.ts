@@ -21,6 +21,8 @@ import {
   type AccountCredentialMode,
 } from "../../services/accountExtraConfig.js";
 import { encryptAccountPassword } from "../../services/accountCredentialService.js";
+import { runBrowserSessionCheckin } from "../../services/browserSessionCredential.js";
+import { classifyFailureReason } from "../../services/failureReasonService.js";
 import { applyAccountUpdateWorkflow } from "../../services/accountUpdateWorkflow.js";
 import { startBackgroundTask } from "../../services/backgroundTaskService.js";
 import { parseCheckinRewardAmount } from "../../services/checkinRewardParser.js";
@@ -538,14 +540,35 @@ export async function accountsRoutes(app: FastifyInstance) {
 
       // Login to the target site
       const loginResult = await adapter.login(site.url, username, password);
-      if (!loginResult.success || !loginResult.accessToken) {
-        const normalizedFailure = normalizeLoginFailure(loginResult.message);
+      // A Turnstile-gated login never answers the HTTP call (方舟 replies
+      // "Turnstile token 为空" to every attempt), while the same credentials do
+      // sign in inside the browser the check-in already drives. Capture that
+      // session instead of refusing the bind: it is the only credential such a
+      // site hands out, and everything below treats it like any other one. Only
+      // a Turnstile gate is worth a browser - a wrong password must not launch
+      // one, and neither may any other failure the site reports.
+      const turnstileGated = !loginResult.accessToken && classifyFailureReason({
+        message: loginResult.message,
+      }).code === "manual_turnstile_required";
+      const browserCapture = turnstileGated && (site.platform || "").toLowerCase() === "new-api"
+        ? await runBrowserSessionCheckin({ site, username, password })
+        : null;
+      const capturedAccessToken = browserCapture?.accessToken || "";
+
+      if (!loginResult.accessToken && !capturedAccessToken) {
+        const normalizedFailure = normalizeLoginFailure(
+          loginResult.message || (browserCapture?.outcome.kind === "unavailable"
+            ? browserCapture.outcome.reason
+            : ""),
+        );
         return {
           success: false,
           shieldBlocked: normalizedFailure.shieldBlocked,
           message: normalizedFailure.message,
         };
       }
+
+      const accessToken = loginResult.accessToken || capturedAccessToken;
 
       // The id reported by the site itself is authoritative; guessing from the
       // username only works when it ends with the id (e.g. `linuxdo_80305`)
@@ -562,20 +585,27 @@ export async function accountsRoutes(app: FastifyInstance) {
         key?: string | null;
         enabled?: boolean | null;
       }> = [];
-      try {
-        apiToken = await adapter.getApiToken(
-          site.url,
-          loginResult.accessToken,
-          guessedPlatformUserId,
-        );
-      } catch {}
-      try {
-        apiTokens = await adapter.getApiTokens(
-          site.url,
-          loginResult.accessToken,
-          guessedPlatformUserId,
-        );
-      } catch {}
+      // A captured browser session is a rolling `new_api_refresh` cookie: the
+      // first exchange retires the secret it spends, and only the credential
+      // context knows where to write the replacement. There is no account row
+      // yet, so the token lookup waits for the one below, which the account
+      // workflow runs inside that context.
+      if (!capturedAccessToken) {
+        try {
+          apiToken = await adapter.getApiToken(
+            site.url,
+            accessToken,
+            guessedPlatformUserId,
+          );
+        } catch {}
+        try {
+          apiTokens = await adapter.getApiTokens(
+            site.url,
+            accessToken,
+            guessedPlatformUserId,
+          );
+        } catch {}
+      }
 
       const preferredApiToken =
         apiTokens.find((token) => token.enabled !== false && token.key)?.key ||
@@ -614,7 +644,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         await db
           .update(schema.accounts)
           .set({
-            accessToken: loginResult.accessToken,
+            accessToken,
             apiToken: preferredApiToken || undefined,
             checkinEnabled: true,
             status: "active",
@@ -632,7 +662,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           values: {
             siteId,
             username,
-            accessToken: loginResult.accessToken,
+            accessToken,
             apiToken: preferredApiToken || undefined,
             checkinEnabled: true,
             extraConfig,

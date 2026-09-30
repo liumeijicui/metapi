@@ -18,8 +18,14 @@
 #   CHECKIN_PROFILE_DIR   Chromium user-data-dir (login session is kept here)
 #   CHECKIN_LOG_DIR       screenshots + run.log for this run
 #   CHECKIN_PROXY_URL     optional http(s) proxy for the browser
+#   CHECKIN_COOKIE_NAME   login cookie to leave in the profile before exiting
 #   CHECKIN_DISPLAY       X display to use when none is alive (default :99)
 #   CHROMIUM_BIN          optional chromium executable override
+#
+# CHECKIN_COOKIE_NAME is what turns the browser session into a credential the
+# caller can keep using: the named cookie is cleared before the run and the flow
+# then waits for the freshly written value to reach the profile, because
+# Chromium's cookie store only commits on a ~30s timer and never flushes on exit.
 #
 # Output contract: the last stdout line is
 #   METAPI_CHECKIN_RESULT={"ok":<bool>,"already":<bool>,"detail":"<token>"}
@@ -34,6 +40,10 @@ LOG=${CHECKIN_LOG_DIR:-/tmp/metapi-checkin-browser}
 PROXY=${CHECKIN_PROXY_URL:-}
 WANTED_DISPLAY=${CHECKIN_DISPLAY:-:99}
 BIN=${CHROMIUM_BIN:-/usr/bin/chromium-browser}
+NODE=${NODE_BIN:-node}
+HELPER=${CHECKIN_HELPER:-$(dirname "$0")/regionStats.mjs}
+COOKIE_HELPER=$(dirname "$0")/cookieStore.mjs
+COOKIE_NAME=${CHECKIN_COOKIE_NAME:-}
 
 # Pixel coordinates of the elements this flow drives. They belong to the window
 # geometry set below (1280x900 at 0,0 on a 1440x1000 display) and must be
@@ -51,6 +61,7 @@ apply_layout() {
   OVERLAY_DIALOG_BOX="0 0 0 0"
   PWD_BUBBLE_BOX="0 0 0 0"
   CHECKIN_BADGE_BOX="0 0 0 0"
+  EXTRA_LAUNCH_FLAGS=""
   case "$1" in
     moto)
       # The sign-in page carries a GitHub button above the form, so the whole
@@ -93,6 +104,26 @@ apply_layout() {
       # --test-type, which is the switch that suppresses it.
       EXTRA_LAUNCH_FLAGS="--test-type"
       ;;
+    ark)
+      # 方舟 (api.bxacc.xyz). Its sign-in form is taller than the other builds:
+      # a LinuxDO button sits above the fields, so everything is ~70px lower
+      # than on the rc layout. Measured with the infobar visible, hence no
+      # --test-type.
+      USERNAME_XY="640 512"
+      PASSWORD_XY="640 584"
+      LOGIN_SHIELD_XY="458 715"
+      LOGIN_BUTTON_XY="640 638"
+      CHECKIN_BUTTON_XY="1166 506"
+      MODAL_SHIELD_XY="509 550"
+      CHECKIN_BUTTON_BOX="1113 489 112 34"
+      MODAL_TITLE_BOX="437 425 150 26"
+      # The profile page is the only one that renders the check-in totals row.
+      PROFILE_MARKER_BOX="900 655 340 45"
+      LOGIN_TICK_BOX="441 692 60 45"
+      # Chromium's save-password bubble covers the check-in card on this build.
+      PWD_BUBBLE_BOX="850 95 300 40"
+      PWD_BUBBLE_DISMISS_XY="1126 114"
+      ;;
     *)
       USERNAME_XY="640 546"
       PASSWORD_XY="640 616"
@@ -112,6 +143,7 @@ apply_layout() {
 case "$SITE" in
   *motomoto.lol*) apply_layout moto ;;
   *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
+  *bxacc.xyz*) apply_layout ark ;;
   *) apply_layout classic ;;
 esac
 
@@ -124,13 +156,16 @@ CHROMIUM_STARTED=0
 WID=""
 cleanup() {
   if [ "$CHROMIUM_STARTED" = 1 ]; then
-    # The site's login cookie is session-only, so each run signs in again
-    # (measured: a killed or restarted profile both come back signed out).
-    # Killing instead of quitting still avoids Chromium's shutdown prompts and
-    # keeps the profile's shield cookies; the crash bubble stays hidden through
-    # --hide-crash-restore-bubble.
+    # Let Chromium exit on its own before forcing it: the caller reads this
+    # profile's login cookie right after the run, and a browser killed mid-write
+    # leaves both a dirty profile and a cookie store it was still updating. The
+    # kill that follows is only the fallback for a browser that ignores the
+    # signal; the crash bubble stays hidden through --hide-crash-restore-bubble.
     pkill -u "$(id -u)" -f "$PROFILE" 2>/dev/null
-    sleep 2
+    for _ in $(seq 1 30); do
+      pgrep -u "$(id -u)" -f "$PROFILE" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
     pkill -9 -u "$(id -u)" -f "$PROFILE" 2>/dev/null
   fi
   if [ -n "$XVFB_PID" ]; then kill "$XVFB_PID" 2>/dev/null; fi
@@ -188,6 +223,12 @@ pkill -u "$(id -u)" -f "$PROFILE" 2>/dev/null
 sleep 1
 rm -f "$PROFILE"/Singleton*
 mkdir -p "$PROFILE"
+
+# The caller reads the login cookie this run writes, so drop whatever an earlier
+# run left behind: "the cookie is in the store" then means "this run wrote it".
+if [ -n "$COOKIE_NAME" ]; then
+  "$NODE" "$COOKIE_HELPER" drop "$PROFILE" "$COOKIE_NAME" >/dev/null 2>&1 || true
+fi
 
 if [ -n "$PROXY" ]; then
   setsid "$BIN" --user-data-dir="$PROFILE" --proxy-server="$PROXY" $EXTRA_LAUNCH_FLAGS \
@@ -274,8 +315,6 @@ measure() {
   if [ "$pb" -gt 2000 ]; then pwd_bubble=1; fi
 }
 
-NODE=${NODE_BIN:-node}
-HELPER=${CHECKIN_HELPER:-$(dirname "$0")/regionStats.mjs}
 if [ ! -f "$HELPER" ]; then
   say "missing helper $HELPER"
   emit false false no_helper
@@ -362,6 +401,21 @@ dismiss_overlays() {
   done
 }
 
+# Chromium commits its cookie store on a ~30s timer and never flushes it on
+# exit, so the login cookie only reaches the profile while the window is still
+# open. The caller exchanges that cookie for a plain HTTP credential once this
+# script is done, so hold the run open until the value has landed.
+wait_for_login_cookie() {
+  [ -n "$COOKIE_NAME" ] || return 0
+  local waited
+  if waited=$("$NODE" "$COOKIE_HELPER" wait "$PROFILE" "$COOKIE_NAME" \
+    "${CHECKIN_COOKIE_WAIT_SECONDS:-60}" 2>/dev/null); then
+    say "login cookie stored in the profile ($waited)"
+  else
+    say "login cookie never reached the profile"
+  fi
+}
+
 wait_profile
 dismiss_overlays
 say "state1=$st modal=$modal profile=$profile"
@@ -386,6 +440,7 @@ fi
 if [ "$st" = CHECKED ]; then
   snap result
   say "already checked in today"
+  wait_for_login_cookie
   emit true true already_checked_in
   exit 0
 fi
@@ -405,6 +460,7 @@ while [ "$n" -lt 8 ]; do
   if [ "$st" = CHECKED ]; then
     snap result
     say "check-in completed"
+    wait_for_login_cookie
     emit true false checked_in
     exit 0
   fi

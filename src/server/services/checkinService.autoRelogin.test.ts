@@ -80,6 +80,12 @@ vi.mock('./accountCredentialService.js', () => ({
   decryptAccountPassword: (...args: unknown[]) => decryptPasswordMock(...args),
 }));
 
+const browserSessionMock = vi.fn();
+
+vi.mock('./browserSessionCredential.js', () => ({
+  runBrowserSessionCheckin: (...args: unknown[]) => browserSessionMock(...args),
+}));
+
 describe('checkinService auto relogin', () => {
   beforeEach(() => {
     adapterMock.checkin.mockReset();
@@ -92,6 +98,7 @@ describe('checkinService auto relogin', () => {
     selectGetMock.mockReset();
     insertValuesMock.mockReset();
     updateSetMock.mockReset();
+    browserSessionMock.mockReset();
   });
 
   it('retries checkin once after auto relogin when access token is missing', async () => {
@@ -570,5 +577,100 @@ describe('checkinService auto relogin', () => {
     expect(firstInsertPayload?.message).toBe('站点开启了 Turnstile 校验，需要人工签到');
     expect(refreshBalanceMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the session a browser check-in establishes', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 3,
+          username: '3145215575',
+          accessToken: 'new_api_refresh=retired',
+          status: 'expired',
+          extraConfig: JSON.stringify({
+            credentialMode: 'session',
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 15,
+          name: '方舟',
+          url: 'https://api.bxacc.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'Turnstile token 为空',
+    });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: true, message: '浏览器签到成功（已通过站点人机校验）' },
+        logDir: '/data/metapi/checkin-browser/site-15/runs/site-15-x',
+        profileDir: '/data/metapi/checkin-browser/site-15/profiles/site-15',
+      },
+      accessToken: 'new_api_refresh=fresh',
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(3);
+
+    expect(result.success).toBe(true);
+    // The credential the browser earned has to reach the account row, or the
+    // next call spends a retired secret and the account looks revoked again.
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      accessToken: 'new_api_refresh=fresh',
+      status: 'active',
+    }));
+  });
+
+  it('leaves the stored credential alone when the browser run stores no session', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 3,
+          username: '3145215575',
+          accessToken: 'new_api_refresh=retired',
+          status: 'expired',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 15,
+          name: '方舟',
+          url: 'https://api.bxacc.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'Turnstile token 为空',
+    });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: false, message: '浏览器签到未完成：login_failed' },
+        logDir: '/logs',
+        profileDir: '/profile',
+      },
+      accessToken: null,
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(3);
+
+    // Without a session the browser run is just a failed check-in, and the
+    // account keeps the credential it had instead of a value nothing can use.
+    expect(result.success).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(updateSetMock).not.toHaveBeenCalled();
   });
 });

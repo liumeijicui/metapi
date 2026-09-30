@@ -20,7 +20,7 @@ import { resolveChromiumExecutable } from './assistedLogin/chromeLocator.js';
  */
 
 export type BrowserCheckinOutcome =
-  | { kind: 'result'; result: CheckinResult; logDir: string }
+  | { kind: 'result'; result: CheckinResult; logDir: string; profileDir: string }
   | { kind: 'unavailable'; reason: string };
 
 export type BrowserCheckinInput = {
@@ -31,6 +31,12 @@ export type BrowserCheckinInput = {
   profileKey: string;
   /** Directory the runner creates per-run log/screenshot subfolders in. */
   logDir: string;
+  /**
+   * Name of the cookie the script must leave in the profile before it exits.
+   * Omit it when the caller has no use for the login session; the run is then
+   * shorter, because it does not wait for Chromium to commit its cookie store.
+   */
+  cookieName?: string | null;
   proxyUrl?: string | null;
   timeoutMs?: number;
 };
@@ -171,6 +177,8 @@ async function executeBrowserCheckin(
     CHROMIUM_BIN: executable.path,
     NODE_BIN: process.execPath,
   };
+  const cookieName = (input.cookieName || '').trim();
+  if (cookieName) env.CHECKIN_COOKIE_NAME = cookieName;
   const proxyUrl = (input.proxyUrl || '').trim();
   if (proxyUrl) env.CHECKIN_PROXY_URL = proxyUrl;
 
@@ -218,7 +226,8 @@ async function executeBrowserCheckin(
       kind: 'result',
       result: { success: false, message: `浏览器签到未完成：${detail}` },
       logDir,
+      profileDir,
     };
   }
-  return { kind: 'result', result: mapCheckinVerdict(verdict), logDir };
+  return { kind: 'result', result: mapCheckinVerdict(verdict), logDir, profileDir };
 }
