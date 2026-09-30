@@ -39,12 +39,38 @@ BIN=${CHROMIUM_BIN:-/usr/bin/chromium-browser}
 # geometry set below (1280x900 at 0,0 on a 1440x1000 display) and must be
 # revisited if that geometry ever changes.
 #
-# Two front-end families are in the wild: the classic dashboard shipped with
-# older New API builds, and the React one whose sign-in form is centred. They
-# put the same controls at different coordinates, so each family has its own
-# preset and `classic` stays the default.
+# Three front-end families are in the wild: the classic dashboard shipped with
+# older New API builds, the React one whose sign-in form is centred, and
+# motomoto's themed React build. They put the same controls at different
+# coordinates and even paint them differently (blue vs amber), so each family
+# has its own preset and `classic` stays the default.
 apply_layout() {
+  LAYOUT="$1"
+  # Overlay detection is opt-in: only layouts that define real boxes use it.
+  OVERLAY_DIALOG_BOX="0 0 0 0"
+  PWD_BUBBLE_BOX="0 0 0 0"
   case "$1" in
+    moto)
+      # The sign-in page carries a GitHub button above the form, so the whole
+      # form sits ~42px lower than on the plain rc layout.
+      USERNAME_XY="640 484"
+      PASSWORD_XY="640 554"
+      LOGIN_SHIELD_XY="455 681"
+      LOGIN_BUTTON_XY="640 609"
+      CHECKIN_BUTTON_XY="1161 454"
+      MODAL_SHIELD_XY="509 525"
+      CHECKIN_BUTTON_BOX="1115 435 110 32"
+      MODAL_TITLE_BOX="490 495 305 60"
+      PROFILE_MARKER_BOX="237 185 66 66"
+      LOGIN_TICK_BOX="445 665 60 35"
+      # Floating panels that must be dismissed before the card is clickable:
+      # the site's announcement dialog and Chromium's save-password bubble.
+      OVERLAY_DIALOG_BOX="845 590 55 28"
+      PWD_BUBBLE_BOX="850 95 300 40"
+      ANNOUNCE_CLOSE_XY="905 370"
+      PWD_BUBBLE_DISMISS_XY="1019 370"
+      EXTRA_LAUNCH_FLAGS="--test-type"
+      ;;
     rc)
       USERNAME_XY="640 442"
       PASSWORD_XY="640 512"
@@ -79,6 +105,7 @@ apply_layout() {
 }
 
 case "$SITE" in
+  *motomoto.lol*) apply_layout moto ;;
   *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
   *) apply_layout classic ;;
 esac
@@ -202,24 +229,42 @@ snap() {
   rm -f "$LOG/$1.xwd"
 }
 measure() {
-  # Classifies the check-in button (strong blue = actionable, pale blue =
-  # already checked in), whether the Security Check dialog is open, whether the
-  # profile page is really rendered, and whether the login shield turned green.
+  # Classifies the check-in button (actionable vs already checked in), whether
+  # the Security Check dialog is open, whether the profile page is really
+  # rendered, and whether the login shield turned green. The colours that carry
+  # those meanings differ per layout, so the boxes above and the palette below
+  # travel together.
   local -a L=()
   mapfile -t L < <("$NODE" "$HELPER" "$LOG/cur.ppm" \
-    $CHECKIN_BUTTON_BOX $MODAL_TITLE_BOX $PROFILE_MARKER_BOX $LOGIN_TICK_BOX)
-  local s=0 w=0 t=0 p=0 g=0 kv
-  for kv in ${L[0]:-}; do case "$kv" in strong=*) s="${kv#strong=}";; weak=*) w="${kv#weak=}";; esac; done
-  for kv in ${L[1]:-}; do case "$kv" in dark=*) t="${kv#dark=}";; esac; done
-  for kv in ${L[2]:-}; do case "$kv" in dark=*) p="${kv#dark=}";; esac; done
+    $CHECKIN_BUTTON_BOX $MODAL_TITLE_BOX $PROFILE_MARKER_BOX $LOGIN_TICK_BOX \
+    $OVERLAY_DIALOG_BOX $PWD_BUBBLE_BOX)
+  local s=0 w=0 td=0 tb=0 pd=0 pg=0 g=0 gold=0 dull=0 og=0 pb=0 kv
+  for kv in ${L[0]:-}; do case "$kv" in strong=*) s="${kv#strong=}";; weak=*) w="${kv#weak=}";; gold=*) gold="${kv#gold=}";; dull=*) dull="${kv#dull=}";; esac; done
+  for kv in ${L[1]:-}; do case "$kv" in dark=*) td="${kv#dark=}";; bright=*) tb="${kv#bright=}";; esac; done
+  for kv in ${L[2]:-}; do case "$kv" in dark=*) pd="${kv#dark=}";; green=*) pg="${kv#green=}";; esac; done
   for kv in ${L[3]:-}; do case "$kv" in green=*) g="${kv#green=}";; esac; done
-  st=BLANK; modal=0; profile=0; tsolved=0
-  if [ "$s" -gt 300 ]; then st=BLUE
-  elif [ "$w" -gt 300 ]; then st=CHECKED
+  for kv in ${L[4]:-}; do case "$kv" in gold=*) og="${kv#gold=}";; esac; done
+  for kv in ${L[5]:-}; do case "$kv" in bright=*) pb="${kv#bright=}";; esac; done
+  st=BLANK; modal=0; profile=0; tsolved=0; announce_dialog=0; pwd_bubble=0
+  if [ "$LAYOUT" = moto ]; then
+    # Amber palette: bright gold is the live button, the muted gold badge is
+    # the claimed state. The modal shows Cloudflare's white widget, and the
+    # green avatar disc marks the profile page on this dark theme.
+    if [ "$dull" -gt 1200 ] && [ "$gold" -lt 300 ]; then st=CHECKED
+    elif [ "$gold" -gt 1200 ]; then st=BLUE
+    fi
+    if [ "$tb" -gt 2000 ]; then modal=1; fi
+    if [ "$pg" -gt 1000 ]; then profile=1; fi
+  else
+    if [ "$s" -gt 300 ]; then st=BLUE
+    elif [ "$w" -gt 300 ]; then st=CHECKED
+    fi
+    if [ "$td" -gt 100 ]; then modal=1; fi
+    if [ "$pd" -gt 200 ]; then profile=1; fi
   fi
-  if [ "$t" -gt 100 ]; then modal=1; fi
-  if [ "$p" -gt 200 ]; then profile=1; fi
   if [ "$g" -gt 50 ]; then tsolved=1; fi
+  if [ "$og" -gt 500 ]; then announce_dialog=1; fi
+  if [ "$pb" -gt 2000 ]; then pwd_bubble=1; fi
 }
 
 NODE=${NODE_BIN:-node}
@@ -259,6 +304,13 @@ login() {
     snap "after-login-$attempt"
     snap cur; measure; rm -f "$LOG/cur.ppm"
     say "attempt$attempt profile=$profile state=$st"
+    if [ "$profile" = 0 ]; then
+      # Some builds land on a start page without the profile marker; look at
+      # the real profile page before declaring the attempt a failure.
+      nav "$SITE/profile" 8
+      wait_profile
+      say "attempt$attempt profile-after-nav=$profile state=$st"
+    fi
     [ "$profile" = 1 ] && return 0
     attempt=$((attempt+1))
     sleep 2
@@ -279,7 +331,33 @@ wait_profile() {
   done
 }
 
+# Closes the floating panels that sit above the profile page and would swallow
+# clicks. Only the moto layout defines their regions, so elsewhere this just
+# leaves the current measurement in place.
+dismiss_overlays() {
+  [ "$LAYOUT" = moto ] || return 0
+  local i handled
+  for i in 1 2 3 4; do
+    snap cur; measure; rm -f "$LOG/cur.ppm"
+    handled=0
+    if [ "$pwd_bubble" = 1 ]; then
+      say "dismissing the save-password bubble"
+      xdotool mousemove $PWD_BUBBLE_DISMISS_XY click 1
+      sleep 1.5
+      handled=1
+    fi
+    if [ "$announce_dialog" = 1 ]; then
+      say "dismissing the announcement dialog"
+      xdotool mousemove $ANNOUNCE_CLOSE_XY click 1
+      sleep 1.5
+      handled=1
+    fi
+    [ "$handled" = 0 ] && break
+  done
+}
+
 wait_profile
+dismiss_overlays
 say "state1=$st modal=$modal profile=$profile"
 
 if [ "$profile" = 0 ]; then
@@ -290,6 +368,7 @@ if [ "$profile" = 0 ]; then
   login || true
   nav "$SITE/profile" 8
   wait_profile
+  dismiss_overlays
   if [ "$profile" = 0 ]; then
     snap result
     say "sign-in never reached the profile page"

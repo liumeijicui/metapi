@@ -43,6 +43,9 @@ for (let index = 0; index + 3 < rest.length; index += 4) {
   let green = 0;
   let nonwhite = 0;
   let dark = 0;
+  let gold = 0;
+  let dull = 0;
+  let bright = 0;
   for (let y = Math.max(0, y0); y < Math.min(y0 + h, height); y += 1) {
     for (let x = Math.max(0, x0); x < Math.min(x0 + w, width); x += 1) {
       const offset = position + (y * width + x) * channels;
@@ -58,7 +61,13 @@ for (let index = 0; index + 3 < rest.length; index += 4) {
         else if (r >= 140) weak += 1;
       }
       if (g - r > 40 && g - b > 40) green += 1;
+      // Warm themes (moto) paint the actionable control amber and its
+      // "already claimed" badge in a muted tone; the bright counter also
+      // recognises Cloudflare's white Turnstile widget on dark pages.
+      if (r >= 150 && g >= 115 && r - b >= 60) gold += 1;
+      else if (r >= 100 && r < 150 && g >= 80 && g < 130 && r - b >= 30) dull += 1;
+      if (r > 200 && g > 200 && b > 200) bright += 1;
     }
   }
-  console.log(`strong=${strong} weak=${weak} green=${green} nonwhite=${nonwhite} dark=${dark}`);
+  console.log(`strong=${strong} weak=${weak} green=${green} nonwhite=${nonwhite} dark=${dark} gold=${gold} dull=${dull} bright=${bright}`);
 }
