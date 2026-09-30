@@ -336,23 +336,22 @@ wait_profile() {
 # leaves the current measurement in place.
 dismiss_overlays() {
   [ "$LAYOUT" = moto ] || return 0
-  local i handled
+  local i
+  # One click per pass: a dialog that is already closing would otherwise take
+  # a second click, and that click would land on the page underneath.
   for i in 1 2 3 4; do
     snap cur; measure; rm -f "$LOG/cur.ppm"
-    handled=0
     if [ "$pwd_bubble" = 1 ]; then
       say "dismissing the save-password bubble"
       xdotool mousemove $PWD_BUBBLE_DISMISS_XY click 1
-      sleep 1.5
-      handled=1
-    fi
-    if [ "$announce_dialog" = 1 ]; then
+      sleep 2
+    elif [ "$announce_dialog" = 1 ]; then
       say "dismissing the announcement dialog"
       xdotool mousemove $ANNOUNCE_CLOSE_XY click 1
-      sleep 1.5
-      handled=1
+      sleep 2.5
+    else
+      break
     fi
-    [ "$handled" = 0 ] && break
   done
 }
 
