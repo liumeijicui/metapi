@@ -85,6 +85,10 @@ const browserSessionMock = vi.fn();
 vi.mock('./browserSessionCredential.js', () => ({
   // Mirrors the real module's constant so the service can recognise a session.
   BROWSER_SESSION_COOKIE: 'new_api_refresh',
+  asBrowserSessionCredential: (token: unknown) =>
+    (typeof token === 'string' && token.trim().startsWith('new_api_refresh=')
+      ? token.trim()
+      : null),
   runBrowserSessionCheckin: (...args: unknown[]) => browserSessionMock(...args),
 }));
 

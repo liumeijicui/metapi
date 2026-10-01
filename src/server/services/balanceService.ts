@@ -5,14 +5,13 @@ import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.
 import { reportTokenExpired } from './alertService.js';
 import {
   buildStoredSub2ApiSubscriptionSummary,
-  getAutoReloginConfig,
   getCredentialModeFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
-import { decryptAccountPassword } from './accountCredentialService.js';
+import { tryAutoRelogin } from './autoRelogin.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
@@ -206,70 +205,6 @@ async function fetchTodayIncomeFromLogs(params: {
 
   if (!hasAnyLogResponse) return null;
   return Math.round(totalIncome * 1_000_000) / 1_000_000;
-}
-
-/**
- * Result of a successful automatic re-login.
- *
- * The access token alone is not enough: the login may also have reported the
- * authoritative `platformUserId`. Callers need it for the retry that follows,
- * and they need the merged `extraConfig` so their own later
- * `mergeAccountExtraConfig(account.extraConfig, ...)` writes do not put the
- * pre-login copy back and undo what was just persisted.
- */
-type AutoReloginResult = {
-  accessToken: string;
-  platformUserId?: number;
-  extraConfig?: string;
-};
-
-async function tryAutoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
-  const adapter = getAdapter(site.platform);
-  if (!adapter) return null;
-
-  const relogin = getAutoReloginConfig(account.extraConfig);
-  if (!relogin) return null;
-
-  const password = decryptAccountPassword(relogin.passwordCipher);
-  if (!password) return null;
-
-  const loginResult = await withAccountProxyOverride(
-    resolveProxyUrlFromExtraConfig(account.extraConfig),
-    () => adapter.login(site.url, relogin.username, password),
-  );
-  if (!loginResult.success || !loginResult.accessToken) return null;
-
-  // Re-read after the network request: account settings may have changed while
-  // login was in flight, and merging into the original snapshot would overwrite
-  // those newer fields when the whole extraConfig value is persisted.
-  const latestAccount = loginResult.platformUserId
-    ? await db.select({ extraConfig: schema.accounts.extraConfig })
-      .from(schema.accounts)
-      .where(eq(schema.accounts.id, account.id))
-      .get()
-    : undefined;
-  const reloginExtraConfig = loginResult.platformUserId
-    ? mergeAccountExtraConfig(
-      latestAccount ? latestAccount.extraConfig : account.extraConfig,
-      { platformUserId: loginResult.platformUserId },
-    )
-    : undefined;
-
-  await db.update(schema.accounts)
-    .set({
-      accessToken: loginResult.accessToken,
-      ...(reloginExtraConfig ? { extraConfig: reloginExtraConfig } : {}),
-      status: account.status === 'expired' ? 'active' : account.status,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(schema.accounts.id, account.id))
-    .run();
-
-  return {
-    accessToken: loginResult.accessToken,
-    platformUserId: loginResult.platformUserId,
-    extraConfig: reloginExtraConfig,
-  };
 }
 
 export async function refreshBalance(accountId: number) {

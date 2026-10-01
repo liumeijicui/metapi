@@ -19,7 +19,11 @@ import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { classifyFailureReason } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
-import { BROWSER_SESSION_COOKIE, runBrowserSessionCheckin } from './browserSessionCredential.js';
+import {
+  asBrowserSessionCredential,
+  runBrowserSessionCheckin,
+} from './browserSessionCredential.js';
+import { tryAutoRelogin } from './autoRelogin.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
 
@@ -101,70 +105,6 @@ function inferRewardFromBalanceDelta(previousBalance: unknown, latestBalance: un
 }
 
 /**
- * Result of a successful automatic re-login.
- *
- * The access token alone is not enough: the login may also have reported the
- * authoritative `platformUserId`. Callers need it for the retry that follows,
- * and they need the merged `extraConfig` so their own later
- * `mergeAccountExtraConfig(account.extraConfig, ...)` writes do not put the
- * pre-login copy back and undo what was just persisted.
- */
-type AutoReloginResult = {
-  accessToken: string;
-  platformUserId?: number;
-  extraConfig?: string;
-};
-
-async function tryAutoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
-  const adapter = getAdapter(site.platform);
-  if (!adapter) return null;
-
-  const relogin = getAutoReloginConfig(account.extraConfig);
-  if (!relogin) return null;
-
-  const password = decryptAccountPassword(relogin.passwordCipher);
-  if (!password) return null;
-
-  const result = await withAccountProxyOverride(
-    resolveProxyUrlFromExtraConfig(account.extraConfig),
-    () => adapter.login(site.url, relogin.username, password),
-  );
-  if (!result.success || !result.accessToken) return null;
-
-  // Re-read after the network request: account settings may have changed while
-  // login was in flight, and merging into the original snapshot would overwrite
-  // those newer fields when the whole extraConfig value is persisted.
-  const latestAccount = result.platformUserId
-    ? await db.select({ extraConfig: schema.accounts.extraConfig })
-      .from(schema.accounts)
-      .where(eq(schema.accounts.id, account.id))
-      .get()
-    : undefined;
-  const reloginExtraConfig = result.platformUserId
-    ? mergeAccountExtraConfig(
-      latestAccount ? latestAccount.extraConfig : account.extraConfig,
-      { platformUserId: result.platformUserId },
-    )
-    : undefined;
-
-  await db.update(schema.accounts)
-    .set({
-      accessToken: result.accessToken,
-      ...(reloginExtraConfig ? { extraConfig: reloginExtraConfig } : {}),
-      updatedAt: new Date().toISOString(),
-      status: account.status === 'expired' ? 'active' : account.status,
-    })
-    .where(eq(schema.accounts.id, account.id))
-    .run();
-
-  return {
-    accessToken: result.accessToken,
-    platformUserId: result.platformUserId,
-    extraConfig: reloginExtraConfig,
-  };
-}
-
-/**
  * Outcome of a browser check-in: the verdict plus the session it established.
  *
  * The session is what makes the run worth doing even when the site reports the
@@ -174,22 +114,6 @@ type BrowserCheckinAttempt = {
   result: CheckinResult;
   accessToken?: string;
 };
-
-/**
- * Reads a browser-ready session out of the stored access token.
- *
- * A token-only bind on a site whose sign-in is OAuth leaves the account holding
- * the `new_api_refresh` cookie the site handed the browser (see
- * browserSessionCredential.ts). Such a cookie is the whole credential: passing it
- * to the browser is what replaces the password login those sites never expose,
- * so the check-in can still be driven. Every other credential shape (an API key,
- * a bare access token) is not a cookie and is ignored here.
- */
-function asBrowserSessionCredential(accessToken: unknown): string | null {
-  if (typeof accessToken !== 'string') return null;
-  const value = accessToken.trim();
-  return value.startsWith(`${BROWSER_SESSION_COOKIE}=`) ? value : null;
-}
 
 /**
  * Answers a browser-only check-in challenge.
@@ -324,7 +248,9 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   let result = await runCheckin(activeAccessToken);
 
   if (!result.success && shouldAttemptAutoRelogin(result.message)) {
-    const relogin = await tryAutoRelogin(account, site);
+    // This is the one caller that may spend a headed browser run: it restores
+    // the account's session, and the balance runs that follow are then fine.
+    const relogin = await tryAutoRelogin(account, site, { allowBrowserFallback: true });
     if (relogin) {
       activeAccessToken = relogin.accessToken;
       // Adopt whatever the re-login reported before retrying, and refresh our

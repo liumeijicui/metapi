@@ -66,6 +66,22 @@ export function readBrowserSessionCredential(profileDir: string, siteUrl: string
 }
 
 /**
+ * Reads a browser-ready session out of a stored access token.
+ *
+ * A token-only bind on a site whose sign-in is OAuth leaves the account holding
+ * the `new_api_refresh` cookie the site handed the browser (see the module docs
+ * above). Such a cookie is the whole credential: passing it to the browser is
+ * what replaces the password login those sites never expose, so the check-in can
+ * still be driven. Every other credential shape (an API key, a bare access
+ * token) is not a cookie and is ignored here.
+ */
+export function asBrowserSessionCredential(accessToken: unknown): string | null {
+  if (typeof accessToken !== 'string') return null;
+  const value = accessToken.trim();
+  return value.startsWith(`${BROWSER_SESSION_COOKIE}=`) ? value : null;
+}
+
+/**
  * Signs in on the site in a real browser and returns the session it created.
  *
  * The browser profile is keyed by site, so the profile a bind seeds is the one
