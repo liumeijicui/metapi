@@ -37,6 +37,17 @@ type WatchState = {
   lastKeepAliveAt: string | null;
 };
 
+type GitHubAutoLoginState = {
+  configured: boolean;
+  username: string | null;
+  savedAt: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastMessage: string | null;
+  consecutiveFailures: number;
+  nextAttemptAt: string | null;
+};
+
 const PROVIDER_FALLBACK: Record<string, ProviderInfo> = {
   linuxdo: { id: 'linuxdo', label: 'Linux.do' },
   github: { id: 'github', label: 'GitHub' },
@@ -67,6 +78,77 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
   const [sessionRaw, setSessionRaw] = useState('');
   const [sessionBusy, setSessionBusy] = useState(false);
   const [cookieRevealed, setCookieRevealed] = useState(false);
+  const isGitHubProvider = provider.id === 'github';
+  const [ghAutoLogin, setGhAutoLogin] = useState<GitHubAutoLoginState | null>(null);
+  const [ghUsername, setGhUsername] = useState('');
+  const [ghPassword, setGhPassword] = useState('');
+  const [ghBusy, setGhBusy] = useState(false);
+
+  const loadGitHubAutoLogin = useCallback(async () => {
+    if (provider.id !== 'github') return;
+    try {
+      const res = await api.getGitHubAutoLogin();
+      const next = (res?.autoLogin ?? null) as GitHubAutoLoginState | null;
+      setGhAutoLogin(next);
+      setGhUsername((prev) => prev || next?.username || '');
+    } catch {
+      // The card is an extra; a failed read must not break the page.
+    }
+  }, [provider.id]);
+
+  useEffect(() => {
+    void loadGitHubAutoLogin();
+  }, [loadGitHubAutoLogin]);
+
+  const handleSaveGitHubAutoLogin = async () => {
+    if (!ghUsername.trim() || !ghPassword) {
+      toast.error('请填写 GitHub 用户名和密码');
+      return;
+    }
+    setGhBusy(true);
+    try {
+      const res = await api.saveGitHubAutoLogin(ghUsername.trim(), ghPassword);
+      setGhAutoLogin((res?.autoLogin ?? null) as GitHubAutoLoginState | null);
+      setGhPassword('');
+      toast.success('GitHub 账号密码已加密保存，会话失效时会自动重新登录');
+    } catch (err: any) {
+      toast.error(err?.message || '保存失败');
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
+  const handleClearGitHubAutoLogin = async () => {
+    setGhBusy(true);
+    try {
+      const res = await api.clearGitHubAutoLogin();
+      setGhAutoLogin((res?.autoLogin ?? null) as GitHubAutoLoginState | null);
+      setGhPassword('');
+      toast.success('已清除保存的 GitHub 账号密码');
+    } catch (err: any) {
+      toast.error(err?.message || '清除失败');
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
+  const handleRunGitHubAutoLogin = async () => {
+    setGhBusy(true);
+    try {
+      const res = await api.runGitHubAutoLogin();
+      setGhAutoLogin((res?.autoLogin ?? null) as GitHubAutoLoginState | null);
+      if (res?.ok) {
+        toast.success(res?.message || 'GitHub 会话已自动恢复');
+        await loadAll();
+      } else {
+        toast.error(res?.message || '自动重新登录失败');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || '自动重新登录失败');
+    } finally {
+      setGhBusy(false);
+    }
+  };
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -340,6 +422,76 @@ export default function AssistedLogin({ providerId }: { providerId?: string } = 
           </div>
         )}
       </div>
+
+      {isGitHubProvider && (
+        <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontWeight: 600 }}>GitHub 自动保活（账号密码）</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            远程登录窗口无法输入账号密码时，可以用这里保存的凭据自动重新登录：会话一旦失效，
+            服务器会用自己的浏览器用这组账号密码登录一次 GitHub，再把新会话加密保存，随后继续用 HTTP 保活。
+            密码使用与账号密码相同的加密方式存储，接口不会回显。
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              className="monitor-cookie-input"
+              style={{ maxWidth: 220 }}
+              placeholder="GitHub 用户名"
+              value={ghUsername}
+              onChange={(event) => setGhUsername(event.target.value)}
+            />
+            <input
+              className="monitor-cookie-input"
+              style={{ maxWidth: 220 }}
+              placeholder="GitHub 密码"
+              type="password"
+              value={ghPassword}
+              onChange={(event) => setGhPassword(event.target.value)}
+            />
+            <button type="button" className="btn btn-primary" onClick={handleSaveGitHubAutoLogin} disabled={ghBusy}>
+              {ghAutoLogin?.configured ? '更新凭据' : '保存凭据'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={handleRunGitHubAutoLogin}
+              disabled={ghBusy || !ghAutoLogin?.configured}
+            >
+              {ghBusy ? '执行中…' : '立即重新登录一次'}
+            </button>
+            {ghAutoLogin?.configured && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ border: '1px solid var(--color-border)' }}
+                onClick={handleClearGitHubAutoLogin}
+                disabled={ghBusy}
+              >
+                清除凭据
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 13 }}>
+            状态：
+            <span style={{ fontWeight: 600, color: ghAutoLogin?.configured ? 'var(--color-success, #16a34a)' : 'var(--color-text-muted)' }}>
+              {ghAutoLogin?.configured ? `已配置${ghAutoLogin.username ? `：${ghAutoLogin.username}` : ''}` : '未配置'}
+            </span>
+          </div>
+          {ghAutoLogin?.configured && (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              上次尝试：{ghAutoLogin.lastAttemptAt ? new Date(ghAutoLogin.lastAttemptAt).toLocaleString() : '尚未执行'}
+              {ghAutoLogin.lastSuccessAt ? ` · 上次成功：${new Date(ghAutoLogin.lastSuccessAt).toLocaleString()}` : ''}
+              {ghAutoLogin.nextAttemptAt ? ` · 冷却至：${new Date(ghAutoLogin.nextAttemptAt).toLocaleString()}` : ''}
+            </div>
+          )}
+          {ghAutoLogin?.lastMessage && (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>最近结果：{ghAutoLogin.lastMessage}</div>
+          )}
+          <div className="monitor-hint" style={{ padding: '10px 12px' }}>
+            注意：GitHub 若要求两步验证（2FA）或设备验证，服务器无法自动完成，需要先用上面的「远程登录」窗口手动登录一次并勾选信任设备。
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontWeight: 600 }}>对站点执行快捷登录</div>

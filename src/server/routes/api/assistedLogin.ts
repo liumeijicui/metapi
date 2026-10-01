@@ -8,6 +8,12 @@ import {
   createAssistedLoginStatusLimiter,
 } from '../../services/assistedLogin/routeHandlers.js';
 import {
+  clearGitHubAutoLogin,
+  getGitHubAutoLoginState,
+  renewGitHubSession,
+  saveGitHubAutoLogin,
+} from '../../services/assistedLogin/sites/githubPasswordLogin.js';
+import {
   startLiveLogin,
   getLiveLoginStatus,
   getLiveLoginFrame,
@@ -217,6 +223,42 @@ export async function assistedLoginRoutes(app: FastifyInstance) {
       return { success: true };
     },
   );
+
+  // GitHub is the only provider the server can sign back into by itself: the
+  // operator stores a username/password once and the managed browser replays it
+  // whenever the session is found signed out.
+  app.get('/api/assisted-login/github/auto-login', { preHandler: [limitStatus] }, async () => ({
+    success: true,
+    autoLogin: await getGitHubAutoLoginState(),
+  }));
+
+  app.post<{ Body: unknown }>(
+    '/api/assisted-login/github/auto-login',
+    { preHandler: [limitCapture] },
+    async (request, reply) => {
+      const payload = (request.body ?? {}) as Record<string, unknown>;
+      try {
+        return {
+          success: true,
+          autoLogin: await saveGitHubAutoLogin({ username: payload.username, password: payload.password }),
+        };
+      } catch (error) {
+        return reply.code(400).send({ success: false, message: (error as Error)?.message || '保存失败' });
+      }
+    },
+  );
+
+  app.delete('/api/assisted-login/github/auto-login', { preHandler: [limitCapture] }, async () => {
+    await clearGitHubAutoLogin();
+    return { success: true, autoLogin: await getGitHubAutoLoginState() };
+  });
+
+  // Force a renewal now, bypassing the cooldown, so the operator can verify the
+  // stored credentials without waiting for the next keep-alive tick.
+  app.post('/api/assisted-login/github/auto-login/run', { preHandler: [limitCapture] }, async () => {
+    const outcome = await renewGitHubSession({ force: true });
+    return { success: outcome.ok, ...outcome, autoLogin: await getGitHubAutoLoginState() };
+  });
 
   // Legacy aliases (identical handlers, fixed provider id).
   for (const providerId of ['linuxdo', 'github'] as const) {

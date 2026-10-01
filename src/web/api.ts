@@ -1537,6 +1537,30 @@ export const api = {
       timeoutMs: 180_000,
     }),
 
+  // GitHub password-based keep-alive. The server stores the credentials
+  // encrypted and replays them in its managed browser whenever the GitHub
+  // session is found signed out, which is what keeps GitHub-bound sites
+  // (e.g. 澎湃AI网关) able to auto-relogin.
+  getGitHubAutoLogin: () =>
+    request("/api/assisted-login/github/auto-login", { timeoutMs: 30_000 }),
+  saveGitHubAutoLogin: (username: string, password: string) =>
+    request("/api/assisted-login/github/auto-login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+      timeoutMs: 30_000,
+    }),
+  clearGitHubAutoLogin: () =>
+    request("/api/assisted-login/github/auto-login", {
+      method: "DELETE",
+      timeoutMs: 30_000,
+    }),
+  runGitHubAutoLogin: () =>
+    request("/api/assisted-login/github/auto-login/run", {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 180_000,
+    }),
+
   // Models marketplace
   getModelsMarketplace: (options?: {
     refresh?: boolean;

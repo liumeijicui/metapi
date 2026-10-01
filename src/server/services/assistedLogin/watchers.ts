@@ -5,7 +5,16 @@ import type { AssistedLoginProviderId } from './types.js';
 const watchers = new Map<AssistedLoginProviderId, AssistedLoginWatchHandle>();
 
 for (const session of assistedLoginSessions.all()) {
-  watchers.set(session.provider.id, createAssistedLoginWatcher(session));
+  // GitHub is the one provider whose session the server can re-earn on its own,
+  // because the operator can store a username/password for it. Every other
+  // provider is cookie-only, so the watcher keeps reporting the expiry.
+  const renewSession = session.provider.id === 'github'
+    ? async () => {
+      const { renewGitHubSessionIfConfigured } = await import('./sites/githubPasswordLogin.js');
+      return renewGitHubSessionIfConfigured();
+    }
+    : undefined;
+  watchers.set(session.provider.id, createAssistedLoginWatcher(session, { renewSession }));
 }
 
 export function getAssistedLoginWatcher(id: string): AssistedLoginWatchHandle | null {

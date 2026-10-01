@@ -242,6 +242,41 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成，已推送到 PR 分支；本次日志修正随当前文档提交同步。
 
+## 2026-10-02
+
+### 13. GitHub 账号密码保活，恢复澎湃AI网关自动登录
+
+- **类型**：功能实现与缺陷修复
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：GitHub 快捷登录会话失效后，服务器能自己重新登录，使绑定 GitHub OAuth 的站点（如澎湃AI网关）恢复自动重新登录与签到；不再依赖人工重新粘贴 Cookie。
+- **实现范围**：
+  - 新增 GitHub 账号密码凭据存储：密码复用 `accountCredentialService` 的 `v1:` 加密格式保存在设置表，任何读取接口都不回显密码。
+  - 新增受管浏览器密码登录驱动：打开 `github.com/login`，填入账号密码并提交，成功后在浏览器 Cookie 罐里取回会话，走既有 `saveImportedSession` 路径持久化，让原有 HTTP 保活巡检接管。
+  - 失败分类：区分「用户名或密码不正确」「两步验证（2FA）」「设备验证」「人机验证」「限流」，避免把风控拦截误报成密码错误。
+  - 尝试冷却：连续失败 2 次后冷却 6 小时，其余失败冷却 10 分钟，防止反复回放密码触发 GitHub 风控。
+  - 澎湃AI网关的 OAuth 握手在返回 `needs_provider_login` 时会先自愈再重试一次；自愈失败仍保留站点原始判定，人工导入路径不受影响。
+  - 会话巡检查到 GitHub 未登录时先尝试自愈，只有自愈也失败才发送失效通知，并在通知里附上失败原因。
+  - 新增设置接口 `GET/POST/DELETE /api/assisted-login/github/auto-login` 与手动触发的 `POST /api/assisted-login/github/auto-login/run`，GitHub 快捷登录页新增对应卡片。
+  - 健壮性：凭据存储读写失败一律降级为「未配置」，自愈异常不会中断站点登录主流程。
+- **主要文件**：
+  - `src/server/services/assistedLogin/sites/githubPasswordLogin.ts`
+  - `src/server/services/assistedLogin/sites/githubPasswordLogin.test.ts`
+  - `src/server/services/assistedLogin/sites/hyper.ts`
+  - `src/server/services/assistedLogin/sessionWatchScheduler.ts`
+  - `src/server/services/assistedLogin/watchers.ts`
+  - `src/server/routes/api/assistedLogin.ts`
+  - `src/web/api.ts`
+  - `src/web/pages/AssistedLogin.tsx`
+  - `docs/change-log.md`
+- **验证**：
+  - 实机验证：清空受管浏览器 GitHub Cookie 后执行自愈，账号 `liumeijicui` 用密码重新登录成功（无 2FA、无设备验证）。
+  - 实机验证：账号 #1（澎湃AI网关）经 `POST /api/assisted-login/github/refresh-account` 恢复，状态由 `expired` 变为 `active`，余额 63.615314，`POST /api/checkin/trigger/1` 返回「签到成功」奖励 13.749828。
+  - `npm run typecheck`（web / web:test / server / desktop）：通过。
+  - `npx vitest run --root . src/server/services/assistedLogin`：56 个测试通过。
+  - 全量 `npx vitest run --root .`：2857 通过、4 失败，4 项失败在改动前的 HEAD 上同样失败（`generate-icons` 缺 GLIBCXX、`DATA_DIR`/`factoryResetService`/`siteProxy` 宿主环境变量泄漏、`accounts.rebind-panel-focus` 既有问题），与本次改动无关。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成并在当前本地服务中运行。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

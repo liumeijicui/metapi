@@ -92,10 +92,19 @@ export type AssistedLoginWatchHandle = {
  * Watches one provider's persisted session so an expiry can be reported instead
  * of silently breaking every dependent site's assisted sign-in.
  */
+/**
+ * Optional self-heal hook. A provider whose session can be re-earned from stored
+ * credentials (GitHub, via the operator's saved username/password) hands one in,
+ * so a keep-alive pass repairs an expiry instead of only reporting it.
+ */
+export type AssistedLoginRenewHook = () => Promise<{ ok: boolean; skipped?: boolean; message?: string }>;
+
 export function createAssistedLoginWatcher(
   session: ReturnType<typeof createAssistedLoginSession>,
+  options?: { renewSession?: AssistedLoginRenewHook },
 ): AssistedLoginWatchHandle {
   const { provider, browser } = session;
+  const renewSession = options?.renewSession;
   const key = sessionStateKey(provider.id);
   let timer: ReturnType<typeof setInterval> | null = null;
   let passInFlight: Promise<void> | null = null;
@@ -135,12 +144,34 @@ export function createAssistedLoginWatcher(
 
     // Only police sessions the user actually established. Without this, a fresh
     // install would either spawn a browser or probe nothing on every tick.
-    const state = await readLoginState();
+    let state = await readLoginState();
     if (!state) return;
 
     // An edge block is infrastructure noise, not a credential expiry. Keep the
     // last known status so a transient block cannot masquerade as a logout.
     if (state.blocked) return;
+
+    // Repair before reporting: a provider that can sign itself back in should do
+    // that here, so an expiry only reaches the operator when the self-heal also
+    // failed. The re-probe is what proves the renewal actually took effect.
+    let renewalNote = '';
+    if (!state.loggedIn && renewSession) {
+      try {
+        const renewed = await renewSession();
+        if (renewed.ok) {
+          const healed = await readLoginState();
+          if (healed?.loggedIn) {
+            state = healed;
+          } else {
+            renewalNote = '（自动重新登录已执行，但会话仍未生效）';
+          }
+        } else if (!renewed.skipped) {
+          renewalNote = `（自动重新登录失败：${renewed.message || '未知原因'}）`;
+        }
+      } catch (error) {
+        renewalNote = `（自动重新登录异常：${error instanceof Error ? error.message : '未知错误'}）`;
+      }
+    }
 
     const nextStatus = state.loggedIn ? 'logged_in' : 'logged_out';
     const nextFingerprint = buildUsernameFingerprint(state.username);
@@ -161,7 +192,8 @@ export function createAssistedLoginWatcher(
       await sendNotification(
         `${provider.label} 会话已失效`,
         `${provider.label} 登录状态已失效，依赖该会话的站点快捷登录将无法自动完成。\n`
-          + `请打开 metapi 的「${provider.label} 快捷登录」页面，重新粘贴一次浏览器 Cookie 导入会话即可恢复。`,
+          + `请打开 metapi 的「${provider.label} 快捷登录」页面，重新粘贴一次浏览器 Cookie 导入会话即可恢复。`
+          + renewalNote,
         'warning',
       );
     }

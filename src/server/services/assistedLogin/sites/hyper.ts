@@ -43,7 +43,7 @@ async function requestSiteJson<T>(path: string, options: RequestInit = {}) {
 }
 
 /** Reuses an already-authorized GitHub session without launching a managed browser. */
-export async function captureHyperGithubCredentials(): Promise<CaptureResult> {
+async function captureHyperGithubCredentialsOnce(): Promise<CaptureResult> {
   const imported = await readImportedSession('github');
   if (!imported) {
     return { status: 'needs_provider_login', credentials: null, message: '请先导入 GitHub 会话后重试' };
@@ -125,4 +125,35 @@ export async function captureHyperGithubCredentials(): Promise<CaptureResult> {
       message: `澎湃AI网关登录未完成：${error instanceof Error ? error.message : '请求失败'}`,
     };
   }
+}
+
+/**
+ * Every `needs_provider_login` this handshake can report means the same thing:
+ * the GitHub session the handoff rides on is not usable. When the operator has
+ * stored a GitHub password, the managed browser can earn a fresh session and the
+ * handshake is retried once; without credentials the original verdict is
+ * returned untouched so the page still asks for a manual import.
+ */
+export async function captureHyperGithubCredentials(): Promise<CaptureResult> {
+  const first = await captureHyperGithubCredentialsOnce();
+  if (first.status !== 'needs_provider_login') return first;
+
+  // A self-heal that fails must degrade to the original verdict, never replace
+  // it with an exception: the page still has the manual-import fallback.
+  const renewed = await import('./githubPasswordLogin.js')
+    .then((module) => module.renewGitHubSessionIfConfigured())
+    .catch((error) => ({
+      ok: false,
+      skipped: false,
+      message: error instanceof Error ? error.message : '自动重新登录不可用',
+    }));
+  if (!renewed.ok) {
+    // Keep the site's own verdict, but surface why the self-heal did not run so
+    // the page does not only suggest the manual import.
+    return renewed.skipped
+      ? first
+      : { ...first, message: `${first.message || 'GitHub 会话不可用'}（自动重新登录失败：${renewed.message}）` };
+  }
+
+  return captureHyperGithubCredentialsOnce();
 }
