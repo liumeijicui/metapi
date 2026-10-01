@@ -21,7 +21,7 @@ const REFRESH_TOKEN_CACHE = new Map<string, { accessToken: string; expiresAtMs: 
 const REFRESH_TOKEN_CACHE_LEAD_MS = 60 * 1000;
 
 /** Quota units per dollar used by new-api when it reports balances and awards. */
-const QUOTA_PER_UNIT = 500000;
+export const QUOTA_PER_UNIT = 500000;
 
 type JsonFetchOutcome<T> = {
   data: T | null;
@@ -1106,6 +1106,47 @@ export class NewApiAdapter extends BasePlatformAdapter {
   private async fetchJsonRaw<T>(url: string, options?: UndiciRequestInit): Promise<T | null> {
     const result = await this.fetchJsonRawWithCookie<T>(url, options);
     return result.data;
+  }
+
+  /**
+   * Reads a management endpoint with whichever credential the account holds.
+   *
+   * `fetchJsonRaw` is bearer-only, but plenty of accounts are bound through a
+   * cookie session, and some deployments answer an unauthenticated caller with a
+   * JS challenge instead of JSON (anyrouter.top's edge does). Subclasses that
+   * need a site endpoint the generic flows do not touch — /api/status is the
+   * usual one — go through here rather than rebuilding the credential shape.
+   */
+  protected async fetchSiteJson<T>(
+    url: string,
+    accessToken: string,
+    platformUserId?: number,
+  ): Promise<T | null> {
+    try {
+      return await this.fetchJsonRaw<T>(url, {
+        headers: this.buildCredentialRequestHeaders(accessToken, platformUserId),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** Headers that carry either a cookie session or a bearer token, plus the id. */
+  private buildCredentialRequestHeaders(
+    accessToken: string,
+    platformUserId?: number,
+  ): Record<string, string> {
+    const raw = (accessToken || '').trim().startsWith('Bearer ')
+      ? (accessToken || '').trim().slice(7).trim()
+      : (accessToken || '').trim();
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+    if (this.isCookieHeaderCredential(raw)) headers['Cookie'] = raw;
+    else headers['Authorization'] = `Bearer ${raw}`;
+    this.appendUserIdCompatibilityHeaders(headers, platformUserId);
+    return headers;
   }
 
   private async fetchUserSelfByCookie(

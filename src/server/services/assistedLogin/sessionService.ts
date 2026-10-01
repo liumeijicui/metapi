@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { createManagedBrowser } from './browserManager.js';
+import { passCloudflareChallenge } from './cloudflareChallenge.js';
 import { captureHyperGithubCredentials, supportsHyperGithubLogin } from './sites/hyper.js';
 import type { AssistedLoginProvider, CaptureResult, CapturedCredentials, LoginState } from './types.js';
 
@@ -380,7 +381,18 @@ export function createAssistedLoginSession(input: {
       await target.click({ timeout: 5_000 });
       return true;
     } catch {
-      return false;
+      // Playwright refuses a click when anything covers the control, and SPA
+      // panels leave such overlays behind by accident: anyrouter.top renders an
+      // empty <p> across its "Continue with LinuxDO" button, so the click timed
+      // out and the site was reported as having no provider entry at all. The
+      // page itself is happy to act on the click, so dispatch it through the DOM
+      // as a last resort instead of treating a layout bug as a missing entry.
+      return await target
+        .evaluate((el) => {
+          (el as HTMLElement).click();
+          return true;
+        })
+        .catch(() => false);
     }
   }
   /**
@@ -592,6 +604,12 @@ export function createAssistedLoginSession(input: {
   }
 
   async function clickConsentButton(page: import('playwright-core').Page): Promise<boolean> {
+    // The provider answers its consent URL with a Cloudflare interstitial on
+    // some days, and that page carries none of the controls below — nor the site
+    // storage the caller harvests afterwards. Wait it out first, or the handoff
+    // looks broken while the session behind it is perfectly valid.
+    await passCloudflareChallenge(page);
+
     // The consent control is a button on some providers and a plain link on
     // others, so it has to be matched by role as well as by selector. They are
     // unioned into one locator: waiting the full timeout on each shape in turn
