@@ -70,7 +70,7 @@ function isOauthProviderCarrier(value: unknown): value is OauthProviderCarrier {
   return isRecord(value) && ('extraConfig' in value || 'oauthProvider' in value);
 }
 
-function parseExtraConfig(extraConfig?: ExtraConfigInput): AccountExtraConfig {
+export function parseExtraConfig(extraConfig?: ExtraConfigInput): AccountExtraConfig {
   if (!extraConfig) return {};
   if (isRecord(extraConfig)) return extraConfig as AccountExtraConfig;
   if (typeof extraConfig !== 'string') return {};

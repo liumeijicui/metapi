@@ -11,7 +11,7 @@ import {
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
-import { isBrowserOnlyReloginPlatform, tryAutoRelogin } from './autoRelogin.js';
+import { tryAutoRelogin } from './autoRelogin.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
@@ -334,7 +334,12 @@ export async function refreshBalance(accountId: number) {
       }
     } else if (shouldAttemptAutoRelogin(message)) {
       const relogin = await tryAutoRelogin(account, site, {
-        allowBrowserFallback: isBrowserOnlyReloginPlatform(site.platform),
+        allowBrowserFallback: true,
+        // ...but only for a site that refuses the HTTP login until a human check
+        // is answered. Those have no other way back in, and giving up here is
+        // what marks the account `expired` — which drops it out of the daily
+        // check-in, the one job that could still revive it.
+        browserFallbackRequiresHumanCheck: true,
       });
       if (relogin) {
         activeAccessToken = relogin.accessToken;

@@ -4,6 +4,23 @@ export function isCloudflareChallenge(message?: string | null): boolean {
   return text.includes('cloudflare') || text.includes('cf challenge') || text.includes('challenge required');
 }
 
+/**
+ * True when a site answered with an anti-bot challenge page instead of the API
+ * response it was asked for.
+ *
+ * Wider than `isCloudflareChallenge`, which matches only Cloudflare's wording:
+ * these forks also ship their own shield, and its login answer is literally
+ * `shield challenge blocked login`. Both mean the same thing to a caller — a
+ * browser can pass it, an HTTP client never will — so the callers that decide
+ * whether to spend a browser run ask this instead.
+ */
+export function isBotShieldChallenge(message?: string | null): boolean {
+  if (!message) return false;
+  if (isCloudflareChallenge(message)) return true;
+  const text = message.toLowerCase();
+  return text.includes('shield challenge') || text.includes('challenge blocked');
+}
+
 const SESSION_TOKEN_REBIND_HINT = '请在中转站重新生成系统访问令牌后重新绑定账号';
 
 function isEndpointDispatchDeniedMessage(message?: string | null): boolean {

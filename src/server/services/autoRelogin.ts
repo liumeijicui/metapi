@@ -25,12 +25,14 @@ import {
   getAutoReloginConfig,
   getOauthProviderFromExtraConfig,
   mergeAccountExtraConfig,
+  parseExtraConfig,
   resolveProxyUrlFromExtraConfig,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import { asBrowserSessionCredential, runBrowserSessionCheckin } from './browserSessionCredential.js';
 import { classifyFailureReason } from './failureReasonService.js';
+import { isBotShieldChallenge } from './alertRules.js';
 
 /**
  * Result of a successful automatic sign-in.
@@ -54,18 +56,27 @@ export type AutoReloginOptions = {
    * to wait for one.
    */
   allowBrowserFallback?: boolean;
+  /**
+   * Only run that browser when the site itself asked for a human check.
+   *
+   * The balance refresh passes this because the alternative is worse than the
+   * wait: an account whose sign-in is Turnstile-gated can never be restored over
+   * HTTP, and a refresh that gives up marks it `expired` — which is what took it
+   * out of the daily check-in in the first place. Accounts with no password on
+   * file are excluded, so a session-only account does not cost a browser run
+   * that would end exactly where it started.
+   */
+  browserFallbackRequiresHumanCheck?: boolean;
 };
 
 /**
  * Platforms whose dead credential can only be replaced by the headed browser.
  *
  * Such a site gates every password login behind a human check, so the HTTP
- * replays above can never succeed. Balance refreshes normally keep the browser
- * off, but for these platforms that is not an option: the failed refresh flips
- * the account to `expired`, and the daily check-in set is selected on
- * `status = 'active'` — the account would drop out of it and never come back.
+ * replays above can never succeed, and the browser driver they need is their
+ * own: nothing about the shared new-api script fits them.
  */
-export function isBrowserOnlyReloginPlatform(platform?: string | null): boolean {
+function isBrowserOnlyReloginPlatform(platform?: string | null): boolean {
   return (platform || '').trim().toLowerCase() === 'gwrelay';
 }
 
@@ -112,7 +123,11 @@ async function persistCredential(
 
 /** True when the site refused the password login until a human check is passed. */
 function isHumanCheckRefusal(message?: string | null): boolean {
-  return classifyFailureReason({ message }).code === 'manual_turnstile_required';
+  if (classifyFailureReason({ message }).code === 'manual_turnstile_required') return true;
+  // A shield challenge is the same situation with different wording: the site
+  // answered the login POST with a challenge page instead of a verdict, which
+  // is exactly the refusal a browser can clear and an HTTP client cannot.
+  return isBotShieldChallenge(message);
 }
 
 /**
@@ -176,6 +191,47 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
 }
 
 /**
+ * How long to wait before spending another headed-browser run on one account.
+ *
+ * A browser run takes minutes and the sites that need it also rate-limit hard
+ * (JustDoWork answers a burst with `429` on its own auth routes). The hourly
+ * balance refresh and the daily check-in would otherwise each start a run, and
+ * the retries would keep the account throttled rather than revive it.
+ */
+const BROWSER_RELOGIN_COOLDOWN_MS = 15 * 60_000;
+
+function lastBrowserReloginAt(extraConfig?: string | null): number {
+  const value = (parseExtraConfig(extraConfig) as Record<string, unknown>).browserRelogin;
+  const at = value && typeof value === 'object'
+    ? (value as Record<string, unknown>).attemptedAt
+    : null;
+  const parsed = typeof at === 'string' ? Date.parse(at) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isBrowserReloginCoolingDown(extraConfig?: string | null): boolean {
+  const last = lastBrowserReloginAt(extraConfig);
+  return last > 0 && Date.now() - last < BROWSER_RELOGIN_COOLDOWN_MS;
+}
+
+/** Records the attempt up front, so a run that never returns still counts. */
+async function recordBrowserReloginAttempt(account: any): Promise<void> {
+  const extraConfig = mergeAccountExtraConfig(account.extraConfig, {
+    browserRelogin: { attemptedAt: new Date().toISOString() },
+  });
+  account.extraConfig = extraConfig;
+  try {
+    await db.update(schema.accounts)
+      .set({ extraConfig, updatedAt: new Date().toISOString() })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+  } catch {
+    // The cooldown is a courtesy, not a correctness requirement: a write that
+    // fails must not stop the sign-in the caller actually asked for.
+  }
+}
+
+/**
  * Signs in through the headed browser and keeps the session it stores.
  *
  * Sites that answer every password login with "Turnstile token 为空" only give
@@ -189,6 +245,11 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
   const platform = (site.platform || '').toLowerCase();
   const relogin = getAutoReloginConfig(account.extraConfig);
   const password = relogin ? decryptAccountPassword(relogin.passwordCipher) : null;
+
+  if (isBrowserReloginCoolingDown(account.extraConfig)) {
+    return null;
+  }
+  await recordBrowserReloginAttempt(account);
 
   // The 辉哥中转 PHP panel is the mirror image of the new-api forks below: its
   // sign-in form is the *only* way in (Turnstile gates it), and its session is a
@@ -242,5 +303,6 @@ export async function tryAutoRelogin(
   // A refused password is a wrong password; only a human-check refusal, or an
   // account with no password field at all, can be answered by a browser.
   if (!passwordAttempt.blockedByHumanCheck && getAutoReloginConfig(account.extraConfig)) return null;
+  if (options.browserFallbackRequiresHumanCheck && !passwordAttempt.blockedByHumanCheck) return null;
   return tryBrowserRelogin(account, site);
 }

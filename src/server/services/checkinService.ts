@@ -1,6 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { isCloudflareChallenge, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
@@ -238,6 +238,11 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
   let activeAccessToken = account.accessToken;
+  // Set when a sign-in handed this run a credential the account did not have.
+  // Only then may an `expired` account be marked active again: an account whose
+  // credentials are all dead would otherwise be flipped back on every run, and
+  // the next balance refresh would flip it straight back to expired.
+  let sessionRestored = false;
   const runCheckin = (token: string) => withAccountProxyOverride(accountProxyUrl,
     () => withAccountCredentialContext({ accountId: account.id, siteId: site.id },
       () => adapter.checkin(site.url, token, platformUserId, {
@@ -253,6 +258,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     const relogin = await tryAutoRelogin(account, site, { allowBrowserFallback: true });
     if (relogin) {
       activeAccessToken = relogin.accessToken;
+      sessionRestored = true;
       // Adopt whatever the re-login reported before retrying, and refresh our
       // in-memory copy of extraConfig — the merge writes further down start from
       // `account.extraConfig`, so leaving the stale copy here would overwrite the
@@ -269,7 +275,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     const browserAttempt = await tryBrowserCheckin(site, account);
     if (browserAttempt) {
       result = browserAttempt.result;
-      if (browserAttempt.accessToken) activeAccessToken = browserAttempt.accessToken;
+      if (browserAttempt.accessToken) {
+        activeAccessToken = browserAttempt.accessToken;
+        sessionRestored = true;
+      }
     }
   }
 
@@ -317,7 +326,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         platformUserId: guessedPlatformUserId,
       });
     }
-    if (account.status === 'expired') {
+    if (account.status === 'expired' && sessionRestored) {
       updates.status = 'active';
       updates.updatedAt = new Date().toISOString();
     }
@@ -416,7 +425,13 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
     .where(
       and(
         eq(schema.accounts.checkinEnabled, true),
-        eq(schema.accounts.status, 'active'),
+        // An expired account is deliberately *included*: this job is the only
+        // one that may run the headed browser, and the browser is the only thing
+        // that can sign a Turnstile-gated site back in. `reportTokenExpired()`
+        // flips the account to `expired` on the hourly balance refresh, so
+        // filtering it out here would lock it away from the one job that could
+        // ever revive it — the revival below would never be reached.
+        inArray(schema.accounts.status, ['active', 'expired']),
       ),
     )
     .all();

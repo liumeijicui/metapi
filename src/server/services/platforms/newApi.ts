@@ -746,6 +746,23 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return '';
   }
 
+  /**
+   * Words a login refusal so an operator can act on it.
+   *
+   * Forks that cap concurrent sessions answer a second sign-in with `409` and a
+   * bare `{"code":"AUTH_SESSION_LIMIT","message":"Conflict"}`. "Conflict" alone
+   * reads like a transient clash and says nothing about what to do; the code is
+   * the part that names the cause — the account already has a session, and that
+   * one has to be signed out before another can be opened.
+   */
+  private describeLoginRefusal(payload: any): string {
+    const message = this.extractResponseMessage(payload)
+      || '登录失败：未获取到可用会话凭据，请改用 Cookie/Token 导入';
+    const code = typeof payload?.code === 'string' ? payload.code.trim() : '';
+    if (!code || message.includes(code)) return message;
+    return `${message}（${code}）`;
+  }
+
   private isHtmlJsonParseErrorMessage(message?: string | null): boolean {
     if (!message) return false;
     const text = message.toLowerCase();
@@ -1355,7 +1372,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
         },
       });
       if (!res) {
-        return { success: false, message: 'shield challenge blocked login' };
+        return {
+          success: false,
+          // The site answered the login POST with its anti-bot challenge page
+          // instead of a verdict. Only a browser can clear that, so the wording
+          // has to say "challenge" for the caller to reach for one.
+          message: '登录被站点人机校验拦截（shield challenge blocked login）',
+        };
       }
 
       const accessToken = this.extractLoginAccessToken(res);
@@ -1379,7 +1402,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       return {
         success: false,
-        message: this.extractResponseMessage(res) || '登录失败：未获取到可用会话凭据，请改用 Cookie/Token 导入',
+        message: this.describeLoginRefusal(res),
       };
     } catch (err: any) {
       return {

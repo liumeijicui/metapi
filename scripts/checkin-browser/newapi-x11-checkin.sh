@@ -75,6 +75,13 @@ apply_layout() {
   # Overlay and badge detection are opt-in: only layouts that define real
   # boxes use them.
   OVERLAY_DIALOG_BOX="0 0 0 0"
+  # How the overlay probe reads `OVERLAY_DIALOG_BOX`: a warm banner (gold) or a
+  # dark-theme modal filled with strong blue. 0 means "not measured".
+  OVERLAY_DIALOG_STRONG=0
+  # Some builds raise their announcement dialog a few seconds *after* the page
+  # renders, so a single look can miss it and the dialog then swallows every
+  # keystroke aimed at the form. This is how long to keep looking, in seconds.
+  OVERLAY_WAIT_SECONDS=0
   PWD_BUBBLE_BOX="0 0 0 0"
   CHECKIN_BADGE_BOX="0 0 0 0"
   EXTRA_LAUNCH_FLAGS=""
@@ -88,7 +95,10 @@ apply_layout() {
       LOGIN_BUTTON_XY="640 609"
       CHECKIN_BUTTON_XY="1161 454"
       MODAL_SHIELD_XY="509 525"
-      CHECKIN_BUTTON_BOX="1115 435 110 32"
+      # Wide enough to still catch the button if the card's content shifts it:
+      # this layout's click point is read back out of this box (see
+      # click_checkin), so the box is a search area, not just a yes/no probe.
+      CHECKIN_BUTTON_BOX="1100 430 170 50"
       # The claimed-state badge sits on the title row in the Chinese build and
       # on its own row in the English one, so the box covers both spots.
       CHECKIN_BADGE_BOX="960 445 115 55"
@@ -142,6 +152,34 @@ apply_layout() {
       LOGIN_TICK_BOX="440 718 30 28"
       EXTRA_LAUNCH_FLAGS="--test-type"
       ;;
+    jdw)
+      # JustDoWork (api.justwoker.icu). It ships a different sign-in page from
+      # every other build here: its own `/sign-in` route with a GitHub button on
+      # top, a password form under it and Turnstile below that. The profile page
+      # is a dark dashboard whose check-in card sits on the left column.
+      USERNAME_XY="640 491"
+      PASSWORD_XY="640 562"
+      LOGIN_SHIELD_XY="452 683"
+      LOGIN_BUTTON_XY="640 611"
+      CHECKIN_BUTTON_XY="1166 506"
+      MODAL_SHIELD_XY="509 550"
+      CHECKIN_BUTTON_BOX="1100 430 170 50"
+      MODAL_TITLE_BOX="437 425 150 26"
+      PROFILE_MARKER_BOX="960 497 130 22"
+      LOGIN_TICK_BOX="435 666 55 40"
+      EXTRA_LAUNCH_FLAGS="--test-type"
+      # The sign-in page opens with the site's announcement dialog (a Discord QR
+      # card) sitting on top of the form: typing then goes into the dialog and
+      # every attempt ends on a blank page. The probe watches the dialog's own
+      # Close button rather than the QR panel, because that panel has two paint
+      # states (a blue placeholder, then the loaded code) and only one of them
+      # would match any single palette rule. The dialog is also slow to appear,
+      # hence the wait.
+      OVERLAY_DIALOG_BOX="810 745 80 30"
+      OVERLAY_DIALOG_STRONG=300
+      OVERLAY_WAIT_SECONDS=30
+      ANNOUNCE_CLOSE_XY="850 761"
+      ;;
     ark)
       # 方舟 (api.bxacc.xyz). Its sign-in form is taller than the other builds:
       # a LinuxDO button sits above the fields, so everything is ~70px lower
@@ -183,6 +221,7 @@ case "$SITE" in
   *motomoto.lol*) apply_layout moto ;;
   *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
   *bxacc.xyz*) apply_layout ark ;;
+  *justwoker.icu*) apply_layout jdw ;;
   *) apply_layout classic ;;
 esac
 
@@ -325,12 +364,15 @@ measure() {
   mapfile -t L < <("$NODE" "$HELPER" "$LOG/cur.ppm" \
     $CHECKIN_BUTTON_BOX $MODAL_TITLE_BOX $PROFILE_MARKER_BOX $LOGIN_TICK_BOX \
     $OVERLAY_DIALOG_BOX $PWD_BUBBLE_BOX $CHECKIN_BADGE_BOX)
-  local s=0 w=0 td=0 tb=0 pd=0 pg=0 g=0 gold=0 dull=0 og=0 pb=0 mbg=0 kv
-  for kv in ${L[0]:-}; do case "$kv" in strong=*) s="${kv#strong=}";; weak=*) w="${kv#weak=}";; gold=*) gold="${kv#gold=}";; dull=*) dull="${kv#dull=}";; esac; done
+  local s=0 w=0 td=0 tb=0 pd=0 pg=0 g=0 gold=0 dull=0 og=0 os=0 pb=0 mbg=0 kv
+  # Reset before every measure: a stale centroid from the previous frame would
+  # send the click to where the button used to be.
+  gold_cx=0; gold_cy=0
+  for kv in ${L[0]:-}; do case "$kv" in strong=*) s="${kv#strong=}";; weak=*) w="${kv#weak=}";; gold=*) gold="${kv#gold=}";; dull=*) dull="${kv#dull=}";; goldCx=*) gold_cx="${kv#goldCx=}";; goldCy=*) gold_cy="${kv#goldCy=}";; esac; done
   for kv in ${L[1]:-}; do case "$kv" in dark=*) td="${kv#dark=}";; bright=*) tb="${kv#bright=}";; esac; done
   for kv in ${L[2]:-}; do case "$kv" in dark=*) pd="${kv#dark=}";; green=*) pg="${kv#green=}";; esac; done
   for kv in ${L[3]:-}; do case "$kv" in green=*) g="${kv#green=}";; esac; done
-  for kv in ${L[4]:-}; do case "$kv" in gold=*) og="${kv#gold=}";; esac; done
+  for kv in ${L[4]:-}; do case "$kv" in gold=*) og="${kv#gold=}";; strong=*) os="${kv#strong=}";; esac; done
   for kv in ${L[5]:-}; do case "$kv" in bright=*) pb="${kv#bright=}";; esac; done
   for kv in ${L[6]:-}; do case "$kv" in green=*) mbg="${kv#green=}";; esac; done
   st=BLANK; modal=0; profile=0; tsolved=0; announce_dialog=0; pwd_bubble=0
@@ -353,6 +395,7 @@ measure() {
   fi
   if [ "$g" -gt 50 ]; then tsolved=1; fi
   if [ "$og" -gt 500 ]; then announce_dialog=1; fi
+  if [ "$OVERLAY_DIALOG_STRONG" -gt 0 ] && [ "$os" -gt "$OVERLAY_DIALOG_STRONG" ]; then announce_dialog=1; fi
   if [ "$pb" -gt 2000 ]; then pwd_bubble=1; fi
 }
 
@@ -427,12 +470,20 @@ wait_profile() {
   done
 }
 
-# Closes the floating panels that sit above the profile page and would swallow
-# clicks. Only the moto layout defines their regions, so elsewhere this just
-# leaves the current measurement in place.
+# Closes the floating panels that sit above the page and would swallow clicks.
+# Only the layouts that define those regions do anything here; the rest return
+# with the current measurement untouched.
 dismiss_overlays() {
-  [ "$LAYOUT" = moto ] || return 0
+  [ "$OVERLAY_DIALOG_BOX" = "0 0 0 0" ] && [ "$PWD_BUBBLE_BOX" = "0 0 0 0" ] && return 0
   local i
+  # Give a late dialog a chance to show up before deciding there is none.
+  local waited=0
+  while [ "$waited" -lt "$OVERLAY_WAIT_SECONDS" ]; do
+    snap cur; measure; rm -f "$LOG/cur.ppm"
+    if [ "$announce_dialog" = 1 ] || [ "$pwd_bubble" = 1 ]; then break; fi
+    sleep 2
+    waited=$((waited + 2))
+  done
   # One click per pass: a dialog that is already closing would otherwise take
   # a second click, and that click would land on the page underneath.
   for i in 1 2 3 4; do
@@ -505,8 +556,25 @@ if [ "$st" = CHECKED ]; then
   exit 0
 fi
 
-say "clicking Check in now"
-xdotool mousemove $CHECKIN_BUTTON_XY click 1
+# Clicks the check-in control.
+#
+# The presets above are measurements, and a measured point goes stale the moment
+# the card moves: motomoto's amber button sits at x≈1195 while the preset still
+# says 1161, and a click 34px to the left of a pill lands on the card behind it —
+# silently, with the page state never changing. So for the warm layout the click
+# follows the pixels: `measure` reports where the amber control actually is, and
+# the preset stays as the fallback for a frame that had no match at all.
+click_checkin() {
+  if [ "$LAYOUT" = moto ] && [ "${gold_cx:-0}" -gt 0 ] && [ "${gold_cy:-0}" -gt 0 ]; then
+    say "clicking Check in now at $gold_cx $gold_cy"
+    xdotool mousemove "$gold_cx" "$gold_cy" click 1
+    return
+  fi
+  say "clicking Check in now at $CHECKIN_BUTTON_XY"
+  xdotool mousemove $CHECKIN_BUTTON_XY click 1
+}
+
+click_checkin
 sleep 4
 snap cur; measure; rm -f "$LOG/cur.ppm"
 say "state3=$st modal=$modal"
@@ -527,7 +595,7 @@ while [ "$n" -lt 8 ]; do
   if [ "$modal" = 1 ]; then
     if [ "$n" -lt 3 ]; then xdotool mousemove $MODAL_SHIELD_XY click 1; fi
   elif [ "$st" = BLUE ] && [ "$n" -lt 2 ]; then
-    xdotool mousemove $CHECKIN_BUTTON_XY click 1
+    click_checkin
     sleep 3
     xdotool mousemove $MODAL_SHIELD_XY click 1
   fi

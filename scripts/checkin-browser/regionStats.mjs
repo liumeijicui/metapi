@@ -38,14 +38,18 @@ for (let index = 0; index + 3 < rest.length; index += 4) {
   const w = Number.parseInt(rest[index + 2], 10);
   const h = Number.parseInt(rest[index + 3], 10);
 
-  let strong = 0;
+      let strong = 0;
+      let strongX = 0;
+      let strongY = 0;
   let weak = 0;
   let green = 0;
-  let nonwhite = 0;
-  let dark = 0;
-  let gold = 0;
-  let dull = 0;
-  let bright = 0;
+      let nonwhite = 0;
+      let dark = 0;
+      let gold = 0;
+      let goldX = 0;
+      let goldY = 0;
+      let dull = 0;
+      let bright = 0;
   for (let y = Math.max(0, y0); y < Math.min(y0 + h, height); y += 1) {
     for (let x = Math.max(0, x0); x < Math.min(x0 + w, width); x += 1) {
       const offset = position + (y * width + x) * channels;
@@ -57,17 +61,33 @@ for (let index = 0; index + 3 < rest.length; index += 4) {
       if (distance > 45) nonwhite += 1;
       if (distance > 150) dark += 1;
       if (b - r > 30) {
-        if (r < 120 && b > 180) strong += 1;
+        if (r < 120 && b > 180) {
+          strong += 1;
+          strongX += x;
+          strongY += y;
+        }
         else if (r >= 140) weak += 1;
       }
       if (g - r > 40 && g - b > 40) green += 1;
       // Warm themes (moto) paint the actionable control amber and its
       // "already claimed" badge in a muted tone; the bright counter also
       // recognises Cloudflare's white Turnstile widget on dark pages.
-      if (r >= 150 && g >= 115 && r - b >= 60) gold += 1;
+      if (r >= 150 && g >= 115 && r - b >= 60) {
+        gold += 1;
+        goldX += x;
+        goldY += y;
+      }
       else if (r >= 100 && r < 150 && g >= 80 && g < 130 && r - b >= 30) dull += 1;
       if (r > 200 && g > 200 && b > 200) bright += 1;
     }
   }
-  console.log(`strong=${strong} weak=${weak} green=${green} nonwhite=${nonwhite} dark=${dark} gold=${gold} dull=${dull} bright=${bright}`);
+  // The centroid travels with the count so a caller can click the control
+  // where it actually is instead of trusting a measured preset: these cards
+  // move with the page content, and a click a few pixels off the pill lands on
+  // nothing at all.
+  const goldCx = gold > 0 ? Math.round(goldX / gold) : 0;
+  const goldCy = gold > 0 ? Math.round(goldY / gold) : 0;
+  const strongCx = strong > 0 ? Math.round(strongX / strong) : 0;
+  const strongCy = strong > 0 ? Math.round(strongY / strong) : 0;
+  console.log(`strong=${strong} weak=${weak} green=${green} nonwhite=${nonwhite} dark=${dark} gold=${gold} dull=${dull} bright=${bright} goldCx=${goldCx} goldCy=${goldCy} strongCx=${strongCx} strongCy=${strongCy}`);
 }

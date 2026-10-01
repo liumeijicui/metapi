@@ -38,6 +38,8 @@ const COOKIE_ONLY_LOGIN_USERNAME = 'cookie-only-user';
 const COOKIE_ONLY_LOGIN_PASSWORD = 'cookie-only-pass';
 const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
 const OPENAI_MODELS_SHIELDED_TOKEN = 'openai-models-shielded-token';
+const SESSION_LIMIT_LOGIN_USERNAME = 'session-capped-user';
+const SESSION_LIMIT_LOGIN_PASSWORD = 'session-capped-pass';
 const EDGE_THROTTLED_TOKEN = 'edge-throttled-token';
 const EDGE_THROTTLE_ONCE_TOKEN = 'edge-throttle-once-token';
 const COOKIE_SHIELDED_TOKEN = Buffer.from(
@@ -132,6 +134,16 @@ describe('NewApiAdapter', () => {
           const isShieldLogin =
             payload.username === SHIELD_LOGIN_USERNAME &&
             payload.password === SHIELD_LOGIN_PASSWORD;
+          const isSessionCappedLogin =
+            payload.username === SESSION_LIMIT_LOGIN_USERNAME &&
+            payload.password === SESSION_LIMIT_LOGIN_PASSWORD;
+          if (isSessionCappedLogin) {
+            // A fork that allows one session per account answers a second
+            // sign-in with a bare "Conflict" and the cause in `code`.
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ code: 'AUTH_SESSION_LIMIT', message: 'Conflict', success: false }));
+            return;
+          }
           const isCookieOnlyLogin =
             payload.username === COOKIE_ONLY_LOGIN_USERNAME &&
             payload.password === COOKIE_ONLY_LOGIN_PASSWORD;
@@ -777,6 +789,17 @@ describe('NewApiAdapter', () => {
     expect(result.accessToken || '').toContain(`session=${COOKIE_ONLY_LOGIN_SESSION}`);
     expect(result.accessToken || '').toContain(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`);
     expect(result.accessToken || '').toContain(`cdn_sec_tc=${SHIELD_LOGIN_COOKIE}`);
+  });
+
+  it('names the cause when the site refuses a second session for the account', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.login(baseUrl, SESSION_LIMIT_LOGIN_USERNAME, SESSION_LIMIT_LOGIN_PASSWORD);
+
+    expect(result.success).toBe(false);
+    // "Conflict" on its own reads like a transient clash and says nothing about
+    // what to do; the code is the part that names the cause — the account already
+    // holds a session, and that one has to be signed out before another opens.
+    expect(result.message).toBe('Conflict（AUTH_SESSION_LIMIT）');
   });
 
   it('detects cookie session values as session cookies for anyrouter-like deployments', async () => {

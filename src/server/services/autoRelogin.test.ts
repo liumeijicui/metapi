@@ -132,12 +132,108 @@ describe('autoRelogin', () => {
     expect(updateSetMock).not.toHaveBeenCalled();
   });
 
-  it('keeps the browser fallback off for callers that refresh balances', async () => {
+  it('starts a browser when the site answered the login with its shield instead', async () => {
+    // The fork here answers a login POST it does not like with a challenge page
+    // rather than a verdict (`shield challenge blocked login`). That is not a
+    // wrong password — it is the refusal a browser exists to clear.
+    adapterMock.login.mockResolvedValue({
+      success: false,
+      message: '登录被站点人机校验拦截（shield challenge blocked login）',
+    });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue(browserOutcome('new_api_refresh=fresh'));
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE, { allowBrowserFallback: true });
+
+    expect(result?.accessToken).toBe('new_api_refresh=fresh');
+    expect(browserSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the browser fallback off unless the caller asks for it', async () => {
     adapterMock.login.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
     decryptPasswordMock.mockReturnValue('liyaodong7238508');
 
     const { tryAutoRelogin } = await import('./autoRelogin.js');
     const result = await tryAutoRelogin(account(), SITE);
+
+    expect(result).toBeNull();
+    expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('waits out the cooldown before spending another browser run', async () => {
+    // A browser run takes minutes and the sites that need one rate-limit hard,
+    // so a second run minutes later would only add to the throttling. The
+    // timestamp lives in extraConfig, which is what survives a restart.
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        extraConfig: JSON.stringify({
+          autoRelogin: { username: 'li3145215575', passwordCipher: 'cipher' },
+          browserRelogin: { attemptedAt: new Date().toISOString() },
+        }),
+      }),
+      SITE,
+      { allowBrowserFallback: true },
+    );
+
+    expect(result).toBeNull();
+    // The cheap HTTP replay still runs — it is the minutes-long browser run the
+    // cooldown holds back.
+    expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('tries again once the cooldown has passed', async () => {
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue(browserOutcome('new_api_refresh=fresh'));
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        extraConfig: JSON.stringify({
+          autoRelogin: { username: 'li3145215575', passwordCipher: 'cipher' },
+          browserRelogin: { attemptedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
+        }),
+      }),
+      SITE,
+      { allowBrowserFallback: true },
+    );
+
+    expect(result?.accessToken).toBe('new_api_refresh=fresh');
+    expect(browserSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('spends the browser on a human check even when the caller only allows that much', async () => {
+    // The shape the hourly balance refresh uses: it cannot afford a browser for
+    // every account, but a site that will not answer the HTTP login until a
+    // human check is passed has no other way back in.
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue(browserOutcome('new_api_refresh=fresh'));
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE, {
+      allowBrowserFallback: true,
+      browserFallbackRequiresHumanCheck: true,
+    });
+
+    expect(result?.accessToken).toBe('new_api_refresh=fresh');
+    expect(browserSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('spares the browser for a session-only account under that same caller', async () => {
+    // Nothing to type, so the run would end exactly where it started — minutes
+    // later. Only a site that explicitly demanded a human check earns one.
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({ extraConfig: JSON.stringify({ credentialMode: 'session' }) }),
+      SITE,
+      { allowBrowserFallback: true, browserFallbackRequiresHumanCheck: true },
+    );
 
     expect(result).toBeNull();
     expect(browserSessionMock).not.toHaveBeenCalled();

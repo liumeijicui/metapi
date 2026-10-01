@@ -14,12 +14,17 @@ const selectAllMock = vi.fn();
 const selectGetMock = vi.fn();
 const insertValuesMock = vi.fn();
 const updateSetMock = vi.fn();
+/** Every `where()` argument, so a test can read back the row filter itself. */
+const whereArgs: unknown[] = [];
 
 vi.mock('../db/index.js', () => {
-  const selectChain = {
+  const selectChain: any = {
     all: () => selectAllMock(),
     get: () => selectGetMock(),
-    where: () => selectChain,
+    where: (...args: unknown[]) => {
+      whereArgs.push(...args);
+      return selectChain;
+    },
     innerJoin: () => selectChain,
     from: () => selectChain,
   };
@@ -105,6 +110,91 @@ describe('checkinService auto relogin', () => {
     insertValuesMock.mockReset();
     updateSetMock.mockReset();
     browserSessionMock.mockReset();
+    whereArgs.length = 0;
+  });
+
+  it('scans expired accounts, so a dead session still gets its revival run', async () => {
+    // `reportTokenExpired()` marks an account `expired` from the hourly balance
+    // refresh. Filtering those out here would hide them from the only job that
+    // may run the browser, and for a Turnstile-gated site the browser is the
+    // only way back in — the account would stay dead forever.
+    selectAllMock.mockReturnValue([]);
+
+    const { checkinAll } = await import('./checkinService.js');
+    await checkinAll();
+
+    const filter = JSON.stringify(whereArgs);
+    expect(filter).toContain('active');
+    expect(filter).toContain('expired');
+  });
+
+  it('leaves an expired account expired when nothing could sign it back in', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'dead-token',
+          status: 'expired',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'HTTP 401: Unauthorized, not logged in and no access token provided',
+    });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    // The site caps concurrent sessions, so the password login is refused even
+    // though the password is right. Nothing here can revive the account, and
+    // claiming otherwise would just have the next balance run mark it expired
+    // again.
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Conflict（AUTH_SESSION_LIMIT）' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    expect(updateSetMock).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
+  });
+
+  it('revives an expired account once a sign-in hands it a live credential', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'dead-token',
+          status: 'expired',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'HTTP 401: Unauthorized, not logged in and no access token provided' })
+      .mockResolvedValueOnce({ success: true, message: '签到成功' });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
   });
 
   it('retries checkin once after auto relogin when access token is missing', async () => {
