@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +37,14 @@ export type BrowserCheckinInput = {
    * shorter, because it does not wait for Chromium to commit its cookie store.
    */
   cookieName?: string | null;
+  /**
+   * Session cookie the caller already holds, in `Cookie`-style form
+   * (`new_api_refresh=<value>`). Seeding it into the profile before the browser
+   * starts is what lets a site whose sign-in is a plain OAuth redirect reach the
+   * check-in card: the run only has to clear the Turnstile widget, and the
+   * username/password below are never typed.
+   */
+  sessionCredential?: string | null;
   proxyUrl?: string | null;
   timeoutMs?: number;
 };
@@ -117,6 +125,85 @@ export function parseCheckinResultLine(stdout: string): RawCheckinVerdict | null
   return null;
 }
 
+/** Reads one `name=value` pair out of a `Cookie`-style header. */
+function readCookieValue(credential: string, name: string): string | null {
+  if (!name) return null;
+  const match = new RegExp(`(^|;\\s*)${name}=([^;]*)`, 'i').exec(credential);
+  return match ? match[2].trim() : null;
+}
+
+/** Where Chromium keeps a profile's cookies, across both store layouts. */
+function cookieStorePaths(profileDir: string): string[] {
+  return [join(profileDir, 'Default', 'Cookies'), join(profileDir, 'Default', 'Network', 'Cookies')];
+}
+
+/**
+ * Opens a profile once so Chromium creates its cookie store.
+ *
+ * A profile that has never been started has nowhere to plant a session, and a
+ * store written from the outside while Chromium is up is ignored and then
+ * overwritten, so the plant below needs a profile that has been opened at least
+ * once and is now closed. The start is a throwaway: it is killed by the timeout
+ * and the flow then writes into the store it left behind.
+ */
+function primeProfileStore(executablePath: string, profileDir: string): boolean {
+  if (cookieStorePaths(profileDir).some((path) => existsSync(path))) return true;
+  try {
+    spawnSync(executablePath, [
+      `--user-data-dir=${profileDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--hide-crash-restore-bubble',
+      '--password-store=basic',
+      '--window-size=400,300',
+      'about:blank',
+    ], { timeout: 15_000, killSignal: 'SIGKILL', stdio: 'ignore' });
+  } catch {
+    // A browser that refuses to start leaves no store; the caller falls back
+    // to the login path.
+  }
+  return cookieStorePaths(profileDir).some((path) => existsSync(path));
+}
+
+/**
+ * Plants an already-earned session in a Chromium profile.
+ *
+ * Returns true only when at least one cookie was written, which is also the
+ * signal that the site can skip its login form.
+ */
+function seedProfileCookies(
+  scriptPath: string,
+  profileDir: string,
+  siteUrl: string,
+  credential: string,
+  executablePath: string,
+): boolean {
+  let host = '';
+  let path = '/';
+  try {
+    host = new URL(siteUrl).hostname;
+  } catch {
+    return false;
+  }
+  primeProfileStore(executablePath, profileDir);
+  // `new_api_refresh` is path-scoped by the sites that issue it; every other
+  // cookie in the credential is scoped to the whole origin. The name is
+  // duplicated from browserSessionCredential.ts on purpose: importing it back
+  // would close a module cycle.
+  if (credential.includes('new_api_refresh=')) path = '/api/user/auth';
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [join(dirname(scriptPath), 'cookieStore.mjs'), 'put', profileDir, credential, path, 'true'],
+      { env: { ...process.env, CHECKIN_COOKIE_HOST: host }, encoding: 'utf8', timeout: 20_000 },
+    );
+    if (result.status === 0) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Turns the script verdict into the shared check-in result shape.
  *
@@ -179,6 +266,28 @@ async function executeBrowserCheckin(
   };
   const cookieName = (input.cookieName || '').trim();
   if (cookieName) env.CHECKIN_COOKIE_NAME = cookieName;
+
+  // A caller that already holds a session (a token the operator pasted, or the
+  // OAuth handshake this account signed in with) hands it over here. Writing it
+  // into the profile first means the browser boots straight into the site
+  // instead of the sign-in form, which matters when the site has no password
+  // field to drive. Best effort: a first run on a fresh profile still has no
+  // cookie store to write to, and the script's own login path covers that.
+  const sessionCredential = (input.sessionCredential || '').trim();
+  const sessionSeeded = sessionCredential
+    ? seedProfileCookies(scriptPath, profileDir, input.siteUrl, sessionCredential, executable.path)
+    : false;
+  if (sessionSeeded) {
+    // A seeded profile opens on the signed-in page, so the script must not fall
+    // back to typing a sign-in form that these builds do not have.
+    env.CHECKIN_SESSION_SEEDED = '1';
+    // `new_api_refresh` is rolling: the site rotates it on the first exchange
+    // the page makes, and only the rotated value is still good. Handing the
+    // planted value to the script lets it tell "the cookie is there" (the value
+    // we wrote) apart from "the page signed in and stored a new one".
+    const seededValue = readCookieValue(sessionCredential, cookieName);
+    if (seededValue) env.CHECKIN_COOKIE_PREVIOUS = seededValue;
+  }
   const proxyUrl = (input.proxyUrl || '').trim();
   if (proxyUrl) env.CHECKIN_PROXY_URL = proxyUrl;
 

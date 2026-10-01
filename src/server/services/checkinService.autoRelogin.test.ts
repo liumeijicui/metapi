@@ -83,6 +83,8 @@ vi.mock('./accountCredentialService.js', () => ({
 const browserSessionMock = vi.fn();
 
 vi.mock('./browserSessionCredential.js', () => ({
+  // Mirrors the real module's constant so the service can recognise a session.
+  BROWSER_SESSION_COOKIE: 'new_api_refresh',
   runBrowserSessionCheckin: (...args: unknown[]) => browserSessionMock(...args),
 }));
 
@@ -672,5 +674,90 @@ describe('checkinService auto relogin', () => {
     expect(result.success).toBe(false);
     expect(result.status).toBe('failed');
     expect(updateSetMock).not.toHaveBeenCalled();
+  });
+
+  it('drives the browser with the stored session when the account has no password', async () => {
+    // A token-only bind on a site whose sign-in is a GitHub redirect: there is
+    // no autoRelogin config and no password to type, so the session cookie is
+    // the only way the browser can reach the check-in card. Before this, that
+    // shape of account was refused outright and every run ended in
+    // "needs manual verification".
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 22,
+          username: 'liumeijicui',
+          accessToken: 'new_api_refresh=seeded',
+          status: 'active',
+          extraConfig: JSON.stringify({ credentialMode: 'session', platformUserId: 4219 }),
+        },
+        sites: {
+          id: 37,
+          name: 'KKtoken AI',
+          url: 'https://kktoken.cc',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'Turnstile token 为空',
+    });
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: true, message: '浏览器签到成功（已通过站点人机校验）' },
+        logDir: '/logs',
+        profileDir: '/profile',
+      },
+      accessToken: null,
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(22);
+
+    expect(result.success).toBe(true);
+    expect(decryptPasswordMock).not.toHaveBeenCalled();
+    expect(browserSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionCredential: 'new_api_refresh=seeded',
+      username: 'liumeijicui',
+      password: '',
+    }));
+  });
+
+  it('does not start a browser for a credential that is not a session cookie', async () => {
+    // A bare API key or access token is not something the browser can present,
+    // so launching Chromium for it would only burn a run on the sign-in form.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 22,
+          username: 'liumeijicui',
+          accessToken: 'DniVswV+PKybmfhUqqiTlherargWYtM=',
+          status: 'active',
+          extraConfig: JSON.stringify({ credentialMode: 'session', platformUserId: 4219 }),
+        },
+        sites: {
+          id: 37,
+          name: 'KKtoken AI',
+          url: 'https://kktoken.cc',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'Turnstile token 为空',
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(22);
+
+    expect(browserSessionMock).not.toHaveBeenCalled();
+    // The turnstile verdict still stands on its own: the run is recorded as
+    // "needs a person" rather than failed, and no browser was spent on it.
+    expect(result.status).toBe('skipped');
   });
 });

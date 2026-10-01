@@ -19,7 +19,7 @@ import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { classifyFailureReason } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
-import { runBrowserSessionCheckin } from './browserSessionCredential.js';
+import { BROWSER_SESSION_COOKIE, runBrowserSessionCheckin } from './browserSessionCredential.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
 
@@ -176,34 +176,71 @@ type BrowserCheckinAttempt = {
 };
 
 /**
+ * Reads a browser-ready session out of the stored access token.
+ *
+ * A token-only bind on a site whose sign-in is OAuth leaves the account holding
+ * the `new_api_refresh` cookie the site handed the browser (see
+ * browserSessionCredential.ts). Such a cookie is the whole credential: passing it
+ * to the browser is what replaces the password login those sites never expose,
+ * so the check-in can still be driven. Every other credential shape (an API key,
+ * a bare access token) is not a cookie and is ignored here.
+ */
+function asBrowserSessionCredential(accessToken: unknown): string | null {
+  if (typeof accessToken !== 'string') return null;
+  const value = accessToken.trim();
+  return value.startsWith(`${BROWSER_SESSION_COOKIE}=`) ? value : null;
+}
+
+/**
  * Answers a browser-only check-in challenge.
  *
  * Some New API forks protect the check-in endpoint with Cloudflare Turnstile,
- * which no plain HTTP call can satisfy. When the account has stored login
- * credentials, run the same flow a person would drive in a browser on the
- * server; otherwise return null so the original verdict (and its "needs manual
+ * which no plain HTTP call can satisfy. Run the same flow a person would drive
+ * in a browser on the server whenever the account can reach a signed-in page;
+ * otherwise return null so the original verdict (and its "needs manual
  * verification" handling) stands.
+ *
+ * Two kinds of account can get there, and they seed the browser differently:
+ *
+ * - one with stored login credentials signs in through the page;
+ * - one holding a `new_api_refresh` session (the credential such sites hand out
+ *   to a GitHub/OAuth sign-in, and the only one they ever give a token-only
+ *   bind) replays that session instead, so a site with no password field to
+ *   drive still lands on the check-in card.
  */
 async function tryBrowserCheckin(site: any, account: any): Promise<BrowserCheckinAttempt | null> {
   if ((site.platform || '').toLowerCase() !== 'new-api') return null;
 
   const relogin = getAutoReloginConfig(account.extraConfig);
-  if (!relogin) return null;
-  const password = decryptAccountPassword(relogin.passwordCipher);
-  if (!password) return null;
+  const password = relogin ? decryptAccountPassword(relogin.passwordCipher) : null;
+  // The HTTP check-in above exchanges a rolling credential, and that exchange
+  // retires the value this run started with. Re-read the row so the browser is
+  // handed the secret that is actually live right now: a spent one only opens
+  // the site signed out.
+  const live = await db
+    .select({ accessToken: schema.accounts.accessToken })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, account.id))
+    .get();
+  const storedToken = live?.accessToken ?? account.accessToken;
+  const sessionCredential = asBrowserSessionCredential(storedToken);
+  // A stored login and a live session are each sufficient; without either the
+  // browser would only ever see the site's sign-in form.
+  if (!password && !sessionCredential) return null;
 
   const { outcome, accessToken } = await runBrowserSessionCheckin({
     site,
-    username: relogin.username || account.username,
-    password,
+    username: relogin?.username || account.username,
+    password: password || '',
     accountExtraConfig: account.extraConfig,
+    sessionCredential,
   });
 
   // The browser signs in with credentials the HTTP path cannot use, so the
   // session it just created is the account's live credential. Keeping it stops
   // the account from reading as expired: balance, model and probe calls work
   // again, and the next run only needs the browser for the check-in itself.
-  if (accessToken && accessToken !== account.accessToken) {
+  if (accessToken && accessToken !== storedToken) {
     await db.update(schema.accounts)
       .set({
         accessToken,

@@ -23,10 +23,21 @@ export const BROWSER_SESSION_COOKIE = 'new_api_refresh';
 
 export type BrowserSessionCheckinInput = {
   site: SiteProxyConfigLike & { id: number; url: string };
+  /**
+   * Only needed when the site still shows a password form. A run that starts
+   * from `sessionCredential` never types them, so they may be empty.
+   */
   username: string;
   password: string;
   /** Account-level proxy override; the site's own setting is used without one. */
   accountExtraConfig?: string | null;
+  /**
+   * Session the operator or the OAuth handshake already earned, in
+   * `Cookie`-style form. Seeding it lets the browser skip the login form
+   * entirely, which is the only way in on sites whose sign-in is a GitHub
+   * redirect (no password field to drive).
+   */
+  sessionCredential?: string | null;
 };
 
 export type BrowserSessionCheckinResult = {
@@ -71,6 +82,7 @@ export async function runBrowserSessionCheckin(
     profileKey: `site-${input.site.id}`,
     logDir: resolve(config.dataDir, 'checkin-browser', `site-${input.site.id}`),
     cookieName: BROWSER_SESSION_COOKIE,
+    sessionCredential: input.sessionCredential ?? null,
   });
 
   if (outcome.kind === 'unavailable') return { outcome, accessToken: null };

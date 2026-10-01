@@ -14,7 +14,8 @@
 # Environment:
 #   CHECKIN_SITE_URL      site origin, e.g. https://grok-heavy.878.indevs.in
 #   CHECKIN_USERNAME      login name or e-mail
-#   CHECKIN_PASSWORD      login password
+#   CHECKIN_PASSWORD      login password; may be empty when the session below
+#                         is seeded, because nothing is typed in that case
 #   CHECKIN_PROFILE_DIR   Chromium user-data-dir (login session is kept here)
 #   CHECKIN_LOG_DIR       screenshots + run.log for this run
 #   CHECKIN_PROXY_URL     optional http(s) proxy for the browser
@@ -27,6 +28,17 @@
 # then waits for the freshly written value to reach the profile, because
 # Chromium's cookie store only commits on a ~30s timer and never flushes on exit.
 #
+# CHECKIN_SESSION_SEEDED=1 tells the flow the caller has already written a live
+# login cookie into the profile. The site then opens on the signed-in page and
+# there is nothing to type, so the sign-in path is skipped entirely: these
+# builds sign in through an OAuth redirect, which has no password field to
+# drive, and a run that typed an empty password would only look like a failure.
+#
+# CHECKIN_COOKIE_PREVIOUS is the value the caller just planted. A rolling
+# credential is rotated by the first exchange the page makes, so the flow waits
+# for the stored value to *change* rather than to merely exist: the planted value
+# is already there, and keeping it would hand the caller back a spent secret.
+#
 # Output contract: the last stdout line is
 #   METAPI_CHECKIN_RESULT={"ok":<bool>,"already":<bool>,"detail":"<token>"}
 # Exit code 0 only when ok or already is true.
@@ -34,7 +46,9 @@ set -u
 
 SITE=${CHECKIN_SITE_URL:?CHECKIN_SITE_URL is required}
 USER_NAME=${CHECKIN_USERNAME:?CHECKIN_USERNAME is required}
-USER_PASS=${CHECKIN_PASSWORD:?CHECKIN_PASSWORD is required}
+# A run that starts from a session the caller already planted never types a
+# password, so the caller is allowed to leave it empty.
+USER_PASS=${CHECKIN_PASSWORD:-}
 PROFILE=${CHECKIN_PROFILE_DIR:?CHECKIN_PROFILE_DIR is required}
 LOG=${CHECKIN_LOG_DIR:-/tmp/metapi-checkin-browser}
 PROXY=${CHECKIN_PROXY_URL:-}
@@ -44,6 +58,8 @@ NODE=${NODE_BIN:-node}
 HELPER=${CHECKIN_HELPER:-$(dirname "$0")/regionStats.mjs}
 COOKIE_HELPER=$(dirname "$0")/cookieStore.mjs
 COOKIE_NAME=${CHECKIN_COOKIE_NAME:-}
+SESSION_SEEDED=${CHECKIN_SESSION_SEEDED:-}
+COOKIE_PREVIOUS=${CHECKIN_COOKIE_PREVIOUS:-}
 
 # Pixel coordinates of the elements this flow drives. They belong to the window
 # geometry set below (1280x900 at 0,0 on a 1440x1000 display) and must be
@@ -104,6 +120,28 @@ apply_layout() {
       # --test-type, which is the switch that suppresses it.
       EXTRA_LAUNCH_FLAGS="--test-type"
       ;;
+    kkt)
+      # kktoken.cc (KKtoken AI). Its sign-in page carries a GitHub button above
+      # the form, so that form sits where the moto layout measured it; the build
+      # itself is a plain blue one, so the check-in button follows the rc
+      # palette (saturated blue = actionable, pale blue = checked in today).
+      # The profile page is a wide dashboard: the check-in card is the rightmost
+      # tile of the second row, and its button only shows up once the page has
+      # been rendered for a moment.
+      USERNAME_XY="640 484"
+      PASSWORD_XY="640 554"
+      LOGIN_SHIELD_XY="455 681"
+      LOGIN_BUTTON_XY="640 609"
+      CHECKIN_BUTTON_XY="1168 454"
+      MODAL_SHIELD_XY="508 525"
+      CHECKIN_BUTTON_BOX="1114 440 108 28"
+      MODAL_TITLE_BOX="400 400 200 24"
+      # The signed-in header carries the user name; the sign-in page is blank
+      # in that spot.
+      PROFILE_MARKER_BOX="338 190 160 26"
+      LOGIN_TICK_BOX="440 718 30 28"
+      EXTRA_LAUNCH_FLAGS="--test-type"
+      ;;
     ark)
       # 方舟 (api.bxacc.xyz). Its sign-in form is taller than the other builds:
       # a LinuxDO button sits above the fields, so everything is ~70px lower
@@ -141,6 +179,7 @@ apply_layout() {
 }
 
 case "$SITE" in
+  *kktoken.cc*) apply_layout kkt ;;
   *motomoto.lol*) apply_layout moto ;;
   *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
   *bxacc.xyz*) apply_layout ark ;;
@@ -226,7 +265,9 @@ mkdir -p "$PROFILE"
 
 # The caller reads the login cookie this run writes, so drop whatever an earlier
 # run left behind: "the cookie is in the store" then means "this run wrote it".
-if [ -n "$COOKIE_NAME" ]; then
+# A caller that planted a live session is the exception: that cookie is the one
+# the browser has to start with, and the wait below tracks it by value instead.
+if [ -n "$COOKIE_NAME" ] && [ "$SESSION_SEEDED" != 1 ]; then
   "$NODE" "$COOKIE_HELPER" drop "$PROFILE" "$COOKIE_NAME" >/dev/null 2>&1 || true
 fi
 
@@ -366,11 +407,20 @@ login() {
 
 nav "$SITE/profile" 8
 
-# Waits for the profile page to render after a navigation.
+# Waits for the profile page to render after a navigation, and then for its
+# check-in card to render too: the signed-in header can appear several seconds
+# before the card's button does, and a click that lands before the button exists
+# is simply lost.
 wait_profile() {
   local n=0
   snap cur; measure; rm -f "$LOG/cur.ppm"
   while [ "$profile" = 0 ] && [ "$n" -lt 2 ]; do
+    sleep 3
+    snap cur; measure; rm -f "$LOG/cur.ppm"
+    n=$((n+1))
+  done
+  n=0
+  while [ "$profile" = 1 ] && [ "$st" = BLANK ] && [ "$n" -lt 3 ]; do
     sleep 3
     snap cur; measure; rm -f "$LOG/cur.ppm"
     n=$((n+1))
@@ -409,7 +459,7 @@ wait_for_login_cookie() {
   [ -n "$COOKIE_NAME" ] || return 0
   local waited
   if waited=$("$NODE" "$COOKIE_HELPER" wait "$PROFILE" "$COOKIE_NAME" \
-    "${CHECKIN_COOKIE_WAIT_SECONDS:-60}" 2>/dev/null); then
+    "${CHECKIN_COOKIE_WAIT_SECONDS:-60}" "$COOKIE_PREVIOUS" 2>/dev/null); then
     say "login cookie stored in the profile ($waited)"
   else
     say "login cookie never reached the profile"
@@ -421,6 +471,16 @@ dismiss_overlays
 say "state1=$st modal=$modal profile=$profile"
 
 if [ "$profile" = 0 ]; then
+  if [ "$SESSION_SEEDED" = 1 ]; then
+    # The caller planted a login cookie and the site still opened signed out,
+    # so that cookie was already spent. An OAuth-only build has no password
+    # field to type into, and pretending to sign in would report a failure
+    # that names the wrong cause, so say what actually happened.
+    snap result
+    say "seeded session did not open the profile page"
+    emit false false session_rejected
+    exit 1
+  fi
   # Always return to the page that carries the check-in card afterwards: the
   # sign-in may land on a different start page (the rc build opens its
   # overview), and even a failed attempt deserves one last look before the
