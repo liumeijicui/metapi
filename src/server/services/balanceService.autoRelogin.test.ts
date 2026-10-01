@@ -100,11 +100,48 @@ describe('balanceService auto relogin', () => {
     extractRuntimeHealthMock.mockReset();
     undiciFetchMock.mockReset();
 
+    delete (adapterMock as { balanceUnavailableReason?: string }).balanceUnavailableReason;
     extractRuntimeHealthMock.mockReturnValue(null);
     undiciFetchMock.mockResolvedValue({
       ok: false,
       json: async () => ({}),
     });
+  });
+
+  it('skips the refresh instead of failing when the site shields its quota endpoint', async () => {
+    // agentrouter.org answers /api/user/self with an Aliyun WAF challenge page
+    // for every HTTP client. Nothing here can read that balance, and the account
+    // is not broken, so the run has to report a skip rather than a credential
+    // failure the operator cannot act on.
+    (adapterMock as { balanceUnavailableReason?: string }).balanceUnavailableReason =
+      '站点余额接口受阿里云 WAF 保护，HTTP 无法读取余额（签到与登录不受影响）';
+
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 19,
+          username: 'github_99102',
+          accessToken: 'L6B0L/HaeXMKCoI5q+abcdefghijkl=',
+          status: 'active',
+          extraConfig: JSON.stringify({ platformUserId: 99102, agentRouter: { provider: 'github' } }),
+        },
+        sites: {
+          id: 35,
+          name: 'agentrouter',
+          url: 'https://agentrouter.org',
+          platform: 'agentrouter',
+        },
+      },
+    ]);
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const result = await refreshBalance(19);
+
+    expect(result).toMatchObject({ skipped: true, reason: 'balance_unavailable' });
+    expect(adapterMock.getBalance).not.toHaveBeenCalled();
+    expect(setAccountRuntimeHealthMock).toHaveBeenCalledWith(19, expect.objectContaining({
+      state: 'degraded',
+    }));
   });
 
   it('retries balance fetch once after successful auto relogin', async () => {

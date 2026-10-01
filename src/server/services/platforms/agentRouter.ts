@@ -71,6 +71,18 @@ function startOfLocalDaySeconds(now: Date = new Date()): number {
 export class AgentRouterAdapter extends NewApiAdapter {
   readonly platformName = 'agentrouter';
 
+  /**
+   * `/api/user/self` answers every HTTP client with an Aliyun WAF challenge
+   * page (`aliyun_waf_aa`/`bb`), no matter the headers or the proxy, while the
+   * neighbouring routes (`/api/log/self`, `/api/status`) serve JSON normally.
+   * The console reads the quota from a browser that has cleared that challenge,
+   * so nothing here can; the balance is reported as unavailable instead of as a
+   * broken credential. Daily check-in is unaffected — it goes through the OAuth
+   * login and the system log.
+   */
+  readonly balanceUnavailableReason =
+    '站点余额接口受阿里云 WAF 保护，HTTP 无法读取余额（签到与登录不受影响）';
+
   async detect(url: string): Promise<boolean> {
     return (url || '').toLowerCase().includes('agentrouter');
   }

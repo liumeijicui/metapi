@@ -121,6 +121,13 @@ export interface CreateApiTokenOptions {
 
 export interface PlatformAdapter {
   readonly platformName: string;
+  /**
+   * Set when the site's own quota endpoint cannot be read over HTTP — typically
+   * because a web application firewall only lets a real browser through. The
+   * balance refresh then skips the account instead of filing a credential
+   * failure the operator cannot act on; login and check-in are unaffected.
+   */
+  readonly balanceUnavailableReason?: string;
   detect(url: string): Promise<boolean>;
   login(baseUrl: string, username: string, password: string): Promise<LoginResult>;
   getUserInfo(baseUrl: string, accessToken: string, platformUserId?: number): Promise<UserInfo | null>;

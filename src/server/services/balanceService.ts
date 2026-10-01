@@ -238,6 +238,24 @@ export async function refreshBalance(accountId: number) {
   const adapter = getAdapter(site.platform);
   if (!adapter) return null;
 
+  if (adapter.balanceUnavailableReason) {
+    // The account is fine; the site just will not answer the quota endpoint
+    // over HTTP. Recording that as a failure would send the operator hunting
+    // for a credential problem that does not exist.
+    await setAccountRuntimeHealth(account.id, {
+      state: 'degraded',
+      reason: adapter.balanceUnavailableReason,
+      source: 'balance',
+    });
+    return {
+      balance: account.balance ?? 0,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+      skipped: true,
+      reason: 'balance_unavailable',
+    };
+  }
+
   if (isApiKeyConnection(account)) {
     return {
       balance: account.balance ?? 0,
