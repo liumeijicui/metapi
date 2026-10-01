@@ -1,6 +1,9 @@
 export const PLATFORM_ALIASES = Object.assign(Object.create(null), {
   anyrouter: 'anyrouter',
   agentrouter: 'agentrouter',
+  gwrelay: 'gwrelay',
+  'gw-relay': 'gwrelay',
+  ccwu: 'gwrelay',
   'wong-gongyi': 'new-api',
   'vo-api': 'new-api',
   'super-api': 'new-api',

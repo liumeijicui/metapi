@@ -11,7 +11,7 @@ import {
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
-import { tryAutoRelogin } from './autoRelogin.js';
+import { isBrowserOnlyReloginPlatform, tryAutoRelogin } from './autoRelogin.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
@@ -333,7 +333,9 @@ export async function refreshBalance(accountId: number) {
         await handleBalanceError(retryErr);
       }
     } else if (shouldAttemptAutoRelogin(message)) {
-      const relogin = await tryAutoRelogin(account, site);
+      const relogin = await tryAutoRelogin(account, site, {
+        allowBrowserFallback: isBrowserOnlyReloginPlatform(site.platform),
+      });
       if (relogin) {
         activeAccessToken = relogin.accessToken;
         // Adopt the id the re-login reported and advance activeExtraConfig.

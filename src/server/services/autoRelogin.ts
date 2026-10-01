@@ -57,6 +57,19 @@ export type AutoReloginOptions = {
 };
 
 /**
+ * Platforms whose dead credential can only be replaced by the headed browser.
+ *
+ * Such a site gates every password login behind a human check, so the HTTP
+ * replays above can never succeed. Balance refreshes normally keep the browser
+ * off, but for these platforms that is not an option: the failed refresh flips
+ * the account to `expired`, and the daily check-in set is selected on
+ * `status = 'active'` — the account would drop out of it and never come back.
+ */
+export function isBrowserOnlyReloginPlatform(platform?: string | null): boolean {
+  return (platform || '').trim().toLowerCase() === 'gwrelay';
+}
+
+/**
  * Writes a freshly earned credential to the account row.
  *
  * The row is re-read before the merge: account settings may have changed while
@@ -173,10 +186,28 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
  * credential it has, so seeding it is the only way in.
  */
 async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
-  if ((site.platform || '').toLowerCase() !== 'new-api') return null;
-
+  const platform = (site.platform || '').toLowerCase();
   const relogin = getAutoReloginConfig(account.extraConfig);
   const password = relogin ? decryptAccountPassword(relogin.passwordCipher) : null;
+
+  // The 辉哥中转 PHP panel is the mirror image of the new-api forks below: its
+  // sign-in form is the *only* way in (Turnstile gates it), and its session is a
+  // short-lived `ut-…` token instead of a refresh cookie. Nothing about the
+  // new-api browser script fits it, so it gets its own driver.
+  if (isBrowserOnlyReloginPlatform(platform)) {
+    if (!password) return null;
+    const { loginGwRelayInBrowser } = await import('./assistedLogin/sites/gwRelay.js');
+    const outcome = await loginGwRelayInBrowser({
+      baseUrl: site.url,
+      username: relogin?.username || account.username,
+      password,
+    });
+    if (!outcome.ok || !outcome.accessToken) return null;
+    return persistCredential(account, { accessToken: outcome.accessToken });
+  }
+
+  if (platform !== 'new-api') return null;
+
   const sessionCredential = password ? null : asBrowserSessionCredential(account.accessToken);
   if (!password && !sessionCredential) return null;
 

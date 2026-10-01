@@ -1,6 +1,7 @@
 import type { PlatformAdapter } from './base.js';
 import { AnyRouterAdapter } from './anyrouter.js';
 import { AgentRouterAdapter } from './agentRouter.js';
+import { GwRelayAdapter } from './gwrelay.js';
 import { NewApiAdapter } from './newApi.js';
 import { OneApiAdapter } from './oneApi.js';
 import { VeloeraAdapter } from './veloera.js';
@@ -30,6 +31,7 @@ const adapters: PlatformAdapter[] = [
   new OrcaRouterAdapter(),
   new AnyRouterAdapter(),
   new AgentRouterAdapter(),
+  new GwRelayAdapter(),
   new DoneHubAdapter(),
   new OneHubAdapter(),
   new VeloeraAdapter(),
