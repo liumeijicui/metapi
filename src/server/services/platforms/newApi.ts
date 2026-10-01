@@ -864,7 +864,68 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (!message) return false;
     const text = message.toLowerCase();
     if (/^http\s+404:/i.test(text)) return true;
-    return /invalid url \(post \/api\/user\/(sign_in|checkin|daily)\)/.test(text);
+    return /invalid url \(post \/api\/user\/(sign_in|checkin|daily|sota-agent-checkin)\)/.test(text);
+  }
+
+  /**
+   * True when the deployment exposes the check-in route but the operator has
+   * turned the feature off.
+   *
+   * The message is a configuration verdict rather than a failing account, and
+   * it is also the only signal that the daily reward may be waiting behind a
+   * fork-specific route instead.
+   */
+  private isDisabledCheckinFeatureMessage(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    return (
+      message.includes('签到功能未启用')
+      || message.includes('签到未启用')
+      || text.includes('checkin is disabled')
+      || text.includes('check-in is disabled')
+      || text.includes('checkin disabled')
+      || text.includes('check-in disabled')
+      || text.includes('checkin is not enabled')
+      || text.includes('check-in is not enabled')
+    );
+  }
+
+  /**
+   * Answers the daily reward on forks that moved it behind an agent program.
+   *
+   * SOTA Model keeps a working `/api/user/sota-agent-checkin` while answering
+   * "签到功能未启用" on both `/api/user/daily` and `/api/user/checkin`. The probe
+   * is only worth a request once the standard routes have reported the feature
+   * as off, and deployments that never had the route answer 404, so nothing
+   * else is affected.
+   */
+  private async tryAgentProgramCheckin(
+    baseUrl: string,
+    headers: Record<string, string>,
+    previousFailure?: string | null,
+  ): Promise<CheckinResult | null> {
+    if (!this.isDisabledCheckinFeatureMessage(previousFailure)) return null;
+    let message = '';
+    try {
+      const res = await this.fetchJson<any>(`${baseUrl}/api/user/sota-agent-checkin`, {
+        method: 'POST',
+        headers,
+      });
+      if (res?.success) {
+        return {
+          success: true,
+          message: res.message || 'checkin success',
+          reward: this.extractCheckinReward(res),
+        };
+      }
+      message = this.extractResponseMessage(res) || '';
+    } catch (err) {
+      message = this.formatRequestErrorMessage(err) || '';
+    }
+    // A deployment without the route keeps the original verdict; an answer from
+    // the route (today's reward already claimed, for instance) replaces it.
+    if (!message || this.isMissingRouteMessage(message)) return null;
+    return { success: false, message };
   }
 
   /**
@@ -1460,6 +1521,19 @@ export class NewApiAdapter extends BasePlatformAdapter {
           rememberFailure(parsed);
         }
       }
+
+      // Some forks switch the generic check-in off and pay the daily reward
+      // through their own agent program instead. SOTA Model answers
+      // "签到功能未启用" on both standard routes while
+      // /api/user/sota-agent-checkin still pays out, so the disabled-feature
+      // verdict is what triggers the probe. The probe runs only on that verdict,
+      // and a deployment without the route answers 404, which is ignored.
+      const agentResult = await this.tryAgentProgramCheckin(
+        baseUrl,
+        headers,
+        firstFailureMessage,
+      );
+      if (agentResult) return agentResult;
     }
 
     if (firstFailureMessage && !this.shouldFallbackToCookieCheckin(firstFailureMessage)) {

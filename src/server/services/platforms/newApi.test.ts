@@ -20,6 +20,9 @@ const CHECKIN_DAILY_TOKEN = 'checkin-daily-token';
 const CHECKIN_DAILY_ALREADY_TOKEN = 'checkin-daily-already-token';
 const CHECKIN_DAILY_COOKIE_TOKEN = 'checkin-daily-cookie-token';
 const CHECKIN_LEGACY_TOKEN = 'checkin-legacy-token';
+const CHECKIN_AGENT_PROGRAM_TOKEN = 'checkin-agent-program-token';
+const CHECKIN_AGENT_PROGRAM_ALREADY_TOKEN = 'checkin-agent-program-already-token';
+const CHECKIN_FEATURE_OFF_TOKEN = 'checkin-feature-off-token';
 const CHECKIN_INVALID_URL_TOKEN = 'checkin-invalid-url-token';
 const CHECKIN_INVALID_URL_EXPIRED_SESSION_TOKEN = 'checkin-invalid-url-expired-session-token';
 const CHECKIN_INVALID_URL_FORBIDDEN_SESSION_TOKEN = 'checkin-invalid-url-forbidden-session-token';
@@ -509,6 +512,16 @@ describe('NewApiAdapter', () => {
       }
 
       if (req.url === '/api/user/daily') {
+        if (
+          typeof req.headers.authorization === 'string'
+          && (req.headers.authorization === `Bearer ${CHECKIN_AGENT_PROGRAM_TOKEN}`
+            || req.headers.authorization === `Bearer ${CHECKIN_AGENT_PROGRAM_ALREADY_TOKEN}`
+            || req.headers.authorization === `Bearer ${CHECKIN_FEATURE_OFF_TOKEN}`)
+        ) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: '签到功能未启用' }));
+          return;
+        }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_DAILY_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, message: '签到成功', data: { quota_awarded: 1787510 } }));
@@ -526,7 +539,36 @@ describe('NewApiAdapter', () => {
         }
       }
 
+      if (req.url === '/api/user/sota-agent-checkin') {
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_AGENT_PROGRAM_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            message: '签到成功',
+            data: { checkin_date: '2026-10-01', quota_awarded: 10000000, reward_credits: 20 },
+          }));
+          return;
+        }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_AGENT_PROGRAM_ALREADY_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: '今日已签到' }));
+          return;
+        }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_FEATURE_OFF_TOKEN}`) {
+          // This fork answers unknown routes with a 200 and an error envelope
+          // rather than a real 404.
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'Invalid URL (POST /api/user/sota-agent-checkin)' } }));
+          return;
+        }
+      }
+
       if (req.url === '/api/user/checkin') {
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_FEATURE_OFF_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: '签到功能未启用' }));
+          return;
+        }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_LEGACY_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, message: 'checked-in-legacy', data: { reward: 123 } }));
@@ -979,6 +1021,46 @@ describe('NewApiAdapter', () => {
     const legacyIndex = requests.findIndex((r) => r.url === '/api/user/checkin');
     expect(dailyIndex).toBeGreaterThanOrEqual(0);
     expect(legacyIndex).toBeGreaterThan(dailyIndex);
+  });
+
+  it('reaches the agent-program check-in when the fork disabled the generic one', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_AGENT_PROGRAM_TOKEN, 11494);
+
+    expect(result).toEqual({
+      success: true,
+      message: '签到成功',
+      reward: '20',
+    });
+    expect(requests.some((r) => r.url === '/api/user/sota-agent-checkin')).toBe(true);
+    const agentRequest = requests.find((r) => r.url === '/api/user/sota-agent-checkin');
+    expect(agentRequest?.headers['new-api-user']).toBe('11494');
+  });
+
+  it('reports the agent-program already-checked-in verdict', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_AGENT_PROGRAM_ALREADY_TOKEN, 11494);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('今日已签到');
+  });
+
+  it('keeps the disabled-feature verdict when the agent-program route is missing', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, CHECKIN_FEATURE_OFF_TOKEN, 11494);
+
+    // The probe is attempted - the standard routes did report the feature as
+    // off - but the missing route leaves the site's own verdict in place.
+    expect(requests.some((r) => r.url === '/api/user/sota-agent-checkin')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('签到功能未启用');
+  });
+
+  it('does not probe the agent-program route when the generic check-in answers', async () => {
+    const adapter = new NewApiAdapter();
+    await adapter.checkin(baseUrl, CHECKIN_DAILY_TOKEN, 11494);
+
+    expect(requests.some((r) => r.url === '/api/user/sota-agent-checkin')).toBe(false);
   });
 
   it('uses the daily endpoint for cookie credentials as well', async () => {
