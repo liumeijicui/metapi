@@ -102,7 +102,18 @@ describe('planLotteryDraws', () => {
   it('reports a site that has the lottery switched off', () => {
     expect(planLotteryDraws(status({ enabled: false }), 10))
       .toEqual({ ok: false, reason: '站点未开启抽奖' });
+  });
+
+  it('says the allowance is spent rather than blaming the site flag', () => {
+    // The site sets `can_draw` false once the day's quota is gone, so the
+    // counter has to be read first or every finished day reads as "window not
+    // open" and the real reason never shows up.
+    expect(planLotteryDraws(status({ canDraw: false, todayDraws: 10, todayRemaining: 0 }), 10))
+      .toEqual({ ok: false, reason: '今日抽奖次数已用完（10/10）' });
+  });
+
+  it('blames the window only when the day really has draws left', () => {
     expect(planLotteryDraws(status({ canDraw: false }), 10))
-      .toEqual({ ok: false, reason: '站点当前不可抽奖（未到开放时间或已达上限）' });
+      .toEqual({ ok: false, reason: '站点当前不可抽奖（未到开放时间或额度未发放）' });
   });
 });

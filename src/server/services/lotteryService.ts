@@ -82,7 +82,6 @@ export function getLotteryAutoDrawConfig(extraConfig?: string | null): LotteryAu
  */
 export function planLotteryDraws(status: LotteryStatus, dailyDraws: number): LotteryPlan {
   if (!status.enabled) return { ok: false, reason: '站点未开启抽奖' };
-  if (!status.canDraw) return { ok: false, reason: '站点当前不可抽奖（未到开放时间或已达上限）' };
 
   // The site's own ceiling for the day is a hard cap; the configured target
   // only ever lowers it.
@@ -90,7 +89,11 @@ export function planLotteryDraws(status: LotteryStatus, dailyDraws: number): Lot
     ? Math.min(dailyDraws, status.dailyDrawLimit)
     : dailyDraws;
   let remaining = goal - status.todayDraws;
+  // The counter is checked before the site's `can_draw` flag because the flag
+  // goes false for two different reasons — the day's quota or a window that has
+  // not opened — and only the counter says which one this is.
   if (remaining <= 0) return { ok: false, reason: `今日抽奖次数已用完（${status.todayDraws}/${goal}）` };
+  if (!status.canDraw) return { ok: false, reason: '站点当前不可抽奖（未到开放时间或额度未发放）' };
 
   const batches: LotteryBatch[] = [];
   const batchMax = status.batchMax > 0 ? status.batchMax : 1;
@@ -136,6 +139,20 @@ function summarize(draws: readonly LotteryDraw[]): { wins: number; reward: numbe
   return { wins, reward: Math.round(reward * 1_000_000) / 1_000_000 };
 }
 
+/** The last run kept on the account, so a repeat of it need not be written again. */
+export function readStoredLotteryOutcome(extraConfig?: string | null): LotteryRunOutcome | null {
+  const parsed = parseExtraConfig(extraConfig) as Record<string, unknown>;
+  const raw = parsed.lottery;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const stored = raw as { drawn?: unknown; wins?: unknown; reward?: unknown; reason?: unknown };
+  return {
+    drawn: typeof stored.drawn === 'number' ? stored.drawn : 0,
+    wins: typeof stored.wins === 'number' ? stored.wins : 0,
+    reward: typeof stored.reward === 'number' ? stored.reward : 0,
+    reason: typeof stored.reason === 'string' ? stored.reason : '',
+  };
+}
+
 /**
  * Draws the day's remaining allowance and records what it got.
  *
@@ -152,25 +169,41 @@ export async function runDailyLottery(params: {
   accessToken: string;
 }): Promise<LotteryRunOutcome> {
   const config = getLotteryAutoDrawConfig(params.accountExtraConfig);
-  const nothing = (reason: string): LotteryRunOutcome => ({ drawn: 0, wins: 0, reward: 0, reason });
-  if (!config.enabled) return nothing('抽奖已关闭');
-  if (!params.accessToken) return nothing('缺少可用凭证');
+  const previousReason = readStoredLotteryOutcome(params.accountExtraConfig)?.reason ?? null;
+  /**
+   * A pass that draws nothing is the normal case (the day's allowance is spent
+   * after the first pass), so it is not an event. Two refusals are still worth
+   * keeping on the account: one the site answered (`note`), and one that says
+   * the lottery does not apply here at all (`skip`) — the second is not an
+   * answer about this account, and writing it would touch every account on
+   * every pass. Both are only written when the reason changes, because a site
+   * that stops paying draws is exactly what used to go unnoticed and one row
+   * per hour is not worth writing to say the same thing twice.
+   */
+  const skip = (reason: string): LotteryRunOutcome => ({ drawn: 0, wins: 0, reward: 0, reason });
+  const note = async (reason: string): Promise<LotteryRunOutcome> => {
+    const outcome = skip(reason);
+    if (previousReason !== reason) await recordLotteryOutcome(params, outcome, { emitEvent: false });
+    return outcome;
+  };
+  if (!config.enabled) return skip('抽奖已关闭');
+  if (!params.accessToken) return skip('缺少可用凭证');
 
   // Not every platform ships a lottery; `getLotteryStatus` is the capability
   // probe, so an adapter without one is simply skipped.
   const adapter = getAdapter(params.platform) as PlatformAdapter | undefined;
-  if (!adapter?.getLotteryStatus || !adapter.drawLottery) return nothing('该平台没有抽奖接口');
+  if (!adapter?.getLotteryStatus || !adapter.drawLottery) return skip('该平台没有抽奖接口');
 
   let status: LotteryStatus | null;
   try {
     status = await adapter.getLotteryStatus(params.siteUrl, params.accessToken);
   } catch (error) {
-    return nothing(`读取抽奖状态失败：${describe(error)}`);
+    return note(`读取抽奖状态失败：${describe(error)}`);
   }
-  if (!status) return nothing('该站点没有抽奖功能');
+  if (!status) return skip('该站点没有抽奖功能');
 
   const plan = planLotteryDraws(status, config.dailyDraws);
-  if (!plan.ok) return nothing(plan.reason);
+  if (!plan.ok) return note(plan.reason);
 
   const drawn: LotteryDraw[] = [];
   for (const batch of plan.batches) {
@@ -186,7 +219,7 @@ export async function runDailyLottery(params: {
       // the same reason, and the totals below still report what did land.
       const partial = summarize(drawn);
       const reason = `抽奖中断：${describe(error)}`;
-      await recordLotteryOutcome(params, { drawn: drawn.length, ...partial, reason });
+      await recordLotteryOutcome(params, { drawn: drawn.length, ...partial, reason }, { emitEvent: true });
       return { drawn: drawn.length, ...partial, reason };
     }
   }
@@ -194,29 +227,32 @@ export async function runDailyLottery(params: {
   const summary = summarize(drawn);
   const reason = `已抽 ${drawn.length} 次（${plan.batches.map((b) => b.costType).join('/')}），中奖 ${summary.wins} 次`;
   const outcome: LotteryRunOutcome = { drawn: drawn.length, ...summary, reason };
-  await recordLotteryOutcome(params, outcome);
+  await recordLotteryOutcome(params, outcome, { emitEvent: true });
   return outcome;
 }
 
 async function recordLotteryOutcome(
   params: { accountId: number; accountUsername?: string | null; accountExtraConfig?: string | null; siteName: string },
   outcome: LotteryRunOutcome,
+  options: { emitEvent: boolean },
 ): Promise<void> {
   const createdAt = formatUtcSqlDateTime(new Date());
   const summary = `抽奖 ${outcome.drawn} 次，中奖 ${outcome.wins} 次`
     + (outcome.reward > 0 ? `，免费额度 +$${outcome.reward}` : '');
-  try {
-    await db.insert(schema.events).values({
-      type: 'lottery',
-      title: 'lottery draw',
-      message: `${params.accountUsername || `ID:${params.accountId}`} @ ${params.siteName}: ${summary}`,
-      level: 'info',
-      relatedId: params.accountId,
-      relatedType: 'account',
-      createdAt,
-    }).run();
-  } catch {
-    // The draw already happened; failing to note it must not undo that.
+  if (options.emitEvent) {
+    try {
+      await db.insert(schema.events).values({
+        type: 'lottery',
+        title: 'lottery draw',
+        message: `${params.accountUsername || `ID:${params.accountId}`} @ ${params.siteName}: ${summary}`,
+        level: 'info',
+        relatedId: params.accountId,
+        relatedType: 'account',
+        createdAt,
+      }).run();
+    } catch {
+      // The draw already happened; failing to note it must not undo that.
+    }
   }
   // Kept on the account so the last run is readable without walking the event
   // log, and so a day that drew nothing says why.
