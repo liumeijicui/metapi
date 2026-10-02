@@ -77,6 +77,14 @@ vi.mock('./alertService.js', () => ({
   reportTokenExpired: (...args: unknown[]) => reportTokenExpiredMock(...args),
 }));
 
+/** Captured health writes, so a test can read back which reason landed last. */
+const setHealthMock = vi.fn();
+
+vi.mock('./accountHealthService.js', () => ({
+  setAccountRuntimeHealth: (...args: unknown[]) => setHealthMock(...args),
+  extractRuntimeHealth: () => null,
+}));
+
 vi.mock('./balanceService.js', () => ({
   refreshBalance: (...args: unknown[]) => refreshBalanceMock(...args),
 }));
@@ -109,6 +117,7 @@ describe('checkinService auto relogin', () => {
     selectGetMock.mockReset();
     insertValuesMock.mockReset();
     updateSetMock.mockReset();
+    setHealthMock.mockReset();
     browserSessionMock.mockReset();
     whereArgs.length = 0;
   });
@@ -163,6 +172,70 @@ describe('checkinService auto relogin', () => {
     await checkinAccount(1);
 
     expect(updateSetMock).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
+
+    // The log, the event and the notification are what the operator actually
+    // reads, so the session cap has to replace the 401 the failed request
+    // produced instead of sitting next to it.
+    const loggedLines = insertValuesMock.mock.calls.map((call) => call[0]).filter((row: any) => row?.accountId === 1);
+    const checkinLogRow = loggedLines.find((row: any) => row?.status === 'failed');
+    expect(checkinLogRow?.message).toContain('\u4f1a\u8bdd\u6570\u5df2\u8fbe\u4e0a\u9650');
+    expect(checkinLogRow?.message).not.toContain('401');
+    expect(loggedLines.some((row: any) => String(row?.message || '').includes('401'))).toBe(false);
+  });
+
+  it('keeps the site refusal as the recorded health reason, not the token verdict', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'dead-token',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: 'HTTP 401: Unauthorized, not logged in and no access token provided',
+    });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Conflict（AUTH_SESSION_LIMIT）' });
+    // Mirrors the real reportTokenExpired(): it writes the generic token verdict
+    // and flips the account to `expired`. A health reason recorded before it
+    // would be erased, which is exactly the bug this locks out.
+    reportTokenExpiredMock.mockImplementation(async (params: any) => {
+      setHealthMock(params.accountId, {
+        state: 'unhealthy',
+        reason: `\u8bbf\u95ee\u4ee4\u724c\u5931\u6548\uff1a${params.detail}`,
+        source: 'auth',
+      });
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    expect(reportTokenExpiredMock).toHaveBeenCalled();
+    const lastHealthCall = setHealthMock.mock.calls.at(-1) as any[];
+    expect(lastHealthCall[1]).toEqual(expect.objectContaining({
+      source: 'checkin',
+      reason: expect.stringContaining('\u4f1a\u8bdd\u6570\u5df2\u8fbe\u4e0a\u9650'),
+    }));
+
+    // And the surfaces the operator reads carry it too.
+    expect(notifyMock).toHaveBeenCalledWith(
+      'checkin failed',
+      expect.stringContaining('\u4f1a\u8bdd\u6570\u5df2\u8fbe\u4e0a\u9650'),
+      'error',
+    );
   });
 
   it('revives an expired account once a sign-in hands it a live credential', async () => {

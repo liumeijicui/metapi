@@ -42,6 +42,26 @@ describe('failureReasonService', () => {
     expect(refused.category).toBe('auth');
   });
 
+  it('recognises the refusal wording this system records on the account', () => {
+    // `autoRelogin` writes `<title>：<actionHint>` onto the account when a site
+    // refuses the stored password. That same string is what the check-in log
+    // carries, so it has to classify back to the same cause instead of falling
+    // through to "unknown error".
+    const banned = classifyFailureReason({
+      message: '账号密码无效或账号被封禁：核对保存的账号密码，或确认账号是否被站点封禁',
+      status: 'failed',
+    });
+    expect(banned.code).toBe('invalid_credentials');
+    expect(banned.category).toBe('auth');
+
+    const capped = classifyFailureReason({
+      message: '站点登录会话数已达上限：在站点上退出其他登录会话（或重置密码）后重试',
+      status: 'failed',
+    });
+    expect(capped.code).toBe('session_limit');
+    expect(capped.category).toBe('auth');
+  });
+
   it('classifies cloudflare tunnel outage', () => {
     const result = classifyFailureReason({
       message: 'HTTP 530 Cloudflare Tunnel error | Error 1033',

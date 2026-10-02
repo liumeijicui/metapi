@@ -138,6 +138,12 @@ export function classifyFailureReason(
       '账号或密码错误',
       '用户名或密码',
       '账号已被封禁',
+      // The refusal this system records on the account itself, so that the
+      // wording it writes is also the wording it recognises on the way back in.
+      '账号密码无效',
+      '账号被封禁',
+      '被封禁',
+      '密码无效',
     ])
   ) {
     return {

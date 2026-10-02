@@ -308,6 +308,27 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成并在当前本地服务中运行。
 
+### 15. 签到失败日志如实显示站点拒绝原因
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求
+- **目标**：站点已明确拒绝（会话数上限、账号密码无效/被封禁）时，签到日志、事件与通知不应再显示「HTTP 401: Unauthorized」这类笼统结论，否则运维会去排查并不存在的令牌问题。
+- **实现范围**：
+  - `src/server/services/checkinService.ts`：重登被站点拒绝时，把站点声明的原因作为签到日志、事件、通知与账号健康原因；并把 `reportTokenExpired()` 提前到健康写入之前，避免它记录的通用「令牌失效」覆盖更具体的原因。
+  - `src/server/services/failureReasonService.ts`：补充中文关键词，使系统自己写入的拒绝文案（「账号密码无效」「账号被封禁」「密码无效」）在日志分类时仍能还原为 `invalid_credentials`。
+- **主要文件**：
+  - `src/server/services/checkinService.ts`
+  - `src/server/services/failureReasonService.ts`
+  - `src/server/services/checkinService.autoRelogin.test.ts`
+  - `src/server/services/failureReasonService.test.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npm run typecheck`：通过。
+  - `npx vitest run --root . src/server/services/checkinService src/server/services/failureReasonService src/server/services/autoRelogin src/server/services/balanceService`：55 个测试通过。
+  - 单元测试锁定：会话数上限被拒绝时，签到日志与通知均只含「站点登录会话数已达上限…」且不含 `401`；`reportTokenExpired()` 之后写入的仍是该具体原因。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成并在当前本地服务中运行。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

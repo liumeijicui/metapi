@@ -295,8 +295,18 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const unsupportedCheckin = isUnsupportedCheckinMessage(result.message);
   const manualVerificationRequired = isManualVerificationRequiredMessage(result.message);
   const manualVerificationMessage = '\u7ad9\u70b9\u5f00\u542f\u4e86 Turnstile \u6821\u9a8c\uff0c\u9700\u8981\u4eba\u5de5\u7b7e\u5230';
-  const logMessage = manualVerificationRequired ? manualVerificationMessage : result.message;
   const effectiveSuccess = result.success || alreadyCheckedIn || unsupportedCheckin || manualVerificationRequired;
+  // A refusal the site stated outright during the re-login (a concurrent-session
+  // cap, a rejected password) explains the failure better than the token verdict
+  // the retried request produced, and it is the thing the operator has to act
+  // on. It replaces the message on every surface the failure is reported on —
+  // except when the retry after the re-login actually succeeded.
+  const reloginRefusalReason = reloginRefusal
+    ? (reloginRefusal as { code: string; reason: string }).reason
+    : null;
+  const logMessage = manualVerificationRequired
+    ? manualVerificationMessage
+    : (!effectiveSuccess && reloginRefusalReason ? reloginRefusalReason : result.message);
   const shouldRefreshBalance = result.success || alreadyCheckedIn;
   const directCheckinSuccess = result.success && !alreadyCheckedIn && !unsupportedCheckin;
   const shouldAdvanceLastCheckinAt = directCheckinSuccess || (alreadyCheckedIn && options?.scheduleMode !== 'interval');
@@ -385,29 +395,28 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   }
 
   if (!effectiveSuccess) {
-    // The operator-facing reason: when the site refused for a cause they have to
-    // clear themselves (a session cap, a dead password), that is more useful
-    // than the token verdict the failed request produced.
-    await setAccountRuntimeHealth(account.id, {
-      state: 'unhealthy',
-      reason: reloginRefusal
-        ? (reloginRefusal as { code: string; reason: string }).reason
-        : (result.message || '\u7b7e\u5230\u5931\u8d25'),
-      source: 'checkin',
-    });
+    // Reported first: it records the generic "token expired" health reason and
+    // flips the account to `expired`, and the more specific write below has to
+    // land after it or it would be buried under that verdict.
     if (isTokenExpiredError({ message: result.message })) {
       await reportTokenExpired({
         accountId: account.id,
         username: account.username,
         siteName: site.name,
-        detail: result.message,
+        detail: logMessage,
       });
     }
+
+    await setAccountRuntimeHealth(account.id, {
+      state: 'unhealthy',
+      reason: logMessage || '\u7b7e\u5230\u5931\u8d25',
+      source: 'checkin',
+    });
 
     if (isCloudflare) {
       await sendNotification(
         'Cloudflare challenge',
-        `${account.username || 'ID:' + accountId} @ ${site.name}: ${result.message}`,
+        `${account.username || 'ID:' + accountId} @ ${site.name}: ${logMessage}`,
         'warning',
       );
     }
@@ -415,7 +424,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     if (!unsupportedCheckin && !manualVerificationRequired) {
       await sendNotification(
         'checkin failed',
-        `${account.username || 'ID:' + accountId} @ ${site.name}: ${result.message}`,
+        `${account.username || 'ID:' + accountId} @ ${site.name}: ${logMessage}`,
         'error',
       );
     }
