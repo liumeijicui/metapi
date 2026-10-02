@@ -24,6 +24,7 @@ import {
   runBrowserSessionCheckin,
 } from './browserSessionCredential.js';
 import { tryAutoRelogin } from './autoRelogin.js';
+import { runDailyLottery } from './lotteryService.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
 
@@ -315,6 +316,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     : 'failed';
   let logReward = result.reward;
   let refreshedBalanceInfo: Awaited<ReturnType<typeof refreshBalance>> | null = null;
+  // Appended to the check-in line when the day's lottery allowance was drawn in
+  // this same pass, so the one log the operator reads shows both halves of the
+  // daily routine instead of only the check-in.
+  let lotteryNote = '';
 
   if (effectiveSuccess) {
     const healthState = (unsupportedCheckin || manualVerificationRequired) ? 'degraded' : 'healthy';
@@ -356,6 +361,22 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         .run();
     }
 
+    // Before the balance refresh, not after: the draws land in the account's
+    // free credit, and the refresh is what records the new figure.
+    const lottery = await runDailyLottery({
+      accountId: account.id,
+      accountUsername: account.username,
+      accountExtraConfig: account.extraConfig,
+      siteName: site.name,
+      siteUrl: site.url,
+      platform: site.platform,
+      accessToken: activeAccessToken,
+    }).catch(() => null);
+    if (lottery && lottery.drawn > 0) {
+      lotteryNote = ` · 抽奖 ${lottery.drawn} 次`
+        + (lottery.reward > 0 ? ` +$${lottery.reward}` : '');
+    }
+
     if (shouldRefreshBalance) {
       try {
         refreshedBalanceInfo = await refreshBalance(account.id);
@@ -375,7 +396,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   await db.insert(schema.checkinLogs).values({
     accountId: account.id,
     status: normalizedStatus,
-    message: logMessage,
+    message: lotteryNote ? `${logMessage}${lotteryNote}` : logMessage,
     reward: logReward,
     createdAt,
   }).run();

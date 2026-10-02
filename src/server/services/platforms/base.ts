@@ -150,6 +150,51 @@ export interface SiteSessionInfo {
   expiresAt?: number | null;
 }
 
+/**
+ * What a platform's daily lottery looks like right now.
+ *
+ * The site is the only honest source for "how many draws are left today": its
+ * counter is what a repeat run is refused against, so the caller re-reads it
+ * instead of keeping a local tally that drifts.
+ */
+export interface LotteryStatus {
+  enabled: boolean;
+  canDraw: boolean;
+  /** Draws already made today, per the site's own counter. */
+  todayDraws: number;
+  /** The site's own ceiling for the day. */
+  dailyDrawLimit: number;
+  todayRemaining: number;
+  /** Draws the site hands out as a reward; these are spent before any credit. */
+  bonusDraws: number;
+  /** Free credit available to pay for draws, in USD. */
+  freeBalance: number;
+  /** Largest batch the site accepts in one call. */
+  batchMax: number;
+  /** Whether paying a draw with free credit is allowed, and its price. */
+  freeCost: { enabled: boolean; amount: number };
+}
+
+export interface LotteryDraw {
+  costType: string;
+  prizeType: string;
+  prizeAmount: number;
+  status: string;
+}
+
+export interface LotteryDrawRequest {
+  costType: 'bonus' | 'free' | 'activity' | 'paid';
+  count: number;
+  /** Lets a retry of the same batch be recognised instead of charged twice. */
+  idempotencyKey: string;
+}
+
+export interface LotteryDrawOutcome {
+  draws: LotteryDraw[];
+  /** The site's updated counter, when it returns one. */
+  todayDraws?: number;
+}
+
 export interface PlatformAdapter {
   readonly platformName: string;
   /**
@@ -179,6 +224,13 @@ export interface PlatformAdapter {
    */
   listSessions?(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteSessionInfo[] | null>;
   revokeSession?(baseUrl: string, accessToken: string, platformUserId: number | undefined, sid: string): Promise<boolean>;
+  /**
+   * The platform's own daily lottery, absent on every build that ships none.
+   * `getLotteryStatus` answers null when the site has no such route, which is
+   * how the caller tells "this platform has no lottery" from "the draw failed".
+   */
+  getLotteryStatus?(baseUrl: string, accessToken: string): Promise<LotteryStatus | null>;
+  drawLottery?(baseUrl: string, accessToken: string, request: LotteryDrawRequest): Promise<LotteryDrawOutcome>;
 }
 
 export abstract class BasePlatformAdapter implements PlatformAdapter {

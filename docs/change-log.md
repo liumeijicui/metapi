@@ -1,17 +1,3 @@
-# Metapi 变更日志
-
-> 这是当前项目的持续变更记录。后续每次新增功能、修复缺陷、调整接口或修改文档，都要在本文件追加一条记录，不能只修改代码而不记录。
-
-## 记录规则
-
-- 每条记录使用日期、变更类型、需求来源、Issue 链接、实现范围、验证结果和交付物几个字段。
-- 有 GitHub Issue 时必须附上完整链接；没有 Issue 时标记为“本会话需求”，不要虚构编号。
-- 代码完成后再补充实际文件路径和测试结果，未验证的内容必须明确标记为“未验证”。
-- 采用追加方式维护历史记录，不覆盖已完成记录；如果后续修复同一问题，新增一条记录并链接到原记录。
-- PDF、截图、需求说明等交付物也要记录，但不能把交付物当成代码实现本身。
-
-## 2026-08-03
-
 ### 1. 每个站点独立最大并发
 
 - **类型**：功能实现
@@ -148,8 +134,6 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **实现范围**：新增本文件 `docs/change-log.md`，并提供 Issue 链接、文件路径、验证结果和后续追加模板。
 - **状态**：已完成；后续每次代码或文档变更都追加到本文件。
 
-## 2026-08-21
-
 ### 9. 提交到上游仓库的独立分支
 
 - **类型**：版本交付
@@ -184,8 +168,6 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **实现范围**：创建 [PR #609](https://github.com/cita-777/metapi/pull/609)，源分支为 `lengxiaouser:codex/metapi-issues-591-590-586-585`，目标为 `cita-777:main`。
 - **验证**：GitHub API 返回 PR 编号 `609`，状态为 `open`；PR 描述已包含 Issue 链接、验证命令和变更范围。
 - **状态**：已提交，等待上游审核。
-
-## 2026-08-22
 
 ### 12. 修复 CodeRabbit PR 审查问题
 
@@ -241,8 +223,6 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
   - `npx vitest run --pool=threads --poolOptions.threads.singleThread=true --hookTimeout=30000 src/server/routes/api/tokens.route-update-rebuild.test.ts`：15 个测试通过。
 - **交付物**：代码与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成，已推送到 PR 分支；本次日志修正随当前文档提交同步。
-
-## 2026-10-02
 
 ### 13. GitHub 账号密码保活，恢复澎湃AI网关自动登录
 
@@ -387,6 +367,35 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成
 
+### 18. 全部 New API 站点巡检 + 每次登录后清理其他会话（含安全修复）
+
+- **类型**：功能实现 / 缺陷修复
+- **需求来源**：本会话需求（“现在看下所有的网站是否有这个问题，登录上以后就默认删掉其他的会话”），关联第 16、17 条
+- **巡检结果（21 个 new-api 账号）**：
+  - 存短期令牌（会反复重登、反复新增会话）的 12 个；存 refresh cookie 的 9 个。
+  - 有会话堆积的 7 个：方舟 19、chinahk 24、motomoto 15、KKtoken AI 15、澎湃AI网关 8、JustDoWork 7、happycoding 2。站点上限 50、会话固定 30 天不续期，这些站点都已走到一半以上。
+  - 另外 13 个账号读不到会话列表：站点版本旧、未开该接口，或账号本身已失效（luckyg、蛙蛙公益站、Fate）。
+- **实现范围**：
+  - 会话清理从“只在密码重登后执行”扩展为**所有登录路径都执行**：`autoRelogin` 的浏览器重登与 OAuth 重登、`/api/accounts/login` 手动绑定、`createManualAccount`、以及托管登录的“重新获取凭证”。登录即默认清掉其他会话（`autoRelogin.pruneOtherSessions: false` 可关）。
+  - `sessionHygiene` 改为**只凭凭据自身的会话 id 判定**当前会话：access token 读 `sid` 声明，refresh cookie 读 `<sid>.<secret>` 的前半段。站点的 `current` 标记只用于“多留”不用于“删”，凭据读不出会话 id 时直接放弃清理。
+  - 清理后复查会话仍在，若被清掉则如实上报 `current-session-lost`，而不是谎报成功。
+  - `exchangeRefreshCookie` 改为按**调用方传入的那份密钥**缓存换票结果。此前按“最新密钥”做缓存键，导致一次清理里每个请求都重新换票、重新轮换密钥：既放大丢密钥的风险，也可能让服务端把重复使用的旧密钥判定为盗用。
+- **主要文件**：
+  - `src/server/services/sessionHygiene.ts`（含 `.test.ts`）
+  - `src/server/services/autoRelogin.ts`（含 `.test.ts`）
+  - `src/server/routes/api/accounts.ts`（新增 `.login-session-hygiene.test.ts`）
+  - `src/server/services/manualAccountCreationService.ts`
+  - `src/server/services/assistedLogin/routeHandlers.ts`
+  - `src/server/services/platforms/newApi.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过。
+  - `npx vitest run`：2899 用例中 2887 通过，4 个失败与本次无关（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus，均为既有环境性失败）。
+  - 实机清堆积：澎湃 8→1、方舟 19→1、chinahk 24→1、motomoto 15→1、KKtoken 15→1、JustDoWork 7→1、happycoding 2→1、Columbina 2→1；清理后逐个复验余额，全部正常。
+  - 实机验证“一次清理只换票一次”（Columbina，制造 3 条堆积）：清理过程仅 1 次密钥轮换，清理后凭据仍可正常取余额，会话数 4→1。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ### 19. Cloudflare 勾选框改为动态定位 + 修复重登被误判为失败
 
 - **类型**：缺陷修复
@@ -430,6 +439,55 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成
 
+### 21. 签到后自动抽奖（百倍 / 林夕这类带幸运抽奖的 Sub2API 站点）
+
+- **类型**：功能实现
+- **需求来源**：本会话需求（“百倍网站和林夕网站为啥抽奖不抽了”“每天抽满10次”），关联第 18、19 条
+- **问题**：这两个站的每日福利其实是两段——签到领奖励，再用**免费额度**抽奖（每天上限 10 次）。之前能看到抽奖记录，是因为 09-30 之前的抽奖是手动在网页上做的；09-30 起签到交给 metapi 自动跑之后，抽奖那段没人做，于是从那天起记录就断了（百倍最后一条 09-30 16:00、林夕 09-30 16:20，都紧跟在最后一次手动签到之后）。metapi 里**从来没有**抽奖代码，这才是“现在不行了”的真正原因——站点侧一直是好的。
+- **实现范围**：
+  - `Sub2ApiAdapter` 新增 `getLotteryStatus` / `drawLottery`：读 `/api/v1/lottery/status`，抽奖走站点自带 UI 用的 `/api/v1/lottery/draw-batch`（旧版没有该路由时回退单抽 `/api/v1/lottery`），并带上 `idempotency_key` 让重试不会被重复扣费。站点没有该路由时返回 `null`，表示“这个平台没有抽奖”，而不是当成抽奖失败。
+  - 新增 `lotteryService`：`planLotteryDraws` 是纯函数，规则明确——**先用签到送的免费次数（bonus），再用免费额度（free）**；**永不动用付费余额，也不花活跃度**；次数取“配置目标”与“站点当天上限”的较小值，并按站点允许的批量（3 次）拆批；免费额度不够就停在能付得起的次数上，并在日志里写明原因。
+  - 挂在签到流程里：签到成功后（含“今日已签到”的那几轮）先抽奖、**再**刷新余额，这样余额里已经包含当天的中奖。站点计数器是权威来源，所以每小时那一轮签到发现当天已抽满就自动跳过，不需要本地记账。
+  - 结果写入事件日志（`type: lottery`）与账号 `extraConfig.lottery`（最后运行时间/次数/中奖/原因）；真的抽了的那一次会在签到日志行尾附上 `· 抽奖 N 次 +$X`，不额外插一行以免污染签到达成率与收益统计。
+  - 开关：默认开启、每天 10 次。账号级可用 `extraConfig.lottery = { enabled: false, dailyDraws: N }` 关掉或改目标。
+- **主要文件**：
+  - `src/server/services/lotteryService.ts`（含 `.test.ts`）
+  - `src/server/services/platforms/sub2api.ts`（含 `.test.ts`）
+  - `src/server/services/platforms/base.ts`
+  - `src/server/services/checkinService.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过。
+  - `npm run build:server`：通过。
+  - 新增单测：`lotteryService.test.ts`（12 例，覆盖 bonus 优先、批量拆分、站点上限、免费额度不足、付费关掉时不越界）、`sub2api.test.ts` 新增 4 例（状态解析、无抽奖路由返回 null、批量抽奖、单抽回退）。
+  - `npx vitest run`：2903 通过、4 失败，失败项与本次无关（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus，均为既有环境性失败）。
+  - 实机（今日）：
+    - 林夕 #18：`今日已签到 · 抽奖 9 次 +$350`，站点计数器 10/10，免费额度 826.30 → 384.30。
+    - 百倍 #17：`今日已签到 · 抽奖 9 次 +$490`，站点计数器 10/10，免费额度 8163.00 → 8203.00。
+    - 两站的抽奖记录都从“09-30 之后断档”恢复为“当天抽满 10 次”。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
+# Metapi 变更日志
+
+> 这是当前项目的持续变更记录。后续每次新增功能、修复缺陷、调整接口或修改文档，都要在本文件追加一条记录，不能只修改代码而不记录。
+
+## 记录规则
+
+- 每条记录使用日期、变更类型、需求来源、Issue 链接、实现范围、验证结果和交付物几个字段。
+- 有 GitHub Issue 时必须附上完整链接；没有 Issue 时标记为“本会话需求”，不要虚构编号。
+- 代码完成后再补充实际文件路径和测试结果，未验证的内容必须明确标记为“未验证”。
+- 采用追加方式维护历史记录，不覆盖已完成记录；如果后续修复同一问题，新增一条记录并链接到原记录。
+- PDF、截图、需求说明等交付物也要记录，但不能把交付物当成代码实现本身。
+
+## 2026-08-03
+
+## 2026-08-21
+
+## 2026-08-22
+
+## 2026-10-02
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：
@@ -447,32 +505,3 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、文档、PDF、截图等；没有交付物时填写“无”。
 - **状态**：进行中 / 已完成 / 阻塞
 ```
-
-### 18. 全部 New API 站点巡检 + 每次登录后清理其他会话（含安全修复）
-
-- **类型**：功能实现 / 缺陷修复
-- **需求来源**：本会话需求（“现在看下所有的网站是否有这个问题，登录上以后就默认删掉其他的会话”），关联第 16、17 条
-- **巡检结果（21 个 new-api 账号）**：
-  - 存短期令牌（会反复重登、反复新增会话）的 12 个；存 refresh cookie 的 9 个。
-  - 有会话堆积的 7 个：方舟 19、chinahk 24、motomoto 15、KKtoken AI 15、澎湃AI网关 8、JustDoWork 7、happycoding 2。站点上限 50、会话固定 30 天不续期，这些站点都已走到一半以上。
-  - 另外 13 个账号读不到会话列表：站点版本旧、未开该接口，或账号本身已失效（luckyg、蛙蛙公益站、Fate）。
-- **实现范围**：
-  - 会话清理从“只在密码重登后执行”扩展为**所有登录路径都执行**：`autoRelogin` 的浏览器重登与 OAuth 重登、`/api/accounts/login` 手动绑定、`createManualAccount`、以及托管登录的“重新获取凭证”。登录即默认清掉其他会话（`autoRelogin.pruneOtherSessions: false` 可关）。
-  - `sessionHygiene` 改为**只凭凭据自身的会话 id 判定**当前会话：access token 读 `sid` 声明，refresh cookie 读 `<sid>.<secret>` 的前半段。站点的 `current` 标记只用于“多留”不用于“删”，凭据读不出会话 id 时直接放弃清理。
-  - 清理后复查会话仍在，若被清掉则如实上报 `current-session-lost`，而不是谎报成功。
-  - `exchangeRefreshCookie` 改为按**调用方传入的那份密钥**缓存换票结果。此前按“最新密钥”做缓存键，导致一次清理里每个请求都重新换票、重新轮换密钥：既放大丢密钥的风险，也可能让服务端把重复使用的旧密钥判定为盗用。
-- **主要文件**：
-  - `src/server/services/sessionHygiene.ts`（含 `.test.ts`）
-  - `src/server/services/autoRelogin.ts`（含 `.test.ts`）
-  - `src/server/routes/api/accounts.ts`（新增 `.login-session-hygiene.test.ts`）
-  - `src/server/services/manualAccountCreationService.ts`
-  - `src/server/services/assistedLogin/routeHandlers.ts`
-  - `src/server/services/platforms/newApi.ts`
-  - `docs/change-log.md`
-- **验证**：
-  - `npx tsc -p tsconfig.server.json --noEmit`：通过。
-  - `npx vitest run`：2899 用例中 2887 通过，4 个失败与本次无关（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus，均为既有环境性失败）。
-  - 实机清堆积：澎湃 8→1、方舟 19→1、chinahk 24→1、motomoto 15→1、KKtoken 15→1、JustDoWork 7→1、happycoding 2→1、Columbina 2→1；清理后逐个复验余额，全部正常。
-  - 实机验证“一次清理只换票一次”（Columbina，制造 3 条堆积）：清理过程仅 1 次密钥轮换，清理后凭据仍可正常取余额，会话数 4→1。
-- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
-- **状态**：已完成

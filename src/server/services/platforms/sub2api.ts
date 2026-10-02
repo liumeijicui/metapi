@@ -4,6 +4,9 @@ import {
   CheckinResult,
   BalanceInfo,
   CreateApiTokenOptions,
+  LotteryDrawOutcome,
+  LotteryDrawRequest,
+  LotteryStatus,
   SubscriptionPlanSummary,
   SubscriptionSummary,
   type SiteAnnouncement,
@@ -965,6 +968,125 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
     const siteMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
     return { success: false, message: siteMessage || `外部签到失败：HTTP ${response.status}` };
+  }
+
+  // --- Daily lottery ---
+
+  /**
+   * Reads the site's lottery state.
+   *
+   * Answers null when the route is absent, which is the only way to tell a
+   * build without a lottery apart from one whose draw is failing: several
+   * Sub2API sites ship no `/lottery` at all, and reporting that as a broken
+   * draw every day would be noise the operator cannot act on.
+   */
+  async getLotteryStatus(baseUrl: string, accessToken: string): Promise<LotteryStatus | null> {
+    const endpoint = '/api/v1/lottery/status';
+    let res: any;
+    try {
+      res = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}${endpoint}`, {
+        headers: this.buildAuthHeader(accessToken),
+      });
+    } catch (error) {
+      if (String(error instanceof Error ? error.message : error).includes('HTTP 404')) return null;
+      throw error;
+    }
+    const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+    const freeCost = data?.costs?.free;
+    const freeAmount = typeof freeCost?.amount === 'number'
+      ? freeCost.amount
+      : Number.parseFloat(String(freeCost?.amount ?? ''));
+    return {
+      enabled: data?.enabled !== false,
+      canDraw: data?.can_draw === true,
+      todayDraws: this.parseNonNegativeInteger(data?.today_draws) ?? 0,
+      dailyDrawLimit: this.parseNonNegativeInteger(data?.daily_draw_limit) ?? 0,
+      todayRemaining: this.parseNonNegativeInteger(data?.today_remaining) ?? 0,
+      bonusDraws: this.parseNonNegativeInteger(data?.bonus_draws) ?? 0,
+      freeBalance: typeof data?.free_balance === 'number' && Number.isFinite(data.free_balance)
+        ? data.free_balance
+        : Number.parseFloat(String(data?.free_balance ?? '')) || 0,
+      batchMax: this.parsePositiveInteger(data?.batch_draw?.max_count) ?? 1,
+      freeCost: {
+        enabled: freeCost?.enabled === true,
+        amount: Number.isFinite(freeAmount) && freeAmount > 0 ? freeAmount : 0,
+      },
+    };
+  }
+
+  /**
+   * Draws a batch and reports each prize.
+   *
+   * The batch route is the one the site's own UI uses, so it is tried first;
+   * the single-draw route is the fallback for a build that predates it. Both
+   * carry the same envelope, and the batch shape differs between builds
+   * (`draws`, `items`, or a lone `draw`), so all three are read.
+   */
+  async drawLottery(
+    baseUrl: string,
+    accessToken: string,
+    request: LotteryDrawRequest,
+  ): Promise<LotteryDrawOutcome> {
+    const normalizedBase = normalizeBaseUrl(baseUrl);
+    const headers = this.buildAuthHeader(accessToken);
+    const body = JSON.stringify({
+      cost_type: request.costType,
+      count: request.count,
+      idempotency_key: request.idempotencyKey,
+    });
+
+    const batchEndpoint = '/api/v1/lottery/draw-batch';
+    try {
+      const res = await this.fetchJson<any>(`${normalizedBase}${batchEndpoint}`, {
+        method: 'POST',
+        headers,
+        body,
+      });
+      const data = this.parseSub2ApiEnvelope<any>(res, batchEndpoint);
+      return {
+        draws: this.readLotteryDraws(data),
+        todayDraws: this.parseNonNegativeInteger(data?.today_draws),
+      };
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error);
+      if (!message.includes('HTTP 404')) throw error;
+    }
+
+    const singleEndpoint = '/api/v1/lottery';
+    const draws: LotteryDrawOutcome['draws'] = [];
+    let todayDraws: number | undefined;
+    for (let index = 0; index < request.count; index += 1) {
+      const res = await this.fetchJson<any>(`${normalizedBase}${singleEndpoint}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          cost_type: request.costType,
+          idempotency_key: `${request.idempotencyKey}-${index}`,
+        }),
+      });
+      const data = this.parseSub2ApiEnvelope<any>(res, singleEndpoint);
+      draws.push(...this.readLotteryDraws(data));
+      todayDraws = this.parseNonNegativeInteger(data?.today_draws) ?? todayDraws;
+    }
+    return { draws, todayDraws };
+  }
+
+  private readLotteryDraws(data: any): LotteryDrawOutcome['draws'] {
+    const raw = Array.isArray(data?.draws)
+      ? data.draws
+      : Array.isArray(data?.items)
+        ? data.items
+        : data?.draw
+          ? [data.draw]
+          : [];
+    return raw.map((entry: any) => ({
+      costType: String(entry?.cost_type ?? ''),
+      prizeType: String(entry?.prize_type ?? ''),
+      prizeAmount: typeof entry?.prize_amount_actual === 'number'
+        ? entry.prize_amount_actual
+        : Number.parseFloat(String(entry?.prize_amount_actual ?? entry?.prize_amount ?? '')) || 0,
+      status: String(entry?.status ?? ''),
+    }));
   }
 
   // --- Balance ---

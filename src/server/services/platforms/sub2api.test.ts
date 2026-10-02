@@ -1098,4 +1098,140 @@ describe('Sub2ApiAdapter', () => {
       },
     ]);
   });
+
+  // --- Daily lottery ---
+
+  it('reads the lottery state from the site envelope', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/lottery/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            enabled: true,
+            window_open: true,
+            can_draw: true,
+            today_draws: 4,
+            daily_draw_limit: 10,
+            today_remaining: 6,
+            bonus_draws: 2,
+            free_balance: 880.5,
+            costs: { free: { enabled: true, amount: '88' } },
+            batch_draw: { enabled: true, max_count: 3 },
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end('page not found');
+    });
+
+    expect(await adapter.getLotteryStatus(baseUrl, 'jwt')).toEqual({
+      enabled: true,
+      canDraw: true,
+      todayDraws: 4,
+      dailyDrawLimit: 10,
+      todayRemaining: 6,
+      bonusDraws: 2,
+      freeBalance: 880.5,
+      batchMax: 3,
+      freeCost: { enabled: true, amount: 88 },
+    });
+  });
+
+  it('reports a site without a lottery route as having none, not as a failure', async () => {
+    await startServer((_req, res) => {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('404 page not found');
+    });
+
+    expect(await adapter.getLotteryStatus(baseUrl, 'jwt')).toBeNull();
+  });
+
+  it('draws a batch through the batch route and reads every prize', async () => {
+    const bodies: any[] = [];
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/lottery/draw-batch') {
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          bodies.push(JSON.parse(raw));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            code: 0,
+            message: 'success',
+            data: {
+              draws: [
+                { cost_type: 'free', prize_type: 'free', prize_amount_actual: 30, status: 'win' },
+                { cost_type: 'free', prize_type: 'none', prize_amount_actual: 0, status: 'miss' },
+                { cost_type: 'free', prize_type: 'paid', prize_amount_actual: 1, status: 'win' },
+              ],
+              today_draws: 7,
+            },
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end('page not found');
+    });
+
+    const outcome = await adapter.drawLottery(baseUrl, 'jwt', {
+      costType: 'free',
+      count: 3,
+      idempotencyKey: 'key-1',
+    });
+
+    expect(bodies).toEqual([{ cost_type: 'free', count: 3, idempotency_key: 'key-1' }]);
+    expect(outcome.todayDraws).toBe(7);
+    expect(outcome.draws).toEqual([
+      { costType: 'free', prizeType: 'free', prizeAmount: 30, status: 'win' },
+      { costType: 'free', prizeType: 'none', prizeAmount: 0, status: 'miss' },
+      { costType: 'free', prizeType: 'paid', prizeAmount: 1, status: 'win' },
+    ]);
+  });
+
+  it('falls back to the single-draw route on a build that has no batch route', async () => {
+    const keys: string[] = [];
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/lottery') {
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          keys.push(JSON.parse(raw).idempotency_key);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            code: 0,
+            message: 'success',
+            data: {
+              draw: {
+                cost_type: 'free',
+                prize_type: 'free',
+                prize_amount_actual: 100,
+                status: 'win',
+              },
+              today_draws: 2,
+            },
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end('page not found');
+    });
+
+    const outcome = await adapter.drawLottery(baseUrl, 'jwt', {
+      costType: 'free',
+      count: 2,
+      idempotencyKey: 'key-2',
+    });
+
+    expect(keys).toEqual(['key-2-0', 'key-2-1']);
+    expect(outcome.todayDraws).toBe(2);
+    expect(outcome.draws).toHaveLength(2);
+    expect(outcome.draws[0]).toEqual({
+      costType: 'free',
+      prizeType: 'free',
+      prizeAmount: 100,
+      status: 'win',
+    });
+  });
 });
