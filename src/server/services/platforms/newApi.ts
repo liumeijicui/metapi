@@ -164,14 +164,24 @@ export class NewApiAdapter extends BasePlatformAdapter {
    * when the credential is not a refresh cookie or the exchange fails.
    */
   private async exchangeRefreshCookie(baseUrl: string, token: string): Promise<string | null> {
-    const refreshValue = this.resolveLiveRefreshValue(this.extractRefreshCookie(token));
-    if (!refreshValue) return null;
+    // Cache on the secret *the caller passed in*, not on the newest one this
+    // process has seen. Exchanging rolls the secret, so keying on the live value
+    // makes every later call with the same credential a cache miss: a flow that
+    // touches the API many times (listing sessions, then deleting each one)
+    // would roll the credential once per request. Each roll is a chance to lose
+    // the replacement, and a rolled secret presented again after the server's
+    // replay window looks like theft. One exchange per credential, reused for its
+    // 15 minute lifetime, keeps the chain short.
+    const presentedValue = this.extractRefreshCookie(token);
+    if (!presentedValue) return null;
 
-    const cacheKey = `${baseUrl}::${refreshValue}`;
+    const cacheKey = `${baseUrl}::${presentedValue}`;
     const cached = REFRESH_TOKEN_CACHE.get(cacheKey);
     if (cached && cached.expiresAtMs - Date.now() > REFRESH_TOKEN_CACHE_LEAD_MS) {
       return cached.accessToken;
     }
+
+    const refreshValue = this.resolveLiveRefreshValue(presentedValue) || presentedValue;
 
     try {
       // Some deployments reject the exchange unless it looks same-origin

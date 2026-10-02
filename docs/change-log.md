@@ -404,3 +404,32 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、文档、PDF、截图等；没有交付物时填写“无”。
 - **状态**：进行中 / 已完成 / 阻塞
 ```
+
+### 18. 全部 New API 站点巡检 + 每次登录后清理其他会话（含安全修复）
+
+- **类型**：功能实现 / 缺陷修复
+- **需求来源**：本会话需求（“现在看下所有的网站是否有这个问题，登录上以后就默认删掉其他的会话”），关联第 16、17 条
+- **巡检结果（21 个 new-api 账号）**：
+  - 存短期令牌（会反复重登、反复新增会话）的 12 个；存 refresh cookie 的 9 个。
+  - 有会话堆积的 7 个：方舟 19、chinahk 24、motomoto 15、KKtoken AI 15、澎湃AI网关 8、JustDoWork 7、happycoding 2。站点上限 50、会话固定 30 天不续期，这些站点都已走到一半以上。
+  - 另外 13 个账号读不到会话列表：站点版本旧、未开该接口，或账号本身已失效（luckyg、蛙蛙公益站、Fate）。
+- **实现范围**：
+  - 会话清理从“只在密码重登后执行”扩展为**所有登录路径都执行**：`autoRelogin` 的浏览器重登与 OAuth 重登、`/api/accounts/login` 手动绑定、`createManualAccount`、以及托管登录的“重新获取凭证”。登录即默认清掉其他会话（`autoRelogin.pruneOtherSessions: false` 可关）。
+  - `sessionHygiene` 改为**只凭凭据自身的会话 id 判定**当前会话：access token 读 `sid` 声明，refresh cookie 读 `<sid>.<secret>` 的前半段。站点的 `current` 标记只用于“多留”不用于“删”，凭据读不出会话 id 时直接放弃清理。
+  - 清理后复查会话仍在，若被清掉则如实上报 `current-session-lost`，而不是谎报成功。
+  - `exchangeRefreshCookie` 改为按**调用方传入的那份密钥**缓存换票结果。此前按“最新密钥”做缓存键，导致一次清理里每个请求都重新换票、重新轮换密钥：既放大丢密钥的风险，也可能让服务端把重复使用的旧密钥判定为盗用。
+- **主要文件**：
+  - `src/server/services/sessionHygiene.ts`（含 `.test.ts`）
+  - `src/server/services/autoRelogin.ts`（含 `.test.ts`）
+  - `src/server/routes/api/accounts.ts`（新增 `.login-session-hygiene.test.ts`）
+  - `src/server/services/manualAccountCreationService.ts`
+  - `src/server/services/assistedLogin/routeHandlers.ts`
+  - `src/server/services/platforms/newApi.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过。
+  - `npx vitest run`：2899 用例中 2887 通过，4 个失败与本次无关（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus，均为既有环境性失败）。
+  - 实机清堆积：澎湃 8→1、方舟 19→1、chinahk 24→1、motomoto 15→1、KKtoken 15→1、JustDoWork 7→1、happycoding 2→1、Columbina 2→1；清理后逐个复验余额，全部正常。
+  - 实机验证“一次清理只换票一次”（Columbina，制造 3 条堆积）：清理过程仅 1 次密钥轮换，清理后凭据仍可正常取余额，会话数 4→1。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成

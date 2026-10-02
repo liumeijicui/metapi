@@ -6,6 +6,8 @@ import { getAdapter } from '../platforms/index.js';
 import { createManualAccount } from '../manualAccountCreationService.js';
 import { mergeAccountExtraConfig } from '../accountExtraConfig.js';
 import { applyRotatedCredential } from '../accountCredentialRotation.js';
+import { pruneOtherSessions } from '../sessionHygiene.js';
+import { shouldPruneOtherSessions } from '../accountExtraConfig.js';
 import {
   getAccountCredentialContext,
   withAccountCredentialContext,
@@ -581,7 +583,51 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
         .where(eq(schema.accounts.id, accountId))
         .run();
 
-      await syncRotatedCookieToBrowser(session, site, rotated);
+      // The capture signed the account in, which minted another server-side
+      // session. Retire the ones it superseded here, before the browser jar is
+      // synced: the prune may rotate the cookie again, and pushing a value the
+      // cleanup already retired into the jar would leave the browser holding a
+      // spent secret. The account row is the source of truth for what to sync.
+      let rotatedForBrowser = rotated;
+      try {
+        const pruneAdapter = getAdapter(site.platform);
+        const prune = pruneAdapter ? await withAccountCredentialContext(
+          { accountId, siteId: site.id },
+          () => pruneOtherSessions({
+            adapter: pruneAdapter,
+            siteUrl: site.url,
+            accessToken: applyRotatedCredential(capturedCredentials.accessToken, rotated),
+            platformUserId: (account as any).platformUserId ?? undefined,
+            enabled: shouldPruneOtherSessions(account.extraConfig),
+          }),
+        ) : null;
+        if (prune && (prune.status === 'pruned' || prune.status === 'skipped')) {
+          await db.update(schema.accounts)
+            .set({
+              extraConfig: mergeAccountExtraConfig(account.extraConfig, {
+                sessionHygiene: {
+                  outcome: prune.status === 'skipped' ? prune.reason : prune.status,
+                  ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
+                  updatedAt: new Date().toISOString(),
+                },
+              }),
+              updatedAt: new Date().toISOString(),
+            })
+            .where(eq(schema.accounts.id, accountId))
+            .run();
+        }
+        const refreshed = await db
+          .select({ accessToken: schema.accounts.accessToken })
+          .from(schema.accounts)
+          .where(eq(schema.accounts.id, accountId))
+          .get();
+        const latest = String(refreshed?.accessToken || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+        if (latest?.[1]) rotatedForBrowser = { cookieName: 'new_api_refresh', value: latest[1].trim() };
+      } catch {
+        // Cleanup is best-effort; the rebound credential above is already stored.
+      }
+
+      await syncRotatedCookieToBrowser(session, site, rotatedForBrowser);
 
       return {
         success: true,

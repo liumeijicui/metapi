@@ -6,6 +6,11 @@ const adapterMock = {
   revokeSession: vi.fn(),
 };
 
+/** Builds an access token carrying `sid`, the way the site mints them. */
+function tokenWithSid(sid: string): string {
+  return `header.${Buffer.from(JSON.stringify({ sid })).toString('base64url')}.signature`;
+}
+
 const decryptPasswordMock = vi.fn();
 const browserSessionMock = vi.fn();
 const captureHyperMock = vi.fn();
@@ -124,7 +129,8 @@ describe('autoRelogin', () => {
     // The fork caps concurrent sessions, and the leftovers from earlier manual
     // sign-ins are what will refuse the *next* re-login. The fresh session is
     // the one thing that must survive.
-    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+    const fresh = tokenWithSid('mine');
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: fresh, platformUserId: 38 });
     adapterMock.listSessions.mockResolvedValue([
       { sid: 'mine', current: true },
       { sid: 'stale-one', current: false },
@@ -136,19 +142,19 @@ describe('autoRelogin', () => {
     const { tryAutoRelogin } = await import('./autoRelogin.js');
     const result = await tryAutoRelogin(account(), SITE);
 
-    expect(result?.accessToken).toBe('fresh-token');
+    expect(result?.accessToken).toBe(fresh);
     expect(adapterMock.revokeSession).toHaveBeenCalledTimes(2);
-    expect(adapterMock.revokeSession).toHaveBeenCalledWith(SITE.url, 'fresh-token', 38, 'stale-one');
-    expect(adapterMock.revokeSession).not.toHaveBeenCalledWith(SITE.url, 'fresh-token', 38, 'mine');
+    expect(adapterMock.revokeSession).toHaveBeenCalledWith(SITE.url, fresh, 38, 'stale-one');
+    expect(adapterMock.revokeSession).not.toHaveBeenCalledWith(SITE.url, fresh, 38, 'mine');
     expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
       extraConfig: expect.stringContaining('"removed":2'),
     }));
   });
 
-  it('never drops a session when the site does not say which one is current', async () => {
-    // Guessing here would sign the account straight back out, so an ambiguous
-    // list is left alone and the sign-in still stands.
-    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+  it('never drops a session when the credential does not say which one is its own', async () => {
+    // Guessing here would sign the account straight back out, so a credential
+    // that carries no session id leaves the list alone and the sign-in stands.
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'opaque-session-cookie', platformUserId: 38 });
     adapterMock.listSessions.mockResolvedValue([
       { sid: 'one', current: false },
       { sid: 'two', current: false },
@@ -158,8 +164,27 @@ describe('autoRelogin', () => {
     const { tryAutoRelogin } = await import('./autoRelogin.js');
     const result = await tryAutoRelogin(account(), SITE);
 
-    expect(result?.accessToken).toBe('fresh-token');
+    expect(result?.accessToken).toBe('opaque-session-cookie');
     expect(adapterMock.revokeSession).not.toHaveBeenCalled();
+  });
+
+  it('does not delete a session the site merely forgot to mark current', async () => {
+    // The token's own id is what decides; a list without `current` flags must
+    // still not cost the account the session it is holding.
+    const fresh = tokenWithSid('mine');
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: fresh, platformUserId: 38 });
+    adapterMock.listSessions.mockResolvedValue([
+      { sid: 'mine', current: false },
+      { sid: 'stale', current: false },
+    ]);
+    adapterMock.revokeSession.mockResolvedValue(true);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    await tryAutoRelogin(account(), SITE);
+
+    expect(adapterMock.revokeSession).toHaveBeenCalledTimes(1);
+    expect(adapterMock.revokeSession).not.toHaveBeenCalledWith(SITE.url, fresh, 38, 'mine');
   });
 
   it('honors an account that opted out of pruning its other sessions', async () => {

@@ -34,6 +34,8 @@ import {
   type RuntimeHealthState,
 } from "../../services/accountHealthService.js";
 import { appendSessionTokenRebindHint } from "../../services/alertRules.js";
+import { pruneOtherSessions } from "../../services/sessionHygiene.js";
+import { shouldPruneOtherSessions } from "../../services/accountExtraConfig.js";
 import {
   parseSiteProxyUrlInput,
   getAccountCredentialContext,
@@ -251,6 +253,30 @@ const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
 // exchange, /api/user/self, model list) before verification answers.
 const ACCOUNT_VERIFY_TIMEOUT_MS = 30_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
+
+/**
+ * Merges bookkeeping fields into an account's `extraConfig` without touching
+ * its credential, so a cleanup that rotated the stored cookie cannot have the
+ * value it just wrote replaced by a stale one.
+ */
+async function persistAccountExtraFields(
+  accountId: number,
+  fields: Record<string, unknown>,
+): Promise<void> {
+  const row = await db
+    .select({ extraConfig: schema.accounts.extraConfig })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  await db
+    .update(schema.accounts)
+    .set({
+      extraConfig: mergeAccountExtraConfig(row?.extraConfig, fields),
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(schema.accounts.id, accountId))
+    .run();
+}
 
 function normalizeLoginFailure(
   message: string | null | undefined,
@@ -682,6 +708,41 @@ export async function accountsRoutes(app: FastifyInstance) {
         .get();
       if (!result) {
         return { success: false, message: "account create failed" };
+      }
+
+      // A bind mints another server-side session, and on a fork that caps
+      // concurrent sessions the leftovers from earlier binds are exactly what
+      // eventually refuses the next sign-in with `AUTH_SESSION_LIMIT`. The
+      // credential this call just minted is the one to keep, so every other
+      // entry is retired here — the same hygiene the scheduled re-login runs.
+      // Best-effort: a site without the API, or one that refuses the deletes,
+      // leaves the bind itself untouched.
+      try {
+        await withAccountCredentialContext(
+          { accountId: result.id, siteId },
+          async () => {
+            const prune = await pruneOtherSessions({
+              adapter,
+              siteUrl: site.url,
+              accessToken: loginResult.bearerToken || accessToken,
+              platformUserId: guessedPlatformUserId,
+              enabled: shouldPruneOtherSessions(extraConfig),
+            });
+            if (prune.status === "pruned" || prune.status === "skipped") {
+              await persistAccountExtraFields(result.id, {
+                sessionHygiene: {
+                  outcome: prune.status === "skipped" ? prune.reason : prune.status,
+                  ...(prune.status === "pruned"
+                    ? { removed: prune.removed, kept: prune.kept }
+                    : {}),
+                  updatedAt: new Date().toISOString(),
+                },
+              });
+            }
+          },
+        );
+      } catch {
+        // Cleanup is a courtesy; the account is bound either way.
       }
 
       await convergeAccountMutation({

@@ -12,6 +12,7 @@ import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
 import { type AccountCreatePayload } from '../contracts/accountsRoutePayloads.js';
 import { convergeAccountMutation } from './accountMutationWorkflow.js';
 import { applyRotatedCredential } from './accountCredentialRotation.js';
+import { pruneOtherSessions } from './sessionHygiene.js';
 import { getAccountCredentialContext, withAccountCredentialContext } from './siteProxy.js';
 
 // Slow community relays can need several round trips (rolling-credential
@@ -297,6 +298,36 @@ async function createManualAccountInner({
     insertErrorMessage: '创建账号失败',
     loadErrorMessage: '创建账号失败',
   });
+
+  // The sign-in that produced this credential also minted a server-side
+  // session. On a fork that caps concurrent sessions the leftovers from earlier
+  // binds are what eventually refuse the next one, so the account is left with
+  // exactly the session it was just handed. Best-effort: sites without the API
+  // are unaffected.
+  if (tokenType === 'session') {
+    const prune = await pruneOtherSessions({
+      adapter,
+      siteUrl: site.url,
+      accessToken,
+      platformUserId: resolvedPlatformUserId,
+    });
+    if (prune.status === 'pruned' || prune.status === 'skipped') {
+      await db
+        .update(schema.accounts)
+        .set({
+          extraConfig: mergeAccountExtraConfig(result.extraConfig, {
+            sessionHygiene: {
+              outcome: prune.status === 'skipped' ? prune.reason : prune.status,
+              ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
+              updatedAt: new Date().toISOString(),
+            },
+          }),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, result.id))
+        .run();
+    }
+  }
 
   const shouldQueueInitialization = tokenType === 'session' || body.skipModelFetch !== true;
   let queuedTaskId: string | undefined;

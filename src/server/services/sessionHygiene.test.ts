@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { pruneOtherSessions, selectSessionsToRevoke } from './sessionHygiene.js';
+import { pruneOtherSessions, readSessionIdFromToken, selectSessionsToRevoke } from './sessionHygiene.js';
 
 /** Builds a token whose `sid` claim is `sid`, the way new-api mints them. */
 function tokenWithSid(sid: string): string {
@@ -40,6 +40,62 @@ describe('sessionHygiene', () => {
       { sid: 'two', current: false },
     ];
     expect(selectSessionsToRevoke(sessions, null)).toBeNull();
+  });
+
+  it('reads the session id out of a refresh cookie', () => {
+    // The cookie is literally `<sid>.<secret>`, and that is the only id a
+    // cookie-backed account has: without it the cleanup would be guessing.
+    expect(readSessionIdFromToken('new_api_refresh=a5238573-b1fc-4df5-8a3e-972f68c59b02.secretpart'))
+      .toBe('a5238573-b1fc-4df5-8a3e-972f68c59b02');
+  });
+
+  it('reads the session id out of an access token', () => {
+    expect(readSessionIdFromToken(tokenWithSid('a5238573-b1fc-4df5-8a3e-972f68c59b02')))
+      .toBe('a5238573-b1fc-4df5-8a3e-972f68c59b02');
+  });
+
+  it('never deletes anything when the credential carries no session id', () => {
+    // An opaque session cookie from an older fork identifies no session, so a
+    // list the site happens to mark up cannot be used to justify a delete.
+    const sessions = [
+      { sid: 'not-mine', current: true },
+      { sid: 'other', current: false },
+    ];
+    expect(selectSessionsToRevoke(sessions, null)).toBeNull();
+  });
+
+  it('reports a cleanup that signed the account out instead of claiming success', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce([
+        { sid: 'mine', current: true },
+        { sid: 'other', current: false },
+      ])
+      // The follow-up read no longer lists the session the credential belongs
+      // to, which means the cleanup just cost the account its access.
+      .mockResolvedValueOnce([{ sid: 'other', current: true }]);
+    const outcome = await pruneOtherSessions({
+      adapter: adapter({ listSessions: list }),
+      siteUrl: 'https://site.example.com',
+      accessToken: tokenWithSid('mine'),
+    });
+
+    expect(outcome).toEqual({ status: 'failed', reason: 'current-session-lost' });
+  });
+
+  it('confirms the session survived a successful cleanup', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce([
+        { sid: 'mine', current: true },
+        { sid: 'other', current: false },
+      ])
+      .mockResolvedValueOnce([{ sid: 'mine', current: true }]);
+    const outcome = await pruneOtherSessions({
+      adapter: adapter({ listSessions: list }),
+      siteUrl: 'https://site.example.com',
+      accessToken: tokenWithSid('mine'),
+    });
+
+    expect(outcome).toEqual({ status: 'pruned', removed: 1, kept: 1 });
   });
 
   it('reports unsupported rather than failing on a site without the API', async () => {

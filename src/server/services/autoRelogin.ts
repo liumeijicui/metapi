@@ -196,21 +196,12 @@ async function tryPasswordRelogin(
   // stored credential: on a site that keeps the rotatable refresh cookie as the
   // credential, spending it here would roll the secret one step ahead of the
   // value `persistCredential` is about to write back.
-  const prune = await pruneOtherSessions({
-    adapter,
-    siteUrl: site.url,
+  const extraFields = await pruneAfterSignIn({
+    account,
+    site,
     accessToken: login.bearerToken || login.accessToken,
     platformUserId,
-    enabled: shouldPruneOtherSessions(account.extraConfig),
   });
-
-  const extraFields: Record<string, unknown> = {
-    sessionHygiene: {
-      outcome: prune.status === 'skipped' ? prune.reason : prune.status,
-      ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
-      updatedAt: new Date().toISOString(),
-    },
-  };
 
   return {
     result: await persistCredential(account, {
@@ -219,6 +210,60 @@ async function tryPasswordRelogin(
       extraFields,
     }),
     blockedByHumanCheck: false,
+  };
+}
+
+/**
+ * Writes bookkeeping fields without touching the credential column.
+ *
+ * Used after a prune: the prune may have rotated the stored cookie, and
+ * rewriting the value captured before it would put the spent secret back.
+ */
+async function persistExtraFields(
+  account: any,
+  extraFields: Record<string, unknown>,
+): Promise<string> {
+  const latest = await db.select({ extraConfig: schema.accounts.extraConfig })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, account.id))
+    .get();
+  const extraConfig = mergeAccountExtraConfig(latest?.extraConfig ?? account.extraConfig, extraFields);
+  await db.update(schema.accounts)
+    .set({ extraConfig, updatedAt: new Date().toISOString() })
+    .where(eq(schema.accounts.id, account.id))
+    .run();
+  return extraConfig;
+}
+
+/**
+ * Retires the sessions a fresh sign-in just superseded.
+ *
+ * Every sign-in mints another server-side session, and on a fork that caps
+ * concurrent sessions the leftovers are what eventually refuse the *next*
+ * one. Doing this right after a sign-in is what keeps an account from slowly
+ * locking itself out.
+ */
+async function pruneAfterSignIn(params: {
+  account: any;
+  site: any;
+  accessToken: string;
+  platformUserId?: number;
+}): Promise<Record<string, unknown>> {
+  const { account, site, accessToken, platformUserId } = params;
+  const adapter = getAdapter(site.platform);
+  const prune = await pruneOtherSessions({
+    adapter,
+    siteUrl: site.url,
+    accessToken,
+    platformUserId,
+    enabled: shouldPruneOtherSessions(account.extraConfig),
+  });
+  return {
+    sessionHygiene: {
+      outcome: prune.status === 'skipped' ? prune.reason : prune.status,
+      ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
+      updatedAt: new Date().toISOString(),
+    },
   };
 }
 
@@ -241,10 +286,23 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
   const captured = await captureHyperGithubCredentials();
   if (captured.status !== 'captured' || !captured.credentials?.accessToken) return null;
 
-  return persistCredential(account, {
+  // Persist before pruning, for the same reason as the browser path: the prune
+  // exchanges a rotatable cookie, and the row has to hold that value already or
+  // the rotated replacement is dropped as stale.
+  const persisted = await persistCredential(account, {
     accessToken: captured.credentials.accessToken,
     platformUserId: captured.credentials.platformUserId ?? undefined,
   });
+  const extraFields = await pruneAfterSignIn({
+    account,
+    site,
+    accessToken: persisted.accessToken,
+    platformUserId: persisted.platformUserId,
+  });
+  return {
+    ...persisted,
+    extraConfig: await persistExtraFields(account, extraFields),
+  };
 }
 
 /**
@@ -338,7 +396,21 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
   });
   if (outcome.kind !== 'result' || !accessToken) return null;
 
-  return persistCredential(account, { accessToken });
+  // Persist before pruning: the credential the browser just captured is a
+  // rotatable cookie, and the prune exchanges it. Writing the row first is what
+  // lets the rotated secret land where it belongs instead of being dropped as
+  // stale, which would leave the account holding a spent secret.
+  const persisted = await persistCredential(account, { accessToken });
+  const extraFields = await pruneAfterSignIn({
+    account,
+    site,
+    accessToken: persisted.accessToken,
+    platformUserId: persisted.platformUserId,
+  });
+  return {
+    ...persisted,
+    extraConfig: await persistExtraFields(account, extraFields),
+  };
 }
 
 /**
