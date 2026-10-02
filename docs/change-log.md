@@ -387,6 +387,31 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成
 
+### 19. Cloudflare 勾选框改为动态定位 + 修复重登被误判为失败
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求（“改掉吧，改成最新的，然后告诉我几个不行的网址”），关联第 17、18 条
+- **问题**：
+  - 脚本原先按每个布局一套**固定坐标**点 Turnstile 勾选框。站点卡片只要因为公告条、语言或按钮换行挪动几十像素，点击就落到空白处，Cloudflare 不过、登录失败，而日志会把它写成密码错误。
+  - Turnstile 控件在页面里**拿不到 DOM**：它渲染在一个独立的 OOPIF 里，控件本身又位于 **closed shadow root**（DOM 深度 14）。`document.querySelectorAll('*')` 和 `element.shadowRoot` 遍历都找不到它；`DOM.getFrameOwner` 对 OOPIF 也无效。
+  - 第二个独立缺陷：`login()` 已经量到“已登录且今日已签到”，主流程随后仍无条件再导航一次 `/profile`。chinahk 这类站点会在整页重载时重新校验会话，把刚建立的 cookie 判为无效并弹回 `/sign-in`，于是**登录成功反而上报 `login_failed`**。
+- **实现范围**：
+  - 新增 `scripts/checkin-browser/challengeLocator.mjs`：通过 DevTools 的 `DOM.getDocument({ depth: -1, pierce: true })` 穿透 closed shadow root 找到挑战 iframe，再用 `DOM.getBoxModel({ backendNodeId })` 取真实盒子，换算成 X11 屏幕坐标后输出 `x= y= w= h=`。**只读**，不点击、不导航、不禁用任何自动化特征；点击仍由 xdotool 发出。
+  - `challengeLocator.mjs` 复用脚本自己启动的 `--remote-debugging-port=0` 生成的 `DevToolsActivePort`，不额外开端口；找不到控件就打印 `none`。
+  - `newapi-x11-checkin.sh` 新增 `click_shield()`：先问定位器，拿到坐标就点那里，拿不到才退回各布局测得的 `LOGIN_SHIELD_XY`。登录等待循环中途（第 5 轮）再定位一次，以覆盖“控件挂载晚于首次点击”的情况。
+  - 两个 chromium 启动分支都加上 `--remote-debugging-port=0`。
+  - 主流程改为**只在 `login()` 结束后仍未量到 profile 时**才重新导航，登录成功的那一次不再被二次导航推翻。
+- **主要文件**：
+  - `scripts/checkin-browser/challengeLocator.mjs`（新增）
+  - `scripts/checkin-browser/newapi-x11-checkin.sh`
+  - `docs/change-log.md`
+- **验证**：
+  - `bash -n newapi-x11-checkin.sh`：通过。
+  - 定位器实测（chinahk 登录页，1440x1000 显示 / 1280x900 窗口）：输出 `x=457 y=666 w=300 h=65`，与页面复选框中心一致。
+  - 端到端实机回归（chinahk #14，未登录冷启动 → 动态定位点中勾选框 → 密码登录）：run.log 记录 `sign-in attempt 1` → `clicking the Turnstile checkbox at 457 640 (located)` → `attempt1 shield=1` → `attempt1 profile=1 state=CHECKED` → `already checked in today` → `login cookie stored in the profile (landed=1)`，并成功取回 `new_api_refresh` 凭据。改造前同一场景上报 `login_failed`。
+- **交付物**：代码与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

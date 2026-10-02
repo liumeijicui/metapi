@@ -57,6 +57,7 @@ BIN=${CHROMIUM_BIN:-/usr/bin/chromium-browser}
 NODE=${NODE_BIN:-node}
 HELPER=${CHECKIN_HELPER:-$(dirname "$0")/regionStats.mjs}
 COOKIE_HELPER=$(dirname "$0")/cookieStore.mjs
+CHALLENGE_HELPER=$(dirname "$0")/challengeLocator.mjs
 COOKIE_NAME=${CHECKIN_COOKIE_NAME:-}
 SESSION_SEEDED=${CHECKIN_SESSION_SEEDED:-}
 COOKIE_PREVIOUS=${CHECKIN_COOKIE_PREVIOUS:-}
@@ -312,6 +313,7 @@ fi
 
 if [ -n "$PROXY" ]; then
   setsid "$BIN" --user-data-dir="$PROFILE" --proxy-server="$PROXY" $EXTRA_LAUNCH_FLAGS \
+    --remote-debugging-port=0 \
     --no-first-run --no-default-browser-check \
     --hide-crash-restore-bubble --disable-save-password-bubble --password-store=basic \
     --disable-blink-features=AutomationControlled \
@@ -319,6 +321,7 @@ if [ -n "$PROXY" ]; then
     about:blank < /dev/null > /dev/null 2>&1 &
 else
   setsid "$BIN" --user-data-dir="$PROFILE" $EXTRA_LAUNCH_FLAGS \
+    --remote-debugging-port=0 \
     --no-first-run --no-default-browser-check \
     --hide-crash-restore-bubble --disable-save-password-bubble --password-store=basic \
     --disable-blink-features=AutomationControlled \
@@ -405,6 +408,36 @@ if [ ! -f "$HELPER" ]; then
   exit 1
 fi
 
+# Clicks the Turnstile checkbox wherever it actually is.
+#
+# The layout presets carry a measured coordinate, and that is what breaks on a
+# site whose card renders a little differently: the click lands on empty page,
+# the widget never turns green, and the run reports a failed sign-in for a
+# password that was fine. The locator reads the widget's real box out of the
+# live DOM instead, which is also the only way to reach it when Cloudflare
+# nests the frame in a shadow root. The preset stays as the fallback for a
+# browser that has not published its DevTools endpoint yet.
+click_shield() {
+  local out="" x="" y=""
+  if [ -f "$CHALLENGE_HELPER" ]; then
+    out=$("$NODE" "$CHALLENGE_HELPER" "$PROFILE" 2>/dev/null | tail -1)
+    case "$out" in
+      x=*)
+        x=$(printf '%s' "$out" | sed -n 's/.*x=\([0-9][0-9]*\).*/\1/p')
+        y=$(printf '%s' "$out" | sed -n 's/.*y=\([0-9][0-9]*\).*/\1/p')
+        ;;
+    esac
+  fi
+  if [ -n "$x" ] && [ -n "$y" ]; then
+    say "clicking the Turnstile checkbox at $x $y (located)"
+    xdotool mousemove "$x" "$y"; sleep 0.4
+    xdotool click 1
+    return 0
+  fi
+  say "Turnstile widget not located; falling back to $LOGIN_SHIELD_XY"
+  xdotool mousemove $LOGIN_SHIELD_XY click 1
+}
+
 login() {
   local attempt=1 i
   while [ "$attempt" -le 3 ]; do
@@ -417,13 +450,18 @@ login() {
     xdotool type --delay 40 "$USER_PASS"; sleep 0.4
     snap cur; measure; rm -f "$LOG/cur.ppm"
     if [ "$tsolved" = 0 ]; then
-      xdotool mousemove $LOGIN_SHIELD_XY click 1
+      click_shield
       i=0
       while [ "$i" -lt 8 ]; do
         sleep 2
         snap cur; measure; rm -f "$LOG/cur.ppm"
         [ "$tsolved" = 1 ] && break
         [ "$profile" = 1 ] && break
+        # Cloudflare sometimes replaces the widget right as it is clicked, and
+        # a click sent before it finished mounting is simply lost. Re-reading
+        # the position once mid-wait is enough to catch both without hammering
+        # the widget, which is its own reason to be refused.
+        if [ "$i" = 4 ]; then click_shield; fi
         i=$((i+1))
       done
     fi
@@ -537,9 +575,17 @@ if [ "$profile" = 0 ]; then
   # overview), and even a failed attempt deserves one last look before the
   # flow gives up.
   login || true
-  nav "$SITE/profile" 8
-  wait_profile
-  dismiss_overlays
+  # A run that already measured the signed-in profile is done. Navigating a
+  # second time is not harmless: on a site that re-checks the session on every
+  # full page load (chinahk) the fresh cookie is refused the moment the page is
+  # reloaded, the site bounces back to sign-in, and a successful sign-in is
+  # reported as `login_failed`. Only reload when the attempt really did land
+  # somewhere without the marker.
+  if [ "$profile" = 0 ]; then
+    nav "$SITE/profile" 8
+    wait_profile
+    dismiss_overlays
+  fi
   if [ "$profile" = 0 ]; then
     snap result
     say "sign-in never reached the profile page"
