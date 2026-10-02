@@ -19,7 +19,9 @@ describe('accountCredentialRotation', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let applyRotatedCredential: RotationModule['applyRotatedCredential'];
+  let applyRotatedCredentialIfCarried: RotationModule['applyRotatedCredentialIfCarried'];
   let persistRotatedRefreshCookie: RotationModule['persistRotatedRefreshCookie'];
+  let persistRotatedRefreshCookieByCredentials: RotationModule['persistRotatedRefreshCookieByCredentials'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -33,7 +35,9 @@ describe('accountCredentialRotation', () => {
     db = dbModule.db;
     schema = dbModule.schema;
     applyRotatedCredential = rotation.applyRotatedCredential;
+    applyRotatedCredentialIfCarried = rotation.applyRotatedCredentialIfCarried;
     persistRotatedRefreshCookie = rotation.persistRotatedRefreshCookie;
+    persistRotatedRefreshCookieByCredentials = rotation.persistRotatedRefreshCookieByCredentials;
   });
 
   afterAll(() => {
@@ -75,6 +79,21 @@ describe('accountCredentialRotation', () => {
     it('returns the token untouched when no rotation was observed', () => {
       expect(applyRotatedCredential('new_api_refresh=old.secret', undefined))
         .toBe('new_api_refresh=old.secret');
+    });
+  });
+
+  describe('applyRotatedCredentialIfCarried', () => {
+    it('replaces the pair when the credential carries the cookie', () => {
+      expect(applyRotatedCredentialIfCarried(
+        'new_api_refresh=old.secret; session=keep-me',
+        { cookieName: 'new_api_refresh', value: 'new.secret' },
+      )).toBe('new_api_refresh=new.secret; session=keep-me');
+    });
+
+    it('leaves a JWT alone instead of appending a cookie pair to it', () => {
+      const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzaWQiOiJhYmMifQ.signature';
+      expect(applyRotatedCredentialIfCarried(jwt, { cookieName: 'new_api_refresh', value: 'new.secret' }))
+        .toBe(jwt);
     });
   });
 
@@ -128,6 +147,42 @@ describe('accountCredentialRotation', () => {
       });
 
       expect(result).toBe('skipped_stale');
+    });
+  });
+
+  describe('persistRotatedRefreshCookieByCredentials', () => {
+    it('finds the row from the spent secret when no context names it', async () => {
+      const { account } = await seedAccount('new_api_refresh=spent.secret; new_api_has_session=1');
+
+      const result = await persistRotatedRefreshCookieByCredentials({
+        cookieName: 'new_api_refresh',
+        previousValue: 'spent.secret',
+        nextValue: 'fresh.secret',
+        siteUrl: 'https://rotation.example.com',
+      });
+
+      expect(result.status).toBe('updated');
+      expect(result.accountId).toBe(account.id);
+      const stored = await db.select().from(schema.accounts)
+        .where(eq(schema.accounts.id, account.id)).get();
+      expect(stored?.accessToken).toContain('new_api_refresh=fresh.secret');
+      expect(stored?.accessToken).not.toContain('spent.secret');
+    });
+
+    it('leaves rows on another site alone', async () => {
+      const { account } = await seedAccount('new_api_refresh=spent.secret');
+
+      const result = await persistRotatedRefreshCookieByCredentials({
+        cookieName: 'new_api_refresh',
+        previousValue: 'spent.secret',
+        nextValue: 'fresh.secret',
+        siteUrl: 'https://elsewhere.example.com',
+      });
+
+      expect(result.status).toBe('skipped_no_account');
+      const stored = await db.select().from(schema.accounts)
+        .where(eq(schema.accounts.id, account.id)).get();
+      expect(stored?.accessToken).toBe('new_api_refresh=spent.secret');
     });
   });
 });

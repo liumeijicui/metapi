@@ -28,6 +28,12 @@ export function isEdgeRateLimitResponse(
   if (!(status === 403 || status === 429 || status === 503)) {
     return false;
   }
+  // The tengine edge answers a throttled caller with a bare status and no body
+  // at all, which carries no marker to look for. A 429 is never anything else —
+  // the status *is* the rate-limit verdict — so an empty body counts.
+  if (status === 429 && !(bodyText || '').trim()) {
+    return true;
+  }
   return (bodyText || '').toLowerCase().includes(EDGE_RATE_LIMIT_MARKER);
 }
 

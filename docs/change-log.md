@@ -1,3 +1,41 @@
+### 22. 枫叶公益登记 + 修复「换票丢密钥」与「限流被误判为凭据过期」
+
+- **类型**：缺陷修复 + 站点登记
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：
+  - 登记 `https://api2.zdc.mom`（枫叶公益），账号 `liumeijicui`（用户 id `199`），登录后自动清理其他会话。
+  - 查清「有账号自己就变成过期」的原因：不能把站的限流/异常答成凭据失效。
+- **实现范围**：
+  - **修复一（真正的根因）**：`new_api_refresh` 是滚动密钥，换票会作废本次提交的密钥、只把新密钥放在 `Set-Cookie` 里。凡是**没有账号凭据上下文**（或上下文里没有 `accountId`）的换票，新密钥无处落盘，行里留下已作废的旧密钥，账号下一次请求就 401，并被记成过期。改动：
+    - `persistRotatedRefreshCookieByCredentials()`：上下文无法指定账号行时，按「被花掉的那一条密钥」反查所属账号行（按站点 origin + 密钥精确匹配）并做同样的 CAS 落盘；无上下文/上下文缺 `accountId` 的换票都走它。
+    - 登录绑定的行前令牌查询（`POST /api/accounts/login`）、手工建号、`autoRelogin` 的三条重登路径、它们的登录后清会话，全部放进账号上下文，并把轮换值写回要落库的凭据。
+    - 新增 `applyRotatedCredentialIfCarried()`：只有凭据本身带该 cookie 时才回填轮换值，避免把 `new_api_refresh=…` 拼到 JWT/API Key 后面把凭据写成垃圾。
+  - **修复二**：站点边缘限流返回的 `429`（空 body、无 `x-tengine-error`）以前既不是「限流」也不是「401 是有效答」，换票失败后拿原始 cookie 当 `Bearer` 发出去，站点回 `401 invalid access token`，账号被置为 `expired` 并退出每日签到。改动：
+    - `isEdgeRateLimitResponse()`：空 body 的 `429` 直接判为边缘限流。
+    - `SiteThrottledError`：换票被限流时抛出，**不再回退成「拿 cookie 当 Bearer」**（回退必然产生假 401）。
+    - `classifyFailureReason()` 新增 `rate_limited`：「站点限流，稍后自动重试，凭据本身没有问题」。
+- **主要文件**：
+  - `src/server/services/accountCredentialRotation.ts`（含 `.test.ts`）
+  - `src/server/services/platforms/newApi.ts`（含 `.test.ts`）
+  - `src/server/services/platforms/newApiShield.ts`
+  - `src/server/services/sessionHygiene.ts`
+  - `src/server/services/autoRelogin.ts`
+  - `src/server/services/manualAccountCreationService.ts`
+  - `src/server/services/failureReasonService.ts`（含 `.test.ts`）
+  - `src/server/routes/api/accounts.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过。
+  - 新增单测：`accountCredentialRotation.test.ts`（按密钥反查落盘、跨站点不误改、JWT 不被追加 cookie）、`newApi.test.ts`（空 body 429 判为限流；限流换票抛错且**不会**把 cookie 当 Bearer 发出）、`failureReasonService.test.ts`（限流不被判为凭据失效）。
+  - `npx vitest run`：2926 用例中 4 失败，均为既有环境性失败（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus）。
+  - 实机（枫叶公益 #30）：
+    - 诊断脚本实测：无上下文的换票后，行内密钥被正确轮换（`row rotated: true`），随后用行内新密钥换票成功、余额可读。
+    - 复现并修好限流路径：同一轮里连续 429 后，接口如实返回「站点当前限流（HTTP 429）」且账号保持 `active`，不再变成 `expired`；限流窗口过去后 `POST /api/accounts/30/balance` 直接恢复 200、余额 `$4`。
+    - 登录清会话：绑定返回 `sessionHygiene: {outcome: pruned, removed: 4, kept: 1}`；站点侧 `GET /api/user/sessions` 实测只剩 metapi 自己这一条。
+    - `POST /api/checkin/trigger/30`：`今日已签到`（站点今日签到已完成，链路正常）。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ### 1. 每个站点独立最大并发
 
 - **类型**：功能实现

@@ -19,6 +19,7 @@ type FailureReasonCode =
   | 'token_expired'
   | 'already_checked_in'
   | 'network_timeout'
+  | 'rate_limited'
   | 'upstream_error'
   | 'unknown_error';
 
@@ -187,6 +188,20 @@ export function classifyFailureReason(
       title: '请求超时',
       actionHint: '稍后重试并检查网络',
       detailHint: '请求在超时时间内未完成，可能是网络波动或站点响应慢。',
+    };
+  }
+
+  // Checked before the token verdicts and worded so it cannot be confused with
+  // one: a relay that throttles by egress IP answers with a bare 429, and
+  // reading that as a dead credential is what takes an account out of rotation
+  // over a condition that clears itself.
+  if (includesAny(text, ['限流', 'rate limit', 'ratelimit', 'too many requests', 'http 429'])) {
+    return {
+      code: 'rate_limited',
+      category: 'site',
+      title: '站点限流',
+      actionHint: '稍后自动重试',
+      detailHint: '站点按出口 IP 限流，凭据本身没有问题；等限流窗口过去后会自动恢复。',
     };
   }
 

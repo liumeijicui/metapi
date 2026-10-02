@@ -91,6 +91,15 @@ describe('failureReasonService', () => {
     expect(result.category).toBe('state');
   });
 
+  it('names an edge throttle instead of blaming the credential', () => {
+    const result = classifyFailureReason({
+      message: '站点当前限流（HTTP 429），本次未取得访问令牌，稍后会自动重试',
+      status: 'failed',
+    });
+    expect(result.code).toBe('rate_limited');
+    expect(result.category).toBe('site');
+  });
+
   it('classifies missing checkin endpoint as site capability issue', () => {
     const result = classifyFailureReason({
       message: 'checkin endpoint not found',

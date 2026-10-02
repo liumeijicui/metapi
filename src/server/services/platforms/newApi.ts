@@ -4,7 +4,10 @@ import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 import { fetchJsonWithShieldCookieRetry, isEdgeRateLimitResponse } from './newApiShield.js';
 import { getAccountCredentialContext, recordRotatedCredential } from '../siteProxy.js';
-import { persistRotatedRefreshCookie } from '../accountCredentialRotation.js';
+import {
+  persistRotatedRefreshCookie,
+  persistRotatedRefreshCookieByCredentials,
+} from '../accountCredentialRotation.js';
 import {
   buildEndpointModelContextLengthScope,
   extractContextLengthsFromPayload,
@@ -22,6 +25,24 @@ const REFRESH_TOKEN_CACHE_LEAD_MS = 60 * 1000;
 
 /** Quota units per dollar used by new-api when it reports balances and awards. */
 export const QUOTA_PER_UNIT = 500000;
+
+/**
+ * The edge throttled the exchange, so there is no fresh access token *and* no
+ * verdict about the credential.
+ *
+ * This is thrown rather than returned as `null`: a caller that cannot tell the
+ * two apart falls back to sending the refresh cookie as a bearer token, the
+ * site answers `invalid access token`, and an account that was merely throttled
+ * gets recorded as expired and dropped from the daily check-in. The wording
+ * stays clear of every "token expired" phrase so the classification cannot
+ * make the same mistake downstream.
+ */
+export class SiteThrottledError extends Error {
+  constructor() {
+    super('站点当前限流（HTTP 429），本次未取得访问令牌，稍后会自动重试');
+    this.name = 'SiteThrottledError';
+  }
+}
 
 type JsonFetchOutcome<T> = {
   data: T | null;
@@ -183,6 +204,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
     const refreshValue = this.resolveLiveRefreshValue(presentedValue) || presentedValue;
 
+    let edgeRateLimited = false;
     try {
       // Some deployments reject the exchange unless it looks same-origin
       // (AUTH_ORIGIN_FORBIDDEN), so the site's own origin is sent along.
@@ -201,12 +223,21 @@ export class NewApiAdapter extends BasePlatformAdapter {
           ...(siteOrigin ? { Origin: siteOrigin, Referer: `${siteOrigin}/` } : {}),
         },
       });
+      edgeRateLimited = res.edgeRateLimited === true;
       const accessToken = res.data?.data?.access_token;
       // The exchange rolls the refresh secret and returns the replacement only in
       // Set-Cookie. Dropping it makes the credential single-use: the next call
       // would present a retired secret and the account would look revoked.
       this.captureRotatedRefreshValue(res.cookieHeader, refreshValue);
-      await this.persistRotatedRefreshCookie(res.cookieHeader, refreshValue);
+      if (getAccountCredentialContext()) {
+        await this.persistRotatedRefreshCookie(res.cookieHeader, refreshValue);
+      } else {
+        // No context to name the row with. The replacement still has to land
+        // somewhere: an exchange with nowhere to write it leaves the account
+        // holding the secret the server just retired, which reads as
+        // `AUTH_SESSION_REVOKED` on every request after this one.
+        await this.persistRotatedRefreshCookieByCredentials(baseUrl, res.cookieHeader, refreshValue);
+      }
       if (typeof accessToken === 'string' && accessToken.trim()) {
         const expiresRaw = Number(res?.data?.access_expires_at);
         const expiresAtMs = Number.isFinite(expiresRaw) && expiresRaw > 0
@@ -216,6 +247,8 @@ export class NewApiAdapter extends BasePlatformAdapter {
         return accessToken.trim();
       }
     } catch {}
+    // Thrown outside the swallow above: a throttle is not a failure to hide.
+    if (edgeRateLimited) throw new SiteThrottledError();
     return null;
   }
 
@@ -272,7 +305,32 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
   private async resolveBearerToken(baseUrl: string, token: string): Promise<string> {
     if (!this.isRefreshCookieCredential(token)) return token;
+    // A throttled exchange throws, so it never reaches the fallback below;
+    // `token` here means the site answered and refused the session itself.
     return (await this.exchangeRefreshCookie(baseUrl, token)) || token;
+  }
+
+  /**
+   * Writes a rolled secret back to whichever account still holds the old one.
+   *
+   * Only for the exchanges that run without a credential context, which is the
+   * case a bare probe has: it does not know which row the credential came from,
+   * so the row is found by the spent secret instead of being left behind.
+   */
+  private async persistRotatedRefreshCookieByCredentials(
+    baseUrl: string,
+    cookieHeader: string,
+    previousValue: string,
+  ): Promise<void> {
+    const match = (cookieHeader || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+    const nextValue = match?.[1]?.trim();
+    if (!nextValue || nextValue === previousValue) return;
+    await persistRotatedRefreshCookieByCredentials({
+      cookieName: 'new_api_refresh',
+      previousValue,
+      nextValue,
+      siteUrl: baseUrl,
+    });
   }
 
   private decodeBase64Loose(value: string): string | null {

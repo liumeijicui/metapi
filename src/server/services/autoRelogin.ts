@@ -31,7 +31,8 @@ import {
   shouldPruneOtherSessions,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
-import { withAccountProxyOverride } from './siteProxy.js';
+import { getAccountCredentialContext, withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
+import { applyRotatedCredentialIfCarried } from './accountCredentialRotation.js';
 import { asBrowserSessionCredential, runBrowserSessionCheckin } from './browserSessionCredential.js';
 import { classifyFailureReason } from './failureReasonService.js';
 import { isBotShieldChallenge } from './alertRules.js';
@@ -196,7 +197,7 @@ async function tryPasswordRelogin(
   // stored credential: on a site that keeps the rotatable refresh cookie as the
   // credential, spending it here would roll the secret one step ahead of the
   // value `persistCredential` is about to write back.
-  const extraFields = await pruneAfterSignIn({
+  const prune = await pruneAfterSignIn({
     account,
     site,
     accessToken: login.bearerToken || login.accessToken,
@@ -205,9 +206,12 @@ async function tryPasswordRelogin(
 
   return {
     result: await persistCredential(account, {
-      accessToken: login.accessToken,
+      // The prune may have spent the cookie this sign-in minted, in which case
+      // the row has already been handed the replacement; writing the value
+      // captured before it would put the retired secret back.
+      accessToken: applyRotatedCredentialIfCarried(login.accessToken, prune.rotated),
       platformUserId: login.platformUserId,
-      extraFields,
+      extraFields: prune.extraFields,
     }),
     blockedByHumanCheck: false,
   };
@@ -248,22 +252,40 @@ async function pruneAfterSignIn(params: {
   site: any;
   accessToken: string;
   platformUserId?: number;
-}): Promise<Record<string, unknown>> {
+}): Promise<{
+  extraFields: Record<string, unknown>;
+  rotated?: { cookieName: string; value: string };
+}> {
   const { account, site, accessToken, platformUserId } = params;
   const adapter = getAdapter(site.platform);
-  const prune = await pruneOtherSessions({
-    adapter,
-    siteUrl: site.url,
-    accessToken,
-    platformUserId,
-    enabled: shouldPruneOtherSessions(account.extraConfig),
-  });
-  return {
-    sessionHygiene: {
-      outcome: prune.status === 'skipped' ? prune.reason : prune.status,
-      ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
-      updatedAt: new Date().toISOString(),
+  // The prune exchanges the credential it is handed, and that exchange retires
+  // the secret it spends. Running inside the account's credential scope is what
+  // lets the replacement land on the row; outside it the exchange would leave
+  // the account holding the value the site just retired.
+  const prune = await withAccountCredentialContext(
+    { accountId: account.id, siteId: site.id },
+    async () => {
+      const outcome = await pruneOtherSessions({
+        adapter,
+        siteUrl: site.url,
+        accessToken,
+        platformUserId,
+        enabled: shouldPruneOtherSessions(account.extraConfig),
+      });
+      return { outcome, rotated: getAccountCredentialContext()?.rotated };
     },
+  );
+  return {
+    extraFields: {
+      sessionHygiene: {
+        outcome: prune.outcome.status === 'skipped' ? prune.outcome.reason : prune.outcome.status,
+        ...(prune.outcome.status === 'pruned'
+          ? { removed: prune.outcome.removed, kept: prune.outcome.kept }
+          : {}),
+        updatedAt: new Date().toISOString(),
+      },
+    },
+    rotated: prune.rotated,
   };
 }
 
@@ -293,7 +315,7 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
     accessToken: captured.credentials.accessToken,
     platformUserId: captured.credentials.platformUserId ?? undefined,
   });
-  const extraFields = await pruneAfterSignIn({
+  const prune = await pruneAfterSignIn({
     account,
     site,
     accessToken: persisted.accessToken,
@@ -301,7 +323,8 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
   });
   return {
     ...persisted,
-    extraConfig: await persistExtraFields(account, extraFields),
+    accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+    extraConfig: await persistExtraFields(account, prune.extraFields),
   };
 }
 
@@ -401,7 +424,7 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
   // lets the rotated secret land where it belongs instead of being dropped as
   // stale, which would leave the account holding a spent secret.
   const persisted = await persistCredential(account, { accessToken });
-  const extraFields = await pruneAfterSignIn({
+  const prune = await pruneAfterSignIn({
     account,
     site,
     accessToken: persisted.accessToken,
@@ -409,7 +432,8 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
   });
   return {
     ...persisted,
-    extraConfig: await persistExtraFields(account, extraFields),
+    accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+    extraConfig: await persistExtraFields(account, prune.extraFields),
   };
 }
 

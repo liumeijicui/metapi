@@ -45,6 +45,7 @@ import {
 } from "../../services/siteProxy.js";
 import {
   applyRotatedCredential,
+  applyRotatedCredentialIfCarried,
 } from "../../services/accountCredentialRotation.js";
 import { createRateLimitGuard } from "../../middleware/requestRateLimit.js";
 import { getAccountsSnapshot } from "../../services/accountsOverviewService.js";
@@ -594,7 +595,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         };
       }
 
-      const accessToken = loginResult.accessToken || capturedAccessToken;
+      let accessToken = loginResult.accessToken || capturedAccessToken;
 
       // The id reported by the site itself is authoritative; guessing from the
       // username only works when it ends with the id (e.g. `linuxdo_80305`)
@@ -617,20 +618,29 @@ export async function accountsRoutes(app: FastifyInstance) {
       // yet, so the token lookup waits for the one below, which the account
       // workflow runs inside that context.
       if (!capturedAccessToken) {
-        try {
-          apiToken = await adapter.getApiToken(
-            site.url,
-            accessToken,
-            guessedPlatformUserId,
-          );
-        } catch {}
-        try {
-          apiTokens = await adapter.getApiTokens(
-            site.url,
-            accessToken,
-            guessedPlatformUserId,
-          );
-        } catch {}
+        // The lookup exchanges a rolling cookie, and that exchange retires the
+        // secret it spends. Running it inside a credential scope is what lets
+        // the replacement be folded into the credential this row is created
+        // with; outside one the row would be stored already dead.
+        let rotated: { cookieName: string; value: string } | undefined;
+        await withAccountCredentialContext({ siteId }, async () => {
+          try {
+            apiToken = await adapter.getApiToken(
+              site.url,
+              accessToken,
+              guessedPlatformUserId,
+            );
+          } catch {}
+          try {
+            apiTokens = await adapter.getApiTokens(
+              site.url,
+              accessToken,
+              guessedPlatformUserId,
+            );
+          } catch {}
+          rotated = getAccountCredentialContext()?.rotated;
+        });
+        accessToken = applyRotatedCredentialIfCarried(accessToken, rotated);
       }
 
       const preferredApiToken =

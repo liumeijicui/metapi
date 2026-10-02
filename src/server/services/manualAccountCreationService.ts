@@ -11,7 +11,7 @@ import {
 import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
 import { type AccountCreatePayload } from '../contracts/accountsRoutePayloads.js';
 import { convergeAccountMutation } from './accountMutationWorkflow.js';
-import { applyRotatedCredential } from './accountCredentialRotation.js';
+import { applyRotatedCredentialIfCarried } from './accountCredentialRotation.js';
 import { pruneOtherSessions } from './sessionHygiene.js';
 import { getAccountCredentialContext, withAccountCredentialContext } from './siteProxy.js';
 
@@ -280,7 +280,7 @@ async function createManualAccountInner({
   // Verification exchanges a rolling credential (`new_api_refresh`) and retires
   // the value the caller captured from the browser. Persist the replacement, or
   // the account is dead on arrival.
-  accessToken = applyRotatedCredential(accessToken, getAccountCredentialContext()?.rotated);
+  accessToken = applyRotatedCredentialIfCarried(accessToken, getAccountCredentialContext()?.rotated);
 
   const result = await insertAndGetById<typeof schema.accounts.$inferSelect>({
     table: schema.accounts,
@@ -305,12 +305,18 @@ async function createManualAccountInner({
   // exactly the session it was just handed. Best-effort: sites without the API
   // are unaffected.
   if (tokenType === 'session') {
-    const prune = await pruneOtherSessions({
-      adapter,
-      siteUrl: site.url,
-      accessToken,
-      platformUserId: resolvedPlatformUserId,
-    });
+    // The prune exchanges the rolling cookie, so it has to run inside the
+    // credential scope of the row that now holds it: outside it the replacement
+    // would be dropped and the account left with the secret just retired.
+    const prune = await withAccountCredentialContext(
+      { accountId: result.id, siteId: site.id },
+      () => pruneOtherSessions({
+        adapter,
+        siteUrl: site.url,
+        accessToken,
+        platformUserId: resolvedPlatformUserId,
+      }),
+    );
     if (prune.status === 'pruned' || prune.status === 'skipped') {
       await db
         .update(schema.accounts)

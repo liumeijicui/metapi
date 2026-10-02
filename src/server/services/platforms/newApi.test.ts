@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { NewApiAdapter } from './newApi.js';
 import { AnyRouterAdapter } from './anyrouter.js';
+import { isEdgeRateLimitResponse } from './newApiShield.js';
 
 interface RequestSnapshot {
   method: string;
@@ -1023,6 +1024,42 @@ describe('NewApiAdapter', () => {
           r.headers.cookie.includes(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`),
       ).length,
     ).toBeGreaterThan(1);
+  });
+
+  it('treats a bare 429 with no body as the edge rate limit it is', () => {
+    expect(isEdgeRateLimitResponse(429, null, '')).toBe(true);
+    // 403 and 503 are only a throttle when the edge says so in the body.
+    expect(isEdgeRateLimitResponse(403, null, '')).toBe(false);
+  });
+
+  it('reports a throttled refresh exchange as a rate limit instead of a dead credential', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+    const seen: Array<{ url?: string; authorization?: string }> = [];
+    server = createServer((req, res) => {
+      seen.push({ url: req.url, authorization: String(req.headers.authorization || '') });
+      if (req.url === '/api/user/auth/refresh') {
+        // The shape this relay's edge uses for a throttled caller: a bare
+        // status, no body, nothing to parse and no marker to match on.
+        res.writeHead(429).end();
+        return;
+      }
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: 'invalid access token' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    await expect(adapter.getBalance(baseUrl, `new_api_refresh=${REFRESH_LOGIN_COOKIE}`))
+      .rejects.toThrow('站点当前限流');
+
+    expect(seen.some((r) => r.url === '/api/user/auth/refresh')).toBe(true);
+    // Falling through to the raw cookie as a bearer token is what turned this
+    // throttle into `invalid access token` and expired the account.
+    expect(seen.some((r) => r.url === '/api/user/self' || r.authorization.includes('new_api_refresh='))).toBe(false);
   });
 
   it('extracts gob-encoded user id from anyrouter session cookie when reading balance', async () => {
