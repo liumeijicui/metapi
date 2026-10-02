@@ -412,6 +412,24 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成
 
+### 20. Linux.do 重登：退出站点时的导航竞态不再中断整个流程
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求（“告诉我几个不行的网址”），Any Router 的保活巡检结果
+- **问题**：Any Router（`https://anyrouter.top`）的 Linux.do 重新登录固定失败在第一步，报
+  `Linux.do 重新登录失败：page.goto: Navigation to "https://anyrouter.top/" is interrupted by another navigation to "https://anyrouter.top/"`。
+  原因是 `signOutOfSite` 在清掉站点 cookie 后重新加载站点首页，而站点 SPA 会在此时**自己**跳到 `/login`；这次客户端跳转把 Playwright 的 `goto` 判为被另一次导航打断并抛出，整个重登就此中止。谁的导航先到是竞态，所以同一站点会时好时坏。
+- **实现范围**：`signOutOfSite` 的收尾导航容忍这一种错误：只有错误信息匹配
+  `interrupted by another navigation` 才吞掉，其余错误照旧抛出。这一步本来就是为了让 SPA 丢掉内存里的会话，页面已经在加载就达到了目的；不重试是因为重试同样会被下一次竞态打断。
+- **主要文件**：
+  - `src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npm run build:server`：通过。
+  - 实机回归（Any Router `#28`）：修复前第一步即报 `page.goto ... interrupted`；修复后流程推进到后续阶段（本次停在站点的 Linux.do 授权回调 “授权后站点未回调”，属另一环节，见巡检清单）。同期该账号 HTTP 凭证仍可用，余额读取正常（1957.19）。
+- **交付物**：代码与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

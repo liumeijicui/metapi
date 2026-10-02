@@ -270,8 +270,22 @@ async function signOutOfSite(
   // then let it finish bouncing to its login route: starting the authorize
   // navigation on top of that client-side redirect makes Playwright abort one
   // of the two ("navigation is interrupted by another navigation").
-  await page.goto(siteOrigin, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS });
+  await page
+    .goto(siteOrigin, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
+    .catch((error) => {
+      // The bounce this reload deliberately provokes is the very thing that
+      // aborts it, and which of the two navigations Playwright reports as
+      // interrupted is a race. The site is loading its signed-out shell either
+      // way, which is all this step is for, so the race is not a failure.
+      if (!isNavigationInterrupted(error)) throw error;
+    });
   await page.waitForTimeout(SIGN_OUT_SETTLE_MS).catch(() => undefined);
+}
+
+/** Playwright's wording for "the page navigated itself while we were waiting". */
+function isNavigationInterrupted(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /interrupted by another navigation/i.test(message);
 }
 
 /**
