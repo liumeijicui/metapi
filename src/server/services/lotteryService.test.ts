@@ -18,9 +18,9 @@ function status(overrides: Partial<LotteryStatus> = {}): LotteryStatus {
 }
 
 describe('getLotteryAutoDrawConfig', () => {
-  it('draws the daily maximum by default', () => {
-    expect(getLotteryAutoDrawConfig(undefined)).toEqual({ enabled: true, dailyDraws: 10 });
-    expect(getLotteryAutoDrawConfig('{}')).toEqual({ enabled: true, dailyDraws: 10 });
+  it('draws the whole allowance by default, whatever its size', () => {
+    expect(getLotteryAutoDrawConfig(undefined)).toEqual({ enabled: true, dailyDraws: null });
+    expect(getLotteryAutoDrawConfig('{}')).toEqual({ enabled: true, dailyDraws: null });
   });
 
   it('honours a per-account switch and target', () => {
@@ -29,17 +29,17 @@ describe('getLotteryAutoDrawConfig', () => {
     }))).toEqual({ enabled: false, dailyDraws: 3 });
   });
 
-  it('ignores a nonsensical target instead of refusing to draw', () => {
+  it('falls back to the whole allowance when the target is nonsense', () => {
     expect(getLotteryAutoDrawConfig(JSON.stringify({ lottery: { dailyDraws: 0 } })))
-      .toEqual({ enabled: true, dailyDraws: 10 });
+      .toEqual({ enabled: true, dailyDraws: null });
     expect(getLotteryAutoDrawConfig(JSON.stringify({ lottery: { dailyDraws: 'lots' } })))
-      .toEqual({ enabled: true, dailyDraws: 10 });
+      .toEqual({ enabled: true, dailyDraws: null });
   });
 });
 
 describe('planLotteryDraws', () => {
   it('spends the bonus draws before any credit is billed', () => {
-    const plan = planLotteryDraws(status({ bonusDraws: 2 }), 10);
+    const plan = planLotteryDraws(status({ bonusDraws: 2 }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches).toEqual([
@@ -51,40 +51,54 @@ describe('planLotteryDraws', () => {
   });
 
   it('splits the work into batches the site accepts', () => {
-    const plan = planLotteryDraws(status({ batchMax: 3 }), 10);
+    const plan = planLotteryDraws(status({ batchMax: 3 }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches.map((batch) => batch.count)).toEqual([3, 3, 3, 1]);
   });
 
   it('draws only what the day has left', () => {
-    const plan = planLotteryDraws(status({ todayDraws: 7, todayRemaining: 3 }), 10);
+    const plan = planLotteryDraws(status({ todayDraws: 7, todayRemaining: 3 }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(3);
   });
 
-  it('never exceeds the daily ceiling the site reports', () => {
-    const plan = planLotteryDraws(status({ dailyDrawLimit: 4 }), 10);
+  it('draws the site ceiling itself when nothing caps it', () => {
+    const plan = planLotteryDraws(status({ dailyDrawLimit: 20, todayRemaining: 20 }), null);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(20);
+  });
+
+  it('honours a target below the ceiling', () => {
+    const plan = planLotteryDraws(status({ dailyDrawLimit: 20, todayRemaining: 20 }), 4);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(4);
   });
 
+  it('uses the day\'s remaining count when the site reports no ceiling', () => {
+    const plan = planLotteryDraws(status({ dailyDrawLimit: 0, todayDraws: 3, todayRemaining: 2 }), null);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(2);
+  });
+
   it('stops once the daily allowance is spent', () => {
-    const plan = planLotteryDraws(status({ todayDraws: 10, todayRemaining: 0 }), 10);
+    const plan = planLotteryDraws(status({ todayDraws: 10, todayRemaining: 0 }), null);
     expect(plan).toEqual({ ok: false, reason: '今日抽奖次数已用完（10/10）' });
   });
 
   it('buys only as many draws as the free credit covers', () => {
-    const plan = planLotteryDraws(status({ freeBalance: 120 }), 10);
+    const plan = planLotteryDraws(status({ freeBalance: 120 }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(2);
   });
 
   it('does not spend the paid balance when the site closes the free option', () => {
-    const plan = planLotteryDraws(status({ freeCost: { enabled: false, amount: 50 } }), 10);
+    const plan = planLotteryDraws(status({ freeCost: { enabled: false, amount: 50 } }), null);
     expect(plan).toEqual({ ok: false, reason: '站点未开放用免费额度抽奖' });
   });
 
@@ -93,14 +107,14 @@ describe('planLotteryDraws', () => {
       bonusDraws: 1,
       freeBalance: 0,
       freeCost: { enabled: true, amount: 50 },
-    }), 10);
+    }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches).toEqual([{ costType: 'bonus', count: 1 }]);
   });
 
   it('reports a site that has the lottery switched off', () => {
-    expect(planLotteryDraws(status({ enabled: false }), 10))
+    expect(planLotteryDraws(status({ enabled: false }), null))
       .toEqual({ ok: false, reason: '站点未开启抽奖' });
   });
 
@@ -108,12 +122,12 @@ describe('planLotteryDraws', () => {
     // The site sets `can_draw` false once the day's quota is gone, so the
     // counter has to be read first or every finished day reads as "window not
     // open" and the real reason never shows up.
-    expect(planLotteryDraws(status({ canDraw: false, todayDraws: 10, todayRemaining: 0 }), 10))
+    expect(planLotteryDraws(status({ canDraw: false, todayDraws: 10, todayRemaining: 0 }), null))
       .toEqual({ ok: false, reason: '今日抽奖次数已用完（10/10）' });
   });
 
   it('blames the window only when the day really has draws left', () => {
-    expect(planLotteryDraws(status({ canDraw: false }), 10))
+    expect(planLotteryDraws(status({ canDraw: false }), null))
       .toEqual({ ok: false, reason: '站点当前不可抽奖（未到开放时间或额度未发放）' });
   });
 });

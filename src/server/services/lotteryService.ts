@@ -27,12 +27,17 @@ import { formatUtcSqlDateTime } from './localTimeService.js';
  *   site that prices draws only that way is left alone and says so.
  */
 
-export const DEFAULT_DAILY_DRAWS = 10;
-
 export type LotteryAutoDrawConfig = {
   enabled: boolean;
-  /** How many draws to make per day, capped by the site's own limit. */
-  dailyDraws: number;
+  /**
+   * How many draws to make per day, or null for "as many as the site allows".
+   *
+   * Null is the default and the intended setting: the draw is free credit the
+   * site is giving away, so the allowance is drawn out in full. A fixed number
+   * here would silently leave draws on the table the day a site raises its own
+   * limit. The number exists only for an account that should draw less.
+   */
+  dailyDraws: number | null;
 };
 
 export type LotteryBatch = {
@@ -54,9 +59,9 @@ export type LotteryRunOutcome = {
 };
 
 /**
- * Per-account switch. Defaults to on with the daily maximum, because the whole
- * point of the routine is that the operator does not have to remember it; an
- * account that should be left alone turns it off.
+ * Per-account switch. Defaults to on, drawing each site's whole daily allowance
+ * on every run, because the point of the routine is that the operator does not
+ * have to remember it; an account that should be left alone turns it off.
  */
 export function getLotteryAutoDrawConfig(extraConfig?: string | null): LotteryAutoDrawConfig {
   const parsed = parseExtraConfig(extraConfig) as Record<string, unknown>;
@@ -66,10 +71,10 @@ export function getLotteryAutoDrawConfig(extraConfig?: string | null): LotteryAu
     : {};
   const requested = typeof config.dailyDraws === 'number' && Number.isFinite(config.dailyDraws)
     ? Math.trunc(config.dailyDraws)
-    : DEFAULT_DAILY_DRAWS;
+    : null;
   return {
     enabled: config.enabled !== false,
-    dailyDraws: requested > 0 ? requested : DEFAULT_DAILY_DRAWS,
+    dailyDraws: requested !== null && requested > 0 ? requested : null,
   };
 }
 
@@ -80,14 +85,16 @@ export function getLotteryAutoDrawConfig(extraConfig?: string | null): LotteryAu
  * returns are what the caller then executes, and every refusal carries the
  * reason the operator would want to read in the log.
  */
-export function planLotteryDraws(status: LotteryStatus, dailyDraws: number): LotteryPlan {
+export function planLotteryDraws(status: LotteryStatus, dailyDraws: number | null): LotteryPlan {
   if (!status.enabled) return { ok: false, reason: '站点未开启抽奖' };
 
-  // The site's own ceiling for the day is a hard cap; the configured target
-  // only ever lowers it.
-  const goal = status.dailyDrawLimit > 0
-    ? Math.min(dailyDraws, status.dailyDrawLimit)
-    : dailyDraws;
+  // The site's own ceiling for the day is the target; a configured number only
+  // ever lowers it. A build that does not report the ceiling is read from what
+  // the day has left instead of from a number invented here.
+  const quota = status.dailyDrawLimit > 0
+    ? status.dailyDrawLimit
+    : status.todayDraws + status.todayRemaining;
+  const goal = dailyDraws === null ? quota : Math.min(dailyDraws, quota);
   let remaining = goal - status.todayDraws;
   // The counter is checked before the site's `can_draw` flag because the flag
   // goes false for two different reasons — the day's quota or a window that has

@@ -450,7 +450,7 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
   - 挂在签到流程里：签到成功后（含“今日已签到”的那几轮）先抽奖、**再**刷新余额，这样余额里已经包含当天的中奖。站点计数器是权威来源，所以每小时那一轮签到发现当天已抽满就自动跳过，不需要本地记账。
   - 结果写入事件日志（`type: lottery`）与账号 `extraConfig.lottery`（最后运行时间/次数/中奖/原因）；真的抽了的那一次会在签到日志行尾附上 `· 抽奖 N 次 +$X`，不额外插一行以免污染签到达成率与收益统计。
   - 抽 0 次是常态（当天抽满后的每一轮都如此），所以**不写事件**；只有站点给出的拒绝原因（“今日抽奖次数已用完”“免费额度不足”“站点未开启抽奖”“读取抽奖状态失败”）会记进 `extraConfig.lottery.reason`，且**只在原因变化时**写一次——站点停止发奖正是以前没人发现的那类故障，而每小时重写同一句话没有意义。账号级不适用的原因（平台没有抽奖接口、站点没有该路由）不落盘，否则每次签到都会去改一条与它无关的账号记录。
-  - 开关：默认开启、每天 10 次。账号级可用 `extraConfig.lottery = { enabled: false, dailyDraws: N }` 关掉或改目标。
+  - 开关：默认开启、**按站点当天的全部额度抽满**（不写死次数——站点把上限从 10 提到 20 的那天，写死的 10 会白丢一半）。账号级 `extraConfig.lottery = { enabled: false, dailyDraws: N }` 可关掉，或把目标压到 N 次以下。
 - **主要文件**：
   - `src/server/services/lotteryService.ts`（含 `.test.ts`）
   - `src/server/services/platforms/sub2api.ts`（含 `.test.ts`）
@@ -467,6 +467,7 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
     - 百倍 #17：`今日已签到 · 抽奖 9 次 +$490`，站点计数器 10/10，免费额度 8163.00 → 8203.00。
     - 两站的抽奖记录都从“09-30 之后断档”恢复为“当天抽满 10 次”。
   - 自动路径同样验证：21:08 那一轮定时签到也走了抽奖检查，并把 `extraConfig.lottery.reason` 记成“今日抽奖次数已用完（10/10）”，日志行不再重复追加抽奖备注。
+  - 追记：目标次数由“固定 10”改为“站点当天上限”（`dailyDraws: null` 即抽满），单测相应改为覆盖“按上限抽满 / 目标低于上限 / 站点未报上限时按当天剩余”。上线后 21:14 起两站仍为 10/10。
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成
 
