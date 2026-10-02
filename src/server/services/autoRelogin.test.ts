@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const adapterMock = {
   login: vi.fn(),
+  listSessions: vi.fn(),
+  revokeSession: vi.fn(),
 };
 
 const decryptPasswordMock = vi.fn();
@@ -88,7 +90,8 @@ function browserOutcome(accessToken: string | null) {
 describe('autoRelogin', () => {
   beforeEach(() => {
     adapterMock.login.mockReset();
-    decryptPasswordMock.mockReset();
+    adapterMock.listSessions.mockReset();
+    adapterMock.revokeSession.mockReset();
     browserSessionMock.mockReset();
     captureHyperMock.mockReset();
     selectGetMock.mockReset();
@@ -115,6 +118,83 @@ describe('autoRelogin', () => {
       accessToken: 'new_api_refresh=fresh',
       status: 'active',
     }));
+  });
+
+  it('signs the other sessions out after a successful login', async () => {
+    // The fork caps concurrent sessions, and the leftovers from earlier manual
+    // sign-ins are what will refuse the *next* re-login. The fresh session is
+    // the one thing that must survive.
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+    adapterMock.listSessions.mockResolvedValue([
+      { sid: 'mine', current: true },
+      { sid: 'stale-one', current: false },
+      { sid: 'stale-two', current: false },
+    ]);
+    adapterMock.revokeSession.mockResolvedValue(true);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE);
+
+    expect(result?.accessToken).toBe('fresh-token');
+    expect(adapterMock.revokeSession).toHaveBeenCalledTimes(2);
+    expect(adapterMock.revokeSession).toHaveBeenCalledWith(SITE.url, 'fresh-token', 38, 'stale-one');
+    expect(adapterMock.revokeSession).not.toHaveBeenCalledWith(SITE.url, 'fresh-token', 38, 'mine');
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      extraConfig: expect.stringContaining('"removed":2'),
+    }));
+  });
+
+  it('never drops a session when the site does not say which one is current', async () => {
+    // Guessing here would sign the account straight back out, so an ambiguous
+    // list is left alone and the sign-in still stands.
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+    adapterMock.listSessions.mockResolvedValue([
+      { sid: 'one', current: false },
+      { sid: 'two', current: false },
+    ]);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE);
+
+    expect(result?.accessToken).toBe('fresh-token');
+    expect(adapterMock.revokeSession).not.toHaveBeenCalled();
+  });
+
+  it('honors an account that opted out of pruning its other sessions', async () => {
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+    adapterMock.listSessions.mockResolvedValue([
+      { sid: 'mine', current: true },
+      { sid: 'stale', current: false },
+    ]);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    await tryAutoRelogin(account({
+      extraConfig: JSON.stringify({
+        autoRelogin: {
+          username: 'li3145215575',
+          passwordCipher: 'cipher',
+          pruneOtherSessions: false,
+        },
+      }),
+    }), SITE);
+
+    expect(adapterMock.listSessions).not.toHaveBeenCalled();
+    expect(adapterMock.revokeSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the fresh session when the site has no session API', async () => {
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token', platformUserId: 38 });
+    adapterMock.listSessions.mockResolvedValue(null);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE);
+
+    expect(result?.accessToken).toBe('fresh-token');
+    expect(adapterMock.revokeSession).not.toHaveBeenCalled();
   });
 
   it('does not start a browser when the credentials were simply refused', async () => {

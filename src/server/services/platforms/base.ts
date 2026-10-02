@@ -119,6 +119,26 @@ export interface CreateApiTokenOptions {
   modelLimits?: string;
 }
 
+/**
+ * One sign-in session as the site itself reports it.
+ *
+ * Some New API forks cap how many sessions an account may hold and refuse the
+ * next login once the cap is reached (`409 AUTH_SESSION_LIMIT`). Those forks
+ * also expose this list, which is what makes it possible to retire the stale
+ * sessions instead of asking the operator to do it by hand.
+ */
+export interface SiteSessionInfo {
+  sid: string;
+  /** True for the session the credential used to read the list belongs to. */
+  current: boolean;
+  loginMethod?: string | null;
+  ip?: string | null;
+  userAgent?: string | null;
+  createdAt?: number | null;
+  lastActiveAt?: number | null;
+  expiresAt?: number | null;
+}
+
 export interface PlatformAdapter {
   readonly platformName: string;
   /**
@@ -141,6 +161,13 @@ export interface PlatformAdapter {
   getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]>;
   createApiToken(baseUrl: string, accessToken: string, platformUserId?: number, options?: CreateApiTokenOptions): Promise<boolean>;
   deleteApiToken(baseUrl: string, accessToken: string, tokenKey: string, platformUserId?: number): Promise<boolean>;
+  /**
+   * Both are absent on sites with no session-management API. Callers check for
+   * the capability instead of catching a not-implemented error, so an adapter
+   * that never had it is not asked to grow one.
+   */
+  listSessions?(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteSessionInfo[] | null>;
+  revokeSession?(baseUrl: string, accessToken: string, platformUserId: number | undefined, sid: string): Promise<boolean>;
 }
 
 export abstract class BasePlatformAdapter implements PlatformAdapter {

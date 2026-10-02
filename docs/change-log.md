@@ -329,6 +329,35 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成并在当前本地服务中运行。
 
+### 16. 登录成功后自动清理多余会话，避免被会话数上限卡死
+
+- **类型**：功能实现
+- **需求来源**：本会话需求
+- **目标**：站点限制同时在线会话数时，会话堆积会拒绝下一次自动重登（`409 AUTH_SESSION_LIMIT`）。在每次成功登录后自动清掉其它会话，只保留本次登录的会话，避免反复卡死。
+- **实现范围**：
+  - `src/server/services/platforms/base.ts`：新增 `SiteSessionInfo` 类型与可选能力 `listSessions` / `revokeSession`，缺失该接口的站点不受影响。
+  - `src/server/services/platforms/newApi.ts`：实现 `GET /api/user/sessions` 与 `DELETE /api/user/sessions/:sid`；无该接口返回 `null`，已不存在的会话视为已清理。
+  - `src/server/services/sessionHygiene.ts`：新增会话清理服务，同时用站点返回的 `current` 标记与令牌自身 `sid` 判定当前会话，两者都无法识别时放弃清理（绝不误删在用会话）。
+  - `src/server/services/accountExtraConfig.ts`：新增 `shouldPruneOtherSessions()`，默认开启，可用 `autoRelogin.pruneOtherSessions: false` 关闭。
+  - `src/server/services/autoRelogin.ts`：密码重登成功后执行清理，并把 `sessionHygiene` 结果写入 `extraConfig`。
+- **主要文件**：
+  - `src/server/services/sessionHygiene.ts`
+  - `src/server/services/autoRelogin.ts`
+  - `src/server/services/accountExtraConfig.ts`
+  - `src/server/services/platforms/base.ts`
+  - `src/server/services/platforms/newApi.ts`
+  - `src/server/services/sessionHygiene.test.ts`
+  - `src/server/services/autoRelogin.test.ts`
+  - `src/server/services/platforms/newApi.test.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npm run typecheck`：通过。
+  - `npx vitest run --root . src/server/services/sessionHygiene src/server/services/autoRelogin src/server/services/platforms/newApi src/server/services/accountExtraConfig src/server/services/checkinService src/server/services/balanceService`：115 个测试通过。
+  - 实机验证 happycoding(#7)：一次重登后记录 `sessionHygiene: {"outcome":"pruned","removed":2,"kept":1}`，站点会话列表由多条降为 1 条（本次登录会话）。
+  - 实机确认 luckyg(#4) 在已被上限拒绝时其存储令牌同样失效（`AUTH_TOKEN_EXPIRED`），拿不到会话列表，需先人工清一次；此后由本功能维持不再堆积。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成并在当前本地服务中运行。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

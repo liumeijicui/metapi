@@ -24,15 +24,18 @@ import { getAdapter } from './platforms/index.js';
 import {
   getAutoReloginConfig,
   getOauthProviderFromExtraConfig,
+  getPlatformUserIdFromExtraConfig,
   mergeAccountExtraConfig,
   parseExtraConfig,
   resolveProxyUrlFromExtraConfig,
+  shouldPruneOtherSessions,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import { asBrowserSessionCredential, runBrowserSessionCheckin } from './browserSessionCredential.js';
 import { classifyFailureReason } from './failureReasonService.js';
 import { isBotShieldChallenge } from './alertRules.js';
+import { pruneOtherSessions } from './sessionHygiene.js';
 
 /**
  * Result of a successful automatic sign-in.
@@ -101,18 +104,20 @@ function isBrowserOnlyReloginPlatform(platform?: string | null): boolean {
  */
 async function persistCredential(
   account: any,
-  credential: { accessToken: string; platformUserId?: number },
+  credential: { accessToken: string; platformUserId?: number; extraFields?: Record<string, unknown> },
 ): Promise<AutoReloginResult> {
-  const latestAccount = credential.platformUserId
+  const patch: Record<string, unknown> = { ...(credential.extraFields || {}) };
+  if (credential.platformUserId) patch.platformUserId = credential.platformUserId;
+  const latestAccount = Object.keys(patch).length > 0
     ? await db.select({ extraConfig: schema.accounts.extraConfig })
       .from(schema.accounts)
       .where(eq(schema.accounts.id, account.id))
       .get()
     : undefined;
-  const extraConfig = credential.platformUserId
+  const extraConfig = Object.keys(patch).length > 0
     ? mergeAccountExtraConfig(
       latestAccount ? latestAccount.extraConfig : account.extraConfig,
-      { platformUserId: credential.platformUserId },
+      patch,
     )
     : undefined;
 
@@ -180,10 +185,34 @@ async function tryPasswordRelogin(
     }
     return { result: null, blockedByHumanCheck: isHumanCheckRefusal(login.message) };
   }
+  const platformUserId = login.platformUserId ?? getPlatformUserIdFromExtraConfig(account.extraConfig);
+
+  // The site has just minted this session, so every other entry in its list is
+  // one the running system does not hold. On a fork that caps concurrent
+  // sessions those leftovers are exactly what refuses the *next* re-login, so
+  // this is the moment to retire them. Best-effort: a site without the API, or
+  // one that refuses the deletes, leaves the sign-in itself untouched.
+  const prune = await pruneOtherSessions({
+    adapter,
+    siteUrl: site.url,
+    accessToken: login.accessToken,
+    platformUserId,
+    enabled: shouldPruneOtherSessions(account.extraConfig),
+  });
+
+  const extraFields: Record<string, unknown> = {
+    sessionHygiene: {
+      outcome: prune.status === 'skipped' ? prune.reason : prune.status,
+      ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+
   return {
     result: await persistCredential(account, {
       accessToken: login.accessToken,
       platformUserId: login.platformUserId,
+      extraFields,
     }),
     blockedByHumanCheck: false,
   };

@@ -5,6 +5,8 @@ type AutoReloginConfig = {
   username?: unknown;
   passwordCipher?: unknown;
   updatedAt?: unknown;
+  /** Set to `false` to stop automatic sign-in from pruning other sessions. */
+  pruneOtherSessions?: unknown;
 };
 
 type Sub2ApiAuthConfig = {
@@ -434,6 +436,23 @@ export function getAutoReloginConfig(extraConfig?: ExtraConfigInput): {
   if (!username || !passwordCipher) return null;
 
   return { username, passwordCipher };
+}
+
+/**
+ * Whether an automatic sign-in may sign the account's *other* sessions out.
+ *
+ * Defaults to on. The sites that need it cap concurrent sessions, and the cap
+ * is what refuses the re-login in the first place: the operator's earlier
+ * browser sessions are still counted, so clearing them is the difference
+ * between the account reviving itself and staying dead until someone signs in
+ * by hand. An operator who is also using the site themselves can turn it off
+ * per account; the cost is that the cap comes back.
+ */
+export function shouldPruneOtherSessions(extraConfig?: ExtraConfigInput): boolean {
+  const parsed = parseExtraConfig(extraConfig);
+  const relogin = parsed.autoRelogin;
+  if (!relogin || typeof relogin !== 'object' || Array.isArray(relogin)) return true;
+  return relogin.pruneOtherSessions !== false;
 }
 
 /**

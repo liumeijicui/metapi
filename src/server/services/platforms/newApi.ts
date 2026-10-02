@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement, type LoginResult } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement, type SiteSessionInfo, type LoginResult } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -1412,6 +1412,74 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
   }
 
+  /**
+   * Reads the account's sign-in sessions.
+   *
+   * A fork that caps concurrent sessions lists them here so the operator can
+   * sign the others out. Nothing else in the API exposes the cap or the session
+   * ids, so a site that answers 404 is simply one without the feature — the
+   * caller gets `null` rather than an error to interpret.
+   */
+  async listSessions(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+  ): Promise<SiteSessionInfo[] | null> {
+    try {
+      const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/sessions`, {
+        method: 'GET',
+        headers: this.authHeaders(accessToken, platformUserId),
+      });
+      const rows = Array.isArray(res?.data) ? res.data : null;
+      if (!rows) return null;
+
+      return rows
+        .map((row: any): SiteSessionInfo | null => {
+          const sid = typeof row?.sid === 'string' ? row.sid.trim() : '';
+          if (!sid) return null;
+          return {
+            sid,
+            current: row?.current === true,
+            loginMethod: typeof row?.login_method === 'string' ? row.login_method : null,
+            ip: typeof row?.ip === 'string' ? row.ip : null,
+            userAgent: typeof row?.user_agent === 'string' ? row.user_agent : null,
+            createdAt: toNullableNumber(row?.created_at),
+            lastActiveAt: toNullableNumber(row?.last_active_at),
+            expiresAt: toNullableNumber(row?.expires_at),
+          };
+        })
+        .filter((row: SiteSessionInfo | null): row is SiteSessionInfo => row !== null);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Retires one session. A session that is already gone counts as retired: the
+   * goal is that it can no longer be counted against the cap, and a second
+   * cleanup pass racing the first must not report a failure for work already
+   * done.
+   */
+  async revokeSession(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId: number | undefined,
+    sid: string,
+  ): Promise<boolean> {
+    if (!sid) return false;
+    try {
+      const res = await this.fetchJsonRaw<any>(
+        `${baseUrl}/api/user/sessions/${encodeURIComponent(sid)}`,
+        { method: 'DELETE', headers: this.authHeaders(accessToken, platformUserId) },
+      );
+      if (res && (res.success === true || res.code === 'AUTH_SESSION_NOT_FOUND')) return true;
+      if (res?.code === 'AUTH_SESSION_NOT_FOUND') return true;
+      return Boolean(res?.success);
+    } catch {
+      return false;
+    }
+  }
+
   override async verifyToken(baseUrl: string, token: string, platformUserId?: number): Promise<TokenVerifyResult> {
     // A `new_api_refresh` cookie is not itself a usable credential; swap it for
     // a bearer token first so downstream calls see a normal session.
@@ -1997,4 +2065,18 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
     return [];
   }
+}
+
+/**
+ * Timestamps on this family of endpoints are Unix seconds. Anything else is
+ * treated as absent rather than coerced, so a site that changes the shape
+ * degrades to "unknown" instead of reporting a 1970 activation.
+ */
+function toNullableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }

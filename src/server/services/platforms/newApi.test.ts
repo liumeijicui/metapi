@@ -38,6 +38,7 @@ const COOKIE_ONLY_LOGIN_USERNAME = 'cookie-only-user';
 const COOKIE_ONLY_LOGIN_PASSWORD = 'cookie-only-pass';
 const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
 const OPENAI_MODELS_SHIELDED_TOKEN = 'openai-models-shielded-token';
+const SESSIONS_TOKEN = 'sessions-token';
 const SESSION_LIMIT_LOGIN_USERNAME = 'session-capped-user';
 const SESSION_LIMIT_LOGIN_PASSWORD = 'session-capped-pass';
 const EDGE_THROTTLED_TOKEN = 'edge-throttled-token';
@@ -75,10 +76,13 @@ describe('NewApiAdapter', () => {
   let baseUrl: string;
   let requests: RequestSnapshot[] = [];
   let throttlePassThroughHits = 0;
+  /** Session ids the fake site was asked to sign out, in order. */
+  let revokedSids: string[] = [];
 
   beforeEach(async () => {
     requests = [];
     throttlePassThroughHits = 0;
+    revokedSids = [];
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
       requests.push({
         method: req.method || 'GET',
@@ -699,6 +703,45 @@ describe('NewApiAdapter', () => {
         }
       }
 
+      if (req.url === '/api/user/sessions' && req.method === 'GET') {
+        if (req.headers.authorization !== `Bearer ${SESSIONS_TOKEN}`) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          data: [
+            {
+              sid: 'live-session',
+              current: true,
+              login_method: 'password',
+              ip: '10.0.0.1',
+              user_agent: 'Mozilla/5.0',
+              created_at: 1790904186,
+              last_active_at: 1790904186,
+              expires_at: 1793496186,
+            },
+            { sid: 'stale-session', current: false, login_method: 'oauth:linuxdo' },
+          ],
+        }));
+        return;
+      }
+
+      if (req.url?.startsWith('/api/user/sessions/') && req.method === 'DELETE') {
+        const sid = decodeURIComponent(req.url.slice('/api/user/sessions/'.length));
+        if (sid !== 'stale-session' && sid !== 'live-session') {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 'AUTH_SESSION_NOT_FOUND', message: 'session not found', success: false }));
+          return;
+        }
+        revokedSids.push(sid);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
@@ -800,6 +843,63 @@ describe('NewApiAdapter', () => {
     // what to do; the code is the part that names the cause — the account already
     // holds a session, and that one has to be signed out before another opens.
     expect(result.message).toBe('Conflict（AUTH_SESSION_LIMIT）');
+  });
+
+  it('lists the account sign-in sessions the way a session-capping fork reports them', async () => {
+    const adapter = new NewApiAdapter();
+    const sessions = await adapter.listSessions(baseUrl, SESSIONS_TOKEN, 38);
+
+    expect(sessions).toEqual([
+      {
+        sid: 'live-session',
+        current: true,
+        loginMethod: 'password',
+        ip: '10.0.0.1',
+        userAgent: 'Mozilla/5.0',
+        createdAt: 1790904186,
+        lastActiveAt: 1790904186,
+        expiresAt: 1793496186,
+      },
+      {
+        sid: 'stale-session',
+        current: false,
+        loginMethod: 'oauth:linuxdo',
+        ip: null,
+        userAgent: null,
+        createdAt: null,
+        lastActiveAt: null,
+        expiresAt: null,
+      },
+    ]);
+    expect(requests.some((r) => r.url === '/api/user/sessions' && r.headers['new-api-user'] === '38')).toBe(true);
+  });
+
+  it('returns null instead of throwing when the site has no session API', async () => {
+    // The endpoint is a fork extra: on a plain new-api it 404s, and that must
+    // read as "no such feature" rather than a failure worth reporting.
+    const adapter = new NewApiAdapter();
+    const sessions = await adapter.listSessions(baseUrl, 'not-a-real-token', 38);
+
+    expect(sessions).toBeNull();
+  });
+
+  it('signs one session out by id over DELETE', async () => {
+    const adapter = new NewApiAdapter();
+    const revoked = await adapter.revokeSession(baseUrl, SESSIONS_TOKEN, 38, 'stale-session');
+
+    expect(revoked).toBe(true);
+    expect(revokedSids).toEqual(['stale-session']);
+    expect(requests.some((r) => r.method === 'DELETE' && r.url === '/api/user/sessions/stale-session')).toBe(true);
+  });
+
+  it('treats an already-gone session as signed out', async () => {
+    // Two cleanup passes can race; the second must not report a failure for
+    // work the first already did.
+    const adapter = new NewApiAdapter();
+    const revoked = await adapter.revokeSession(baseUrl, SESSIONS_TOKEN, 38, 'never-existed');
+
+    expect(revoked).toBe(true);
+    expect(revokedSids).toEqual([]);
   });
 
   it('detects cookie session values as session cookies for anyrouter-like deployments', async () => {
