@@ -37,6 +37,10 @@ const SHIELD_LOGIN_COOKIE = 'challenge-seed';
 const COOKIE_ONLY_LOGIN_USERNAME = 'cookie-only-user';
 const COOKIE_ONLY_LOGIN_PASSWORD = 'cookie-only-pass';
 const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
+const REFRESH_LOGIN_USERNAME = 'refresh-cookie-user';
+const REFRESH_LOGIN_PASSWORD = 'refresh-cookie-pass';
+const REFRESH_LOGIN_COOKIE = '11111111-2222-3333-4444-555555555555.refresh-secret';
+const REFRESH_LOGIN_BEARER = 'refresh-login-short-lived-token';
 const OPENAI_MODELS_SHIELDED_TOKEN = 'openai-models-shielded-token';
 const SESSIONS_TOKEN = 'sessions-token';
 const SESSION_LIMIT_LOGIN_USERNAME = 'session-capped-user';
@@ -151,7 +155,10 @@ describe('NewApiAdapter', () => {
           const isCookieOnlyLogin =
             payload.username === COOKIE_ONLY_LOGIN_USERNAME &&
             payload.password === COOKIE_ONLY_LOGIN_PASSWORD;
-          if (!isShieldLogin && !isCookieOnlyLogin) {
+          const isRefreshLogin =
+            payload.username === REFRESH_LOGIN_USERNAME &&
+            payload.password === REFRESH_LOGIN_PASSWORD;
+          if (!isShieldLogin && !isCookieOnlyLogin && !isRefreshLogin) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, message: 'invalid credentials' }));
             return;
@@ -181,6 +188,24 @@ describe('NewApiAdapter', () => {
             res.end(JSON.stringify({
               success: true,
               data: {},
+            }));
+            return;
+          }
+
+          if (isRefreshLogin) {
+            // The shape the modern auth stack answers with: the body carries a
+            // 15 minute access token, and the durable credential is the
+            // rotatable refresh cookie.
+            res.writeHead(200, {
+              'Content-Type': 'application/json',
+              'Set-Cookie': [
+                `new_api_refresh=${REFRESH_LOGIN_COOKIE}; Path=/api/user/auth; Max-Age=2592000; HttpOnly`,
+                'new_api_has_session=1; Path=/; Max-Age=2592000',
+              ],
+            });
+            res.end(JSON.stringify({
+              success: true,
+              data: { access_token: REFRESH_LOGIN_BEARER, token_type: 'Bearer' },
             }));
             return;
           }
@@ -832,6 +857,20 @@ describe('NewApiAdapter', () => {
     expect(result.accessToken || '').toContain(`session=${COOKIE_ONLY_LOGIN_SESSION}`);
     expect(result.accessToken || '').toContain(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`);
     expect(result.accessToken || '').toContain(`cdn_sec_tc=${SHIELD_LOGIN_COOKIE}`);
+  });
+
+  it('keeps the rotatable refresh cookie instead of the short-lived access token', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.login(baseUrl, REFRESH_LOGIN_USERNAME, REFRESH_LOGIN_PASSWORD);
+
+    expect(result.success).toBe(true);
+    // Storing the body token would make the account sign in again as soon as it
+    // lapses, and every one of those sign-ins adds another entry to the site's
+    // concurrent-session list.
+    expect(result.accessToken).toBe(`new_api_refresh=${REFRESH_LOGIN_COOKIE}`);
+    // The token is still handed to the caller for the calls this same flow makes
+    // before the cookie has been exchanged.
+    expect(result.bearerToken).toBe(REFRESH_LOGIN_BEARER);
   });
 
   it('names the cause when the site refuses a second session for the account', async () => {

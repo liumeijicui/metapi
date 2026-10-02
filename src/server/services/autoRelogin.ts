@@ -192,10 +192,14 @@ async function tryPasswordRelogin(
   // sessions those leftovers are exactly what refuses the *next* re-login, so
   // this is the moment to retire them. Best-effort: a site without the API, or
   // one that refuses the deletes, leaves the sign-in itself untouched.
+  // The prune runs against the token this sign-in just minted rather than the
+  // stored credential: on a site that keeps the rotatable refresh cookie as the
+  // credential, spending it here would roll the secret one step ahead of the
+  // value `persistCredential` is about to write back.
   const prune = await pruneOtherSessions({
     adapter,
     siteUrl: site.url,
-    accessToken: login.accessToken,
+    accessToken: login.bearerToken || login.accessToken,
     platformUserId,
     enabled: shouldPruneOtherSessions(account.extraConfig),
   });

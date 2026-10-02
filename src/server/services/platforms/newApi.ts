@@ -150,7 +150,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private extractRefreshCookie(token: string): string | null {
-    const match = (token || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
+    return this.readRefreshCookieValue(token);
+  }
+
+  /** Reads the `new_api_refresh` value out of a cookie or `Set-Cookie` string. */
+  private readRefreshCookieValue(cookieSource: string | null | undefined): string | null {
+    const match = (cookieSource || '').match(/(?:^|;\s*)new_api_refresh=([^;]+)/i);
     return match?.[1]?.trim() || null;
   }
 
@@ -1383,6 +1388,25 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       const accessToken = this.extractLoginAccessToken(res);
       const platformUserId = this.extractLoginUserId(res);
+      // Every sign-in also mints a server-side session, and newer deployments
+      // hand back a rotatable `new_api_refresh` cookie as the durable credential
+      // while the body token is a 15 minute JWT. Storing the JWT makes the
+      // account sign in again the moment it lapses, and each of those sign-ins
+      // adds another entry to the site's concurrent-session list — on a fork
+      // that caps that list the account eventually locks itself out with
+      // `AUTH_SESSION_LIMIT`. The cookie is exchangeable for access tokens
+      // indefinitely, so it is the one worth keeping; the JWT is reported
+      // alongside for the work this flow does before the first exchange.
+      const refreshCookie = this.readRefreshCookieValue(cookieHeader);
+      if (res?.success && refreshCookie) {
+        return {
+          success: true,
+          accessToken: `new_api_refresh=${refreshCookie}`,
+          bearerToken: accessToken || undefined,
+          username,
+          platformUserId,
+        };
+      }
       if (res?.success && accessToken) {
         return {
           success: true,
@@ -1425,6 +1449,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
     accessToken: string,
     platformUserId?: number,
   ): Promise<SiteSessionInfo[] | null> {
+    // The caller may hold the rotatable cookie rather than an access token, and
+    // this endpoint is reachable before the cookie has been exchanged.
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     try {
       const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/sessions`, {
         method: 'GET',
@@ -1467,6 +1494,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     sid: string,
   ): Promise<boolean> {
     if (!sid) return false;
+    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     try {
       const res = await this.fetchJsonRaw<any>(
         `${baseUrl}/api/user/sessions/${encodeURIComponent(sid)}`,

@@ -358,6 +358,35 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成并在当前本地服务中运行。
 
+### 17. 登录保存可续期的 refresh cookie，不再靠反复登录维持会话
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求（“会话满了，我也登不上，有没有什么其他方式能登陆 luck 的”），关联第 16、15 条
+- **目标**：查清幸运 G（账号 #4）被 `AUTH_SESSION_LIMIT` 挡住的真实原因，并从根上消除它。
+- **实测原因**：
+  - 新版 New API 登录会**同时**下发 15 分钟的 `access_token`（JSON 里）和 30 天的 `new_api_refresh` cookie（`Set-Cookie`），并且**每次登录都新建一条服务端登录会话**（会话上限默认 50、固定 30 天不续期）。
+  - `newApi.login()` 之前优先保存 JSON 里的 access token，于是账号凭据每 15 分钟就失效，调度每跑一次（每小时签到/余额）就得重新登录一次，而每次登录都会 **+1 条会话**：约两天就把 50 条顶满，之后密码登录和 LinuxDO OAuth 全部被站点以 `409 AUTH_SESSION_LIMIT` 拒绝（OAuth 回调 `POST /api/oauth/linuxdo` 也实测返回同一错误）。
+  - 站点侧只有三条出路：在仍登录的设备上「退出其他登录会话」、重置密码（服务端会撤销全部会话，但该站 `SMTPFrom` 未配置，`/api/verification` 直接返回 `invalid SMTP account`，重置邮件发不出去）、或等 30 天后会话自然到期（站点每小时清理过期行）。
+- **实现范围**：
+  - `newApi.login()` 优先保存可续期的 `new_api_refresh` cookie；同一次登录拿到的短期 access token 改由 `LoginResult.bearerToken` 单独返回，供这一轮流程里尚未换票的调用（会话清理）使用，不再被持久化成账号凭据。
+  - `autoRelogin` 的会话清理改用 `bearerToken`，避免在落库前先把 cookie 密钥轮换掉。
+  - `listSessions` / `revokeSession` 支持直接传入 refresh cookie（先换票再调用），cookie 凭据下会话清理同样可用。
+  - `session_limit` 的失败原因文案改为如实描述出路（含“30 天后自动释放”“重置密码依赖站点邮件通道”），不再只写“重置密码”这种在该站根本走不通的建议。
+- **主要文件**：
+  - `src/server/services/platforms/base.ts`
+  - `src/server/services/platforms/newApi.ts`
+  - `src/server/services/autoRelogin.ts`
+  - `src/server/services/failureReasonService.ts`
+  - `src/server/services/platforms/newApi.test.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过。
+  - `npx vitest run`（newApi / autoRelogin / sessionHygiene / accountCredentialRotation / platforms index）：84 个用例通过，含新增的「登录保存 refresh cookie 而非短期令牌」用例。
+  - 实机 happycoding(#7)：登录返回 `new_api_refresh=…` 与独立 `bearerToken`；用该 cookie 换票后 `/api/user/self` 正常；连续 3 轮换票均成功、密钥轮换已落库，且访问令牌的 `sid` 与会话列表里的当前会话一致（说明复用同一会话，不再新增）；会话清理 `{"status":"pruned","removed":2,"kept":1}`，站点会话数由 3 降为 1。
+  - 幸运 G(#4)：确认已被上限锁死，其 50 条会话只能等 30 天自然过期或由站长清理，代码层无可绕过的入口（密码 / OAuth / Passkey 全部走同一套会话签发）。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

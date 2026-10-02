@@ -59,6 +59,17 @@ export interface LoginResult {
   username?: string;
   message?: string;
   /**
+   * Short-lived token for the calls this same sign-in flow makes before the
+   * stored credential is usable.
+   *
+   * An adapter that keeps the rotatable refresh cookie as `accessToken` cannot
+   * spend it on an API call directly, and exchanging it right away would roll
+   * the secret while the caller is still holding the pre-roll value. Reporting
+   * the access token separately lets the flow do its post-sign-in work (such as
+   * listing the sessions to sign out) without touching the durable credential.
+   */
+  bearerToken?: string;
+  /**
    * Site-side user id (the value of the `New-Api-User` header).
    * Most New API compatible sites return it in the login payload as
    * `data.id`, so adapters can surface it here instead of forcing callers
