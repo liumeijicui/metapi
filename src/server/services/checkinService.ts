@@ -252,10 +252,18 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   let result = await runCheckin(activeAccessToken);
 
+  // A refusal the site stated outright outranks the generic failure that
+  // triggered this retry, so it is captured here and written once the verdict
+  // below has been recorded.
+  let reloginRefusal: { code: string; reason: string } | null = null;
+
   if (!result.success && shouldAttemptAutoRelogin(result.message)) {
     // This is the one caller that may spend a headed browser run: it restores
     // the account's session, and the balance runs that follow are then fine.
-    const relogin = await tryAutoRelogin(account, site, { allowBrowserFallback: true });
+    const relogin = await tryAutoRelogin(account, site, {
+      allowBrowserFallback: true,
+      onRefusal: (refusal) => { reloginRefusal = refusal; },
+    });
     if (relogin) {
       activeAccessToken = relogin.accessToken;
       sessionRestored = true;
@@ -377,9 +385,14 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   }
 
   if (!effectiveSuccess) {
-    setAccountRuntimeHealth(account.id, {
+    // The operator-facing reason: when the site refused for a cause they have to
+    // clear themselves (a session cap, a dead password), that is more useful
+    // than the token verdict the failed request produced.
+    await setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
-      reason: result.message || '\u7b7e\u5230\u5931\u8d25',
+      reason: reloginRefusal
+        ? (reloginRefusal as { code: string; reason: string }).reason
+        : (result.message || '\u7b7e\u5230\u5931\u8d25'),
       source: 'checkin',
     });
     if (isTokenExpiredError({ message: result.message })) {

@@ -11,6 +11,37 @@ describe('failureReasonService', () => {
     expect(result.category).toBe('verification');
   });
 
+  it('names a concurrent-session cap instead of blaming the token', () => {
+    // new-api forks that cap sessions answer an otherwise correct password with
+    // `409 AUTH_SESSION_LIMIT`; the request that follows then fails 401 and would
+    // otherwise be reported as an expired token.
+    const refusal = classifyFailureReason({
+      message: 'Conflict（AUTH_SESSION_LIMIT）',
+    });
+    expect(refusal.code).toBe('session_limit');
+    expect(refusal.actionHint).toContain('退出其他登录会话');
+
+    const visible = classifyFailureReason({
+      message: 'Too many active login sessions. On a device where you are already signed in, '
+        + 'open Login sessions and use “Sign out other sessions” to revoke them.',
+    });
+    expect(visible.code).toBe('session_limit');
+
+    // The generic 401 that follows the refusal must not outrank it.
+    expect(classifyFailureReason({
+      httpStatus: 401,
+      message: 'HTTP 401: Unauthorized, not logged in and no access token provided',
+    }).code).toBe('token_expired');
+  });
+
+  it('names a refused credential pair as such, banned accounts included', () => {
+    const refused = classifyFailureReason({
+      message: 'Username or password is incorrect, or user has been banned',
+    });
+    expect(refused.code).toBe('invalid_credentials');
+    expect(refused.category).toBe('auth');
+  });
+
   it('classifies cloudflare tunnel outage', () => {
     const result = classifyFailureReason({
       message: 'HTTP 530 Cloudflare Tunnel error | Error 1033',

@@ -67,6 +67,18 @@ export type AutoReloginOptions = {
    * that would end exactly where it started.
    */
   browserFallbackRequiresHumanCheck?: boolean;
+  /**
+   * Reports a refusal that no retry can clear, so the caller can record it
+   * instead of the generic verdict its own failed request produced.
+   *
+   * The site's answer is strictly more specific than "401 Unauthorized": a
+   * session cap means the password was accepted and the operator has to sign out
+   * other sessions. Without this the caller overwrites that with "token
+   * expired" and sends them hunting for a credential problem that does not
+   * exist. Callbacks fire after the caller's own error handling, so the reason
+   * survives.
+   */
+  onRefusal?: (refusal: { code: string; reason: string }) => void;
 };
 
 /**
@@ -139,6 +151,7 @@ function isHumanCheckRefusal(message?: string | null): boolean {
 async function tryPasswordRelogin(
   account: any,
   site: any,
+  reportRefusal?: (refusal: { code: string; reason: string }) => void,
 ): Promise<{ result: AutoReloginResult | null; blockedByHumanCheck: boolean }> {
   const adapter = getAdapter(site.platform);
   if (!adapter) return { result: null, blockedByHumanCheck: false };
@@ -154,6 +167,17 @@ async function tryPasswordRelogin(
     () => adapter.login(site.url, relogin.username, password),
   );
   if (!login.success || !login.accessToken) {
+    // A session cap is worth naming on the account itself. The caller keeps its
+    // own "token expired" verdict from the failed request, which points the
+    // operator at a credential problem that does not exist here: the password
+    // was accepted and only the site's concurrent-session limit refused it.
+    const refusal = classifyFailureReason({ message: login.message });
+    if (refusal.code === 'session_limit' || refusal.code === 'invalid_credentials') {
+      reportRefusal?.({
+        code: refusal.code,
+        reason: `${refusal.title}：${refusal.actionHint}`,
+      });
+    }
     return { result: null, blockedByHumanCheck: isHumanCheckRefusal(login.message) };
   }
   return {
@@ -293,7 +317,7 @@ export async function tryAutoRelogin(
   site: any,
   options?: AutoReloginOptions,
 ): Promise<AutoReloginResult | null> {
-  const passwordAttempt = await tryPasswordRelogin(account, site);
+  const passwordAttempt = await tryPasswordRelogin(account, site, options?.onRefusal);
   if (passwordAttempt.result) return passwordAttempt.result;
 
   const oauth = await tryOauthRelogin(account, site);

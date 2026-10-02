@@ -46,10 +46,18 @@ export const linuxDoProvider: AssistedLoginProvider = {
   origin: ORIGIN,
   loginPath: '/login',
   isHandoffHost: (host) => host === 'linux.do' || host === CONNECT_HOST,
+  /**
+   * Both steps of the handoff live on the connect host: `/authorize` shows the
+   * consent form, and `/approve` is where granting it lands. Only the first was
+   * recognised, so a flow that had already been approved — or that was waiting
+   * out a Cloudflare challenge on the approve step — was judged to have no
+   * handoff in flight and reported as "provider session expired" even though
+   * the session behind it was valid.
+   */
   isAuthorizationUrl: (rawUrl) => {
     try {
       const url = new URL(rawUrl);
-      return url.host === CONNECT_HOST && /\/oauth2?\/authorize/.test(url.pathname);
+      return url.host === CONNECT_HOST && /\/oauth2?\/(authorize|approve)/.test(url.pathname);
     } catch {
       return false;
     }

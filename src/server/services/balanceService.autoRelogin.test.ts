@@ -343,6 +343,45 @@ describe('balanceService auto relogin', () => {
     expect(reportTokenExpiredMock).toHaveBeenCalledTimes(1);
   });
 
+  it('names the site session cap instead of the generic token verdict', async () => {
+    // The password is accepted and only the site's concurrent-session limit
+    // refuses it. Reporting "token expired" here sends the operator after a
+    // credential problem that does not exist, so the site's own answer wins.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 21,
+          username: '3145215575',
+          accessToken: 'stale-token',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: '3145215575', passwordCipher: 'v1:cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    adapterMock.getBalance.mockRejectedValueOnce(
+      new Error('HTTP 401: Unauthorized, not logged in and no access token provided'),
+    );
+    adapterMock.login.mockResolvedValueOnce({ success: false, message: 'Conflict（AUTH_SESSION_LIMIT）' });
+
+    const { refreshBalance } = await import('./balanceService.js');
+    await expect(refreshBalance(21)).rejects.toThrow('401');
+
+    expect(adapterMock.login).toHaveBeenCalledTimes(1);
+    expect(setAccountRuntimeHealthMock).toHaveBeenCalledWith(21, expect.objectContaining({
+      state: 'unhealthy',
+      reason: expect.stringContaining('会话数已达上限'),
+    }));
+  });
+
   it('does not report token expired for generic forbidden balance errors', async () => {
     selectAllMock.mockReturnValue([
       {

@@ -293,7 +293,10 @@ export async function refreshBalance(accountId: number) {
       () => adapter.getBalance(site.url, token, platformUserId)));
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
-    setAccountRuntimeHealth(account.id, {
+    // Awaited: this handler is called from paths that record a more specific
+    // verdict right after it, and an un-awaited write here would land last and
+    // silently overwrite that verdict with the generic one.
+    await setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: message,
       source: 'balance',
@@ -333,6 +336,10 @@ export async function refreshBalance(accountId: number) {
         await handleBalanceError(retryErr);
       }
     } else if (shouldAttemptAutoRelogin(message)) {
+      // A refusal the site stated outright outranks the generic 401 that
+      // triggered this retry, so it is captured and written after the error
+      // handling below rather than being overwritten by it.
+      let reloginRefusal: { code: string; reason: string } | null = null;
       const relogin = await tryAutoRelogin(account, site, {
         allowBrowserFallback: true,
         // ...but only for a site that refuses the HTTP login until a human check
@@ -340,6 +347,7 @@ export async function refreshBalance(accountId: number) {
         // what marks the account `expired` — which drops it out of the daily
         // check-in, the one job that could still revive it.
         browserFallbackRequiresHumanCheck: true,
+        onRefusal: (refusal) => { reloginRefusal = refusal; },
       });
       if (relogin) {
         activeAccessToken = relogin.accessToken;
@@ -356,7 +364,25 @@ export async function refreshBalance(accountId: number) {
           await handleBalanceError(retryErr);
         }
       } else {
-        await handleBalanceError(err);
+        // `handleBalanceError` records the generic verdict and then throws, so
+        // the more specific refusal has to be written on the way out.
+        try {
+          await handleBalanceError(err);
+        } catch (error) {
+          if (reloginRefusal) {
+            const refusal = reloginRefusal as { code: string; reason: string };
+            try {
+              await setAccountRuntimeHealth(account.id, {
+                state: 'unhealthy',
+                reason: refusal.reason,
+                source: 'auth',
+              });
+            } catch {
+              // The recorded reason is a courtesy; the real error still wins.
+            }
+          }
+          throw error;
+        }
       }
     } else {
       await handleBalanceError(err);

@@ -686,6 +686,16 @@ export function createAssistedLoginSession(input: {
     const loginPage = await findHandoffPage(context, pagesBefore, initialPage);
     await settle(loginPage);
 
+    // The consent URL is sometimes answered with a Cloudflare interstitial
+    // rather than the authorize form. That page holds none of the controls this
+    // flow looks for, and judging it as-is reported "provider session expired"
+    // while the session behind it was perfectly valid. `passCloudflareChallenge`
+    // returns immediately when the page is not a challenge, so this costs
+    // nothing on the ordinary path.
+    if (provider.isHandoffHost(safeHost(loginPage.url()))) {
+      await passCloudflareChallenge(loginPage);
+    }
+
     // Only an actual authorize page means the handoff is in flight. Landing back
     // on the provider homepage means the session is missing.
     if (provider.isHandoffHost(safeHost(loginPage.url())) && !provider.isAuthorizationUrl(loginPage.url())) {

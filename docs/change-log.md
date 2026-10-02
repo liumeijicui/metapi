@@ -277,6 +277,37 @@ npx vitest run --pool=threads --poolOptions.threads.singleThread=true <test-file
 - **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
 - **状态**：已完成并在当前本地服务中运行。
 
+### 14. 站点侧拒绝原因如实上报，Cloudflare 挑战不再误报会话失效
+
+- **类型**：缺陷修复
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：处理剩余 `expired` 账号时，发现两处会误导排查方向的缺陷：站点明确给出的拒绝原因被通用「令牌失效」覆盖；OAuth 握手页面上的 Cloudflare 挑战被判定为「提供方会话已失效」。
+- **实现范围**：
+  - 新增 `session_limit` 失败分类：识别 `AUTH_SESSION_LIMIT`、`Too many active login sessions`、`Sign out other sessions` 等站点原文，给出「在站点上退出其他登录会话（或重置密码）」的动作提示。此前这类拒绝被归为未知错误，账号上只留下 `访问令牌失效：HTTP 401`。
+  - 新增 `invalid_credentials` 失败分类：识别 `Username or password is incorrect`、`user has been banned` 等站点原文，明确指出是凭据无效或账号被封禁。
+  - `tryAutoRelogin` 新增 `onRefusal` 回调，把站点给出的、操作者必须自行处理的拒绝原因交给调用方；余额刷新与签到两处调用方都据此写入健康原因，不再让通用 401 覆盖它。
+  - 修复一处竞态：`handleBalanceError` 里的健康写入未 `await`，其异步落库会晚于随后写入的具体原因并把后者覆盖；该写入现在被 `await`，顺序确定。
+  - Linux.do 的 OAuth 握手有 `/authorize` 与 `/approve` 两步，此前只承认第一步，导致已授权或正在过 Cloudflare 的 `/approve` 页面被判为「无握手在飞」并报「会话已失效」；现在两步都算握手。
+  - 判定握手失败前先调用已有的 `passCloudflareChallenge` 等待挑战通过（页面不是挑战时立即返回，正常路径零开销）。
+- **主要文件**：
+  - `src/server/services/failureReasonService.ts`
+  - `src/server/services/failureReasonService.test.ts`
+  - `src/server/services/autoRelogin.ts`
+  - `src/server/services/balanceService.ts`
+  - `src/server/services/balanceService.autoRelogin.test.ts`
+  - `src/server/services/checkinService.ts`
+  - `src/server/services/assistedLogin/providers/linuxdo.ts`
+  - `src/server/services/assistedLogin/sessionService.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npm run typecheck`：通过。
+  - `npx vitest run --root . src/server/services/balanceService src/server/services/autoRelogin src/server/services/checkinService src/server/services/failureReasonService src/server/services/assistedLogin`：108 个测试通过。
+  - 实机验证 luckyg(#4) / happycoding(#7) 现报「站点登录会话数已达上限：在站点上退出其他登录会话（或重置密码）后重试」；蛙蛙公益站(#10) 现报「账号密码无效或账号被封禁」；此前三者都只报「访问令牌失效」。
+  - 实机验证 JustDoWork(#25) 改用站点支持的 GitHub OAuth 入口重新授权后由 `expired` 恢复为 `active`，余额 720.97，签到返回已签到。
+  - 实机验证 Linux.do OAuth 走 luckyg 不再误报「会话已失效」，如实返回「等待站点返回凭证超时」（站点因会话数上限拒绝下发）。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成并在当前本地服务中运行。
+
 ## 后续记录模板
 
 复制下面模板追加到对应日期下，先记录需求来源，再补充实际实现和验证结果：

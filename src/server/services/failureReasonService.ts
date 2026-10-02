@@ -12,6 +12,8 @@ type FailureReasonCode =
   | 'site_disabled'
   | 'checkin_not_supported'
   | 'manual_turnstile_required'
+  | 'session_limit'
+  | 'invalid_credentials'
   | 'cloudflare_tunnel_unavailable'
   | 'cloudflare_challenge'
   | 'token_expired'
@@ -95,6 +97,56 @@ export function classifyFailureReason(
       title: '触发 Cloudflare 验证',
       actionHint: '降低频率并稍后重试',
       detailHint: '请求触发了防护挑战，建议稍后再试或更换稳定站点。',
+    };
+  }
+
+  // A new-api fork that caps concurrent sessions refuses an otherwise correct
+  // password with `409` and `AUTH_SESSION_LIMIT` (the visible text is "Too many
+  // active login sessions ... sign out other sessions"). The credentials are
+  // fine and no retry can help, so naming the cause is what lets the operator
+  // act instead of hunting for a token problem that does not exist.
+  if (
+    includesAny(text, [
+      'auth_session_limit',
+      'too many active login sessions',
+      'sign out other sessions',
+      'session limit',
+      '登录会话数',
+      '会话数已达上限',
+    ])
+  ) {
+    return {
+      code: 'session_limit',
+      category: 'auth',
+      title: '站点登录会话数已达上限',
+      actionHint: '在站点上退出其他登录会话（或重置密码）后重试',
+      detailHint: '账号密码本身有效，但站点限制了同时登录的会话数量，'
+        + '新的登录会被拒绝。请在同一站点的「登录会话」里退出其他设备，'
+        + '或重置密码以退出全部会话，之后本系统即可自动重新登录。',
+    };
+  }
+
+  // A login that the site answers with a credential verdict is not a token
+  // problem: the operator has to fix the credentials on file, and the generic
+  // 401 that follows would send them looking in the wrong place.
+  if (
+    includesAny(text, [
+      'username or password is incorrect',
+      'incorrect username or password',
+      'invalid username or password',
+      'user has been banned',
+      '账号或密码错误',
+      '用户名或密码',
+      '账号已被封禁',
+    ])
+  ) {
+    return {
+      code: 'invalid_credentials',
+      category: 'auth',
+      title: '账号密码无效或账号被封禁',
+      actionHint: '核对保存的账号密码，或确认账号是否被站点封禁',
+      detailHint: '站点明确拒绝了这组账号密码：可能是密码已修改，或账号已被封禁。'
+        + '请在站点上确认可正常登录后，回到本系统更新凭据。',
     };
   }
 
