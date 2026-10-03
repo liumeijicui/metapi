@@ -1,3 +1,43 @@
+### 35. 修复 Linux.do 自动重登取不到 state（rc 版接口），并批量启用
+
+- **类型**：缺陷修复 + 配置
+- **需求来源**：本会话需求（用户同意“给这些站配上 Linux.do 自动重登”）
+- **问题**：Linux.do 重登在大多数站点上秒退，报「站点未返回 OAuth state」。原因是取 state 只试了老接口 `GET /api/oauth/state?mode=login`（返回 `data: "<state>"`），而 new-api 的 rc 构建早已把它标准化成 `POST /api/oauth/state`，请求体 `{"provider":"linuxdo","intent":"login"}`、响应 `data.flow_token`——**GitHub 那条链路早就在用这个接口**（`newApiGithubOauthRelogin.ts`），Linux.do 这条一直没跟上。
+- **实测**：12 个站里只有 2 个（`lazydaily`、`123nhh`）还答老形式，其余 10 个全部只认 POST 形式。用托管浏览器打开站点登录页抓包确认了前端真实调用：`POST /api/oauth/state {"provider":"linuxdo","intent":"login"}` → 拿 `flow_token` 当 `state` 拼 `connect.linux.do/oauth2/authorize`。
+- **改动**：
+  - `assistedLogin/sites/linuxDoOAuthRelogin.ts`：抽出两个纯函数 `readLegacyOAuthState()`（老形式的裸字符串）与 `readOAuthFlowToken()`（rc 形式的 `flow_token`）；`readOAuthStateInPage()` 先试老接口，拿不到再试 POST 形式（两者都受同源会话约束，只能在页面内发请求，所以是两次 `page.evaluate`）。失败文案改为「站点未返回 OAuth state（老接口与 flow_token 接口都没给）」。
+  - 新增 `linuxDoOAuthRelogin.test.ts`（7 例）覆盖两种响应形态与错误体。
+- **验证（真实演练）**：
+  - 账号 `#37 HongShi`：把凭证换成死值并置 `expired` → `POST /api/accounts/37/balance` → **37 秒内自动重登成功**，凭证换成新的 `new_api_refresh`、状态回 `active`、余额正常（$11.28），并且 `sessionHygiene: {pruned, removed: 1, kept: 1}`——登录后自动清掉多余会话，正是用户要求的行为。
+  - 账号 `#39 123nhh`（老形式站点）：同样演练通过。
+  - 12 个站逐一核对 `api/oauth/state`：修复后全部拿到 state（10 个走 POST、2 个走 GET）。
+- **配置**：给下列账号写入 `relogin: {provider:"linuxdo"}` 标记（共 12 个新启用，另 5 个此前已有，现计 16 个）：`#5 techmob`、`#6 ultrarouter`、`#7 happycoding`、`#8 coee`、`#9 grok-heavy`、`#26 咕咕嘎嘎`、`#34 霸气公益平台`、`#36 Loveyy`、`#37 HongShi`、`#38 TOM&JERRY`、`#39 123nhh`。
+  - 启用前逐个核对了站点侧 `linux_do_id == 367936`，避免给非 Linux.do 绑定的账号挂错链路。
+  - **两个账号被排除并回滚标记**：`#10 蛙蛙公益站`（回调回「New user registration has been disabled by administrator」，说明该站用户并非 Linux.do 绑定）、`#4 luckyg`（回调回 `Conflict`，Linux.do 账号在该站绑的是另一个用户）。两者的可用路径仍是密码重登，标记留着只会每 15 分钟白跑一次浏览器，因此移除。
+  - `#13 fuka` 未启用：该站用户 `linux_do_id` 为空。
+- **主要文件**：`src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.ts`、`src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.test.ts`、`docs/change-log.md`
+- **状态**：已完成
+
+### 34. 登记「123nhh」（api.123nhh.com）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“登录秘钥 plTynZihTd5znGNlmACUQ75QXq5OyME= 网址 https://api.123nhh.com/console/personal ID 417”）
+- **站点事实（实测）**：
+  - new-api 系的定制构建（`/api/status` 的 `system_name` 是默认的「New API」、`version` 为空，带 `/api/deployments`、`/api/enhancements/*`、会话日志等定制模块）；`checkin_enabled: true`、`turnstile_check: false`、`linuxdo_oauth: true`、`github_oauth: false`。
+  - **直连可用**（无 CF 盾），站点未开系统代理。
+  - 签到奖励区间 `min_quota 5000000 ~ max_quota 50000000`（约 $10~$100），账号 `linux_do_id = 367936`（与本机 Linux.do 账号一致），分组只有 `default`（倍率 1.2）。
+  - 站上已有现成密钥 `li`（无限额度），**无需新建**；同样刻意未调用 `/api/user/token`。
+- **登记结果（本机）**：
+  - 站点 `#53 123nhh`（`new-api`，未开系统代理）+ 账号 `#39`（用户名 `3145215575`、`platformUserId 417`、`session` 模式、`checkinEnabled: true`）。
+  - 令牌 `account_tokens #50 li`（default 分组、`ready`、默认令牌，由上游同步发现）。
+- **验证**：
+  - 签到：`POST /api/checkin/trigger/39` → `{"success":true,"message":"签到成功","reward":"69.188036"}`，余额 `$3489.25 → $3558.44`。
+  - 余额同步正常：`quota 1744624154 / used 445301175`（约 $3489 余额 / $890 已用，历史 343 次请求），数据与站点一致。
+  - 已按第 35 条配置 Linux.do 自动重登，并做过失效演练（通过）。
+- **已知情况（站点侧，非配置问题）**：**该站当前没有任何可用模型**。`/api/pricing` 返回 `data: []`、`/v1/models` 返回空数组，任一模型（如 `gpt-4o`）都回 `No available channel for model … under group default (distributor)`；站点自带的「模型可用性」页（`/model-status`）也是空的。账号本身完全正常（能登录、能签到、能列令牌、余额真实），metapi 探测到 0 个模型是**如实反映站点现状**。等站方恢复渠道后，无需改配置，重新探测即可出量。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成（站点侧恢复渠道后即可出量）
+
 ### 33. 登记「TOM&JERRY」（lazydaily.de5.net）
 
 - **类型**：站点登记（无代码改动）

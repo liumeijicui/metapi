@@ -35,6 +35,14 @@ const LOGOUT_PATH = '/api/user/logout';
 /** The state is session-bound, so it is requested from inside the page. */
 const OAUTH_STATE_PATH = '/api/oauth/state?mode=login';
 /**
+ * New API 的 rc 构建把取 state 标准化成了 `POST /api/oauth/state`
+ * （`{provider,intent}` → `data.flow_token`，与 GitHub 那条链路同一个接口，
+ * 见 `newApiGithubOauthRelogin.ts`）。老的 GET 形式只在那之前的构建里才有，
+ * 而两者都受同源会话约束，所以只能按顺序在页面里各试一次。
+ */
+const OAUTH_STATE_FLOW_PATH = '/api/oauth/state';
+const OAUTH_STATE_FLOW_BODY = { provider: 'linuxdo', intent: 'login' };
+/**
  * The consent page renders its answer buttons as links labelled 允许 / 拒绝
  * (Chinese) or Allow / Authorize (English), never as real <button> elements.
  */
@@ -198,7 +206,7 @@ export async function reloginWithLinuxDo(
     await signOutOfSite(page, context, siteOrigin, request.hosts);
 
     const state = await readOAuthStateInPage(page);
-    if (!state) return { ok: false, message: '站点未返回 OAuth state' };
+    if (!state) return { ok: false, message: '站点未返回 OAuth state（老接口与 flow_token 接口都没给）' };
     const authorizeUrl = buildLinuxDoAuthorizeUrl(clientId, state);
     if (!isLinuxDoAuthorizeUrl(authorizeUrl)) {
       return { ok: false, message: '仅允许在受管浏览器中打开 connect.linux.do 的授权地址' };
@@ -309,15 +317,59 @@ async function openAuthorizePage(page: Page, url: string): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-/** The site binds the state to the session, so it is read from inside the page. */
+/**
+ * The state a pre-rc build hands back: a bare string under `data`.
+ */
+export function readLegacyOAuthState(payload: unknown): string | null {
+  const data = (payload as { data?: unknown } | null)?.data;
+  return typeof data === 'string' && data.trim() ? data.trim() : null;
+}
+
+/**
+ * The state an rc build hands back: a one-shot `flow_token`.
+ */
+export function readOAuthFlowToken(payload: unknown): string | null {
+  const data = (payload as { data?: { flow_token?: unknown } } | null)?.data;
+  const token = data?.flow_token;
+  return typeof token === 'string' && token.trim() ? token.trim() : null;
+}
+
+/**
+ * The site binds the state to the session, so it is read from inside the page.
+ *
+ * Two shapes are in the wild and a site only implements one of them: the older
+ * GET answers a bare string, the rc POST answers `flow_token`. The GET is tried
+ * first because it is the one a build that predates the standardised route
+ * understands, and a build that dropped it answers an error rather than a
+ * state, which costs one wasted same-origin request.
+ */
 async function readOAuthStateInPage(page: Page): Promise<string | null> {
-  const state = await page
+  const legacy = await page
     .evaluate(async (path) => {
-      const payload = await fetch(path, { headers: { Accept: 'application/json' } }).then((res) => res.json());
-      return typeof payload?.data === 'string' ? payload.data.trim() : '';
+      try {
+        return await fetch(path, { headers: { Accept: 'application/json' } }).then((res) => res.json());
+      } catch {
+        return null;
+      }
     }, OAUTH_STATE_PATH)
-    .catch(() => '');
-  return state || null;
+    .catch(() => null);
+  const fromLegacy = readLegacyOAuthState(legacy);
+  if (fromLegacy) return fromLegacy;
+
+  const flow = await page
+    .evaluate(async ({ path, body }) => {
+      try {
+        return await fetch(path, {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then((res) => res.json());
+      } catch {
+        return null;
+      }
+    }, { path: OAUTH_STATE_FLOW_PATH, body: OAUTH_STATE_FLOW_BODY })
+    .catch(() => null);
+  return readOAuthFlowToken(flow);
 }
 
 function buildLinuxDoAuthorizeUrl(clientId: string, state: string): string {
