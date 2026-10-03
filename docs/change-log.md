@@ -1,3 +1,25 @@
+### 31. 登记「Loveyy 公益站」（ai.loveyy.qzz.io）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“帮我维护这个网站:https://ai.loveyy.qzz.io/dashboard/overview 用户名密码 3145215575/liyaodong7238508”）
+- **站点事实（实测）**：
+  - new-api `v1.0.0-rc.41`，站名「公益站」；`password_login_enabled: true`、**`turnstile_check: false`**、`email_verification: false`；`linuxdo_oauth: true`、`github_oauth: false`。
+  - **无签到**：`/api/status` 的 `checkin_enabled` 为 `false`，触发签到只会回「签到功能未启用」，因此账号 `checkinEnabled` 置 `false`，避免每天刷出无意义的失败记录。
+  - **必须走系统代理**：直连 `https://ai.loveyy.qzz.io` 被 Cloudflare 挡成 `403`（本地 `POST /api/sites/detect` 直连同样失败），开系统代理后一切正常。注意这与同批登记的其他 new-api 站（如霸气公益平台、ai.121628.xyz 直连可用）不同，属站点侧策略差异。
+- **登记结果（本机）**：
+  - 站点 `#50 Loveyy 公益站`（`new-api`，**`useSystemProxy = true`**，无 `externalCheckinUrl`）。
+  - 账号 `#36`（用户名 `3145215575`、`credentialMode: session`、凭证为 `new_api_refresh` Cookie、密码已加密存为 `autoRelogin`、`platformUserId 7419`），建成 9 个可用模型 / 8 条路由（`route_channels`），上游令牌 `account_tokens #46`。
+- **验证**：
+  - 密码登录成功，模型同步 9 个，`account_tokens #46` 状态 `ready`。
+  - 失效重登演练：把凭证改成死值并置 `status=expired` → `POST /api/accounts/36/balance` → 自动用密码重登换回新的 `new_api_refresh`、状态回 `active`，会话清理 `removed: 1 / kept: 1`。
+  - 路由已重建核对：`route_channels where account_id=36` 由 0 恢复为 8。
+- **教训（重要，避免重复踩坑）**：
+  - 重登后 Cookie 处于**轮换边界**，此期间反复调 `POST /api/accounts/:id/models` 会让 `refreshModelsForAccount` 拿到 403 并判成“无可用模型”，从而**清空 `model_availability` 与 `route_channels`**。重登后只做一次 `balance` 即可，`models` 只在首次建号时调。
+  - 恢复顺序：先 `refreshModelsForAccount(id)` 写回 `model_availability`，再触发一次路由重建（`PUT /api/accounts/:id` 且只改 `checkinEnabled` 这类非凭证字段时 `refreshModels = false`，但结尾会走 `rebuildRoutesBestEffort()`，是最轻的正确入口）。
+  - **禁用** `/api/settings/maintenance/clear-cache`：它会整表清空 `model_availability` + `route_channels`。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 30. 登记「Fengwind API」（api.fengwind.com）并支持 SSO 型福利站签到
 
 - **类型**：功能扩展 + 站点登记
