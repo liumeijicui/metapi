@@ -14,6 +14,7 @@ function tokenWithSid(sid: string): string {
 const decryptPasswordMock = vi.fn();
 const browserSessionMock = vi.fn();
 const captureHyperMock = vi.fn();
+const captureNewApiGithubMock = vi.fn();
 const linuxDoReloginMock = vi.fn();
 const harvestLinuxDoMock = vi.fn();
 
@@ -60,6 +61,14 @@ vi.mock('./assistedLogin/sites/hyper.js', () => ({
   supportsHyperGithubLogin: (siteUrl: string, provider: string) =>
     provider === 'github' && new URL(siteUrl).origin === 'https://ai.hyper.nyc.mn',
   captureHyperGithubCredentials: (...args: unknown[]) => captureHyperMock(...args),
+}));
+
+vi.mock('./assistedLogin/sites/newApiGithubOauthRelogin.js', () => ({
+  supportsNewApiGithubOauth: (siteUrl: string, provider: string) => (
+    provider === 'github' && new URL(siteUrl).protocol === 'https:'
+  ),
+  captureNewApiGithubCredentials: (...args: unknown[]) => captureNewApiGithubMock(...args),
+  captureNewApiGithubCredentialsOnce: (...args: unknown[]) => captureNewApiGithubMock(...args),
 }));
 
 vi.mock('./assistedLogin/sites/linuxDoOAuthRelogin.js', () => ({
@@ -396,6 +405,44 @@ describe('autoRelogin', () => {
 
     expect(result?.accessToken).toBe('fresh-bearer');
     expect(captureHyperMock).not.toHaveBeenCalled();
+    expect(captureNewApiGithubMock).not.toHaveBeenCalled();
+    expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('replays the GitHub handshake for a GitHub-bound site other than Hyper', async () => {
+    // The rc New API builds standardize the flow, so `relogin: github` is not a
+    // Hyper-only marker: a site the operator never bound a password on is still
+    // restored over HTTP instead of costing a browser run.
+    captureNewApiGithubMock.mockResolvedValue({
+      status: 'captured',
+      credentials: {
+        accessToken: 'new_api_refresh=seekai',
+        platformUserId: 8245,
+        username: 'liumeijicui',
+        source: 'cookie',
+      },
+    });
+    adapterMock.listSessions.mockResolvedValue([]);
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account({
+      username: 'liumeijicui',
+      accessToken: 'new_api_refresh=dead',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        platformUserId: 8245,
+        relogin: { provider: 'github', boundAt: '2026-10-03T04:56:00.000Z' },
+      }),
+    }), { id: 47, name: 'SeekAi', url: 'https://seekai.cc', platform: 'new-api' }, { allowBrowserFallback: true });
+
+    expect(captureNewApiGithubMock).toHaveBeenCalledWith('https://seekai.cc');
+    expect(captureHyperMock).not.toHaveBeenCalled();
+    expect(result?.accessToken).toBe('new_api_refresh=seekai');
+    expect(result?.platformUserId).toBe(8245);
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      accessToken: 'new_api_refresh=seekai',
+      status: 'active',
+    }));
     expect(browserSessionMock).not.toHaveBeenCalled();
   });
 

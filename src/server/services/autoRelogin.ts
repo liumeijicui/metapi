@@ -312,9 +312,20 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
   // accounts bound through OAuth ever need them.
   const { captureHyperGithubCredentials, supportsHyperGithubLogin } =
     await import('./assistedLogin/sites/hyper.js');
-  if (!supportsHyperGithubLogin(site.url, 'github')) return null;
-
-  const captured = await captureHyperGithubCredentials();
+  let captured;
+  if (supportsHyperGithubLogin(site.url, 'github')) {
+    captured = await captureHyperGithubCredentials();
+  } else {
+    // Every other New API build that signs in through GitHub answers the same
+    // standardized flow (`/api/oauth/state` + `/oauth/github`), so a
+    // GitHub-bound account is not limited to the one site the handshake was
+    // first written for. Sites without that flow report it themselves and the
+    // caller falls through to the browser, as before.
+    const { captureNewApiGithubCredentials, supportsNewApiGithubOauth } =
+      await import('./assistedLogin/sites/newApiGithubOauthRelogin.js');
+    if (!supportsNewApiGithubOauth(site.url, 'github')) return null;
+    captured = await captureNewApiGithubCredentials(site.url);
+  }
   if (captured.status !== 'captured' || !captured.credentials?.accessToken) return null;
 
   // Persist before pruning, for the same reason as the browser path: the prune
@@ -323,6 +334,10 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
   const persisted = await persistCredential(account, {
     accessToken: captured.credentials.accessToken,
     platformUserId: captured.credentials.platformUserId ?? undefined,
+    // The marker, not `oauth`: the captured value is the site's own refresh
+    // cookie, and routing must keep using the managed token. Recording it also
+    // keeps the account retryable on the next expiry.
+    extraFields: buildReloginMarkerPatch(account.extraConfig, 'github', new Date().toISOString()),
   });
   const prune = await pruneAfterSignIn({
     account,

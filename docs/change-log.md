@@ -1,3 +1,29 @@
+### 28. GitHub 快捷登录站点改为纯 HTTP 自动重登（并登记 SeekAi 站点）
+
+- **类型**：功能泛化 + 站点登记
+- **需求来源**：本会话需求（“这是登录访问令牌 T0Zc… / 用户id 8245 / 地址 https://seekai.cc/profile”）
+- **背景**：`seekai.cc` 是 new-api `v1.0.0-rc.25`，签到开着（每次 $20），但站点开了 `turnstile_check`：签到接口对任何 HTTP 请求都回 `Turnstile token 为空`，且账号是 GitHub 快捷登录（`github_id` 已绑定、没有站点密码），所以只有「真实浏览器 + 已登录会话」这条路过得去。旧代码里 GitHub 的 HTTP 重登只对澎湃（`ai.hyper.nyc.mn`）一个站点开放，其余 GitHub 账号一旦会话失效就只能人工重绑。
+- **站点事实（实测）**：
+  - `/api/user/checkin` 走 HTTP 一定失败（Turnstile），`checkin_enabled: true`、`max_quota: 10000000`（$20/次）。
+  - 国内直连被 Cloudflare 403（`Attention Required`，`cf-ray` 落地 AMS），本地代理落地 HKG 正常 → 该站点记录开启 `useSystemProxy`。
+  - 站点暴露了标准化的 OAuth 流程：`POST /api/oauth/state {provider, intent}` 取 `flow_token` → GitHub `authorize` → 回调 `/oauth/github` 用 `Set-Cookie: new_api_refresh=…` 发会话。`kktoken.cc`（rc.25）、`api2.zdc.mom`（rc.41）同样支持，`ai.venlacy.com` / `sotamodel.net` 不支持（它们只报 Linux.do）。
+- **实现范围**：
+  - 新增 `assistedLogin/sites/newApiGithubOauthRelogin.ts`：把澎湃那段写死 origin 的握手抽成通用实现（`supportsNewApiGithubOauth()` 只判 URL 形状，`captureNewApiGithubCredentials(siteUrl)` 负责探测 `/api/status` 的 `github_oauth` / `github_client_id`、取 flow token、带导入的 GitHub 会话请求 authorize、校验回调 origin + `state` + `iss` 白名单、再换回 `new_api_refresh`）。错误语义与澎湃一致（`needs_provider_login` / `login_button_not_found` / `timeout`），并保留「用已存 GitHub 密码在托管浏览器里续期后重试一次」的自愈。
+  - `hyper.ts` 退化成薄封装（同样的导出与消息，行为不变），测试原样通过。
+  - `autoRelogin` 的 GitHub 分支：澎湃走原路径，其他站点走通用实现；成功后写入 `relogin: { provider: 'github', boundAt, lastReloginAt }` 标记（**不是 `oauth`**：拿到的是站点自己的 refresh cookie，路由必须继续用托管令牌）。
+  - 顺手把同样的标记发给 `kktoken.cc`（账号 #22）与 `api2.zdc.mom`（账号 #30），它们也是 GitHub 绑定、没有站点密码。
+- **登记结果（本机）**：站点 `#47 SeekAi`（`new-api`，`useSystemProxy: true`）+ 账号 `#33`（`credentialMode: session`，凭证为 GitHub OAuth 换来的 `new_api_refresh`，`checkinEnabled: true`，`relogin: github`）。
+- **验证**：
+  - 今日签到已通过浏览器兜底完成：`checkin_logs` 记 `success / 浏览器签到成功（已通过站点人机校验）/ reward 20`，余额 59.04 → 79.04（+$20），浏览器 `runs/site-47-…/run.log` 里可见点击与 `state=CHECKED`。
+  - 失效重登演练：把账号凭证改成死值并置 `status=expired` → `POST /api/accounts/33/balance` → 通用 GitHub 握手换回新 cookie、状态回 `active`、余额 79.04，并把被取代的会话退掉（`sessionHygiene.removed=1`）。
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过；重启 `metapi.service` 正常；`npx vitest run`：2951 用例中 2939 通过、4 失败（与既有环境性失败一致）。
+  - 新增单测 7 例：`newApiGithubOauthRelogin.test.ts` 6 例（URL 形状、捕获 cookie 且不漏 provider cookie、拒绝可疑回调、缺会话/未开放 GitHub/非法地址的判定），`autoRelogin.test.ts` 1 例（非澎湃站点的 `relogin: github` 走 HTTP 握手并落库）。
+- **主要文件**：
+  - `src/server/services/assistedLogin/sites/newApiGithubOauthRelogin.ts`
+  - `src/server/services/assistedLogin/sites/hyper.ts`
+  - `src/server/services/autoRelogin.ts`
+- **状态**：已完成
+
 ### 27. 新增 X-API（x-api.cfd）平台适配器并登记站点
 
 - **类型**：新平台接入
