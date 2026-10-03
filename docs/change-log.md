@@ -1,3 +1,26 @@
+### 33. 登记「TOM&JERRY」（lazydaily.de5.net）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“登录令牌 Y4/YzGbLGFFYpg9rJF5FBBMarrL+QA== 网址 https://lazydaily.de5.net/profile id:108 帮我登记这个网站”）
+- **站点事实（实测）**：
+  - new-api `v1.0.0-rc.21`，站名「TOM&JERRY」；`checkin_enabled: true`、`turnstile_check: false`、`email_verification: false`；`linuxdo_oauth: true`、`github_oauth: false`、`password_login_enabled: true`，但 `register_enabled/password_register_enabled` 均为 `false` 且 `linuxdo_minimum_trust_level: 2`（**注册门槛：Linux.do 信任等级 2**）。
+  - **直连可用**（无 CF 盾），站点未开系统代理。
+  - 账号 `linux_do_id = 367936`（与本机 Linux.do 账号一致）；签到奖励区间 `min_quota 500000 ~ max_quota 2500000`（约 $1~$5），账号可用分组为 `default` 与 `vip`。
+  - `/api/token/` 列表接口正常（Bearer + `New-Api-User` 兼容头），站上已有现成令牌 `li`（默认分组、无限额度），因此**无需新建**；本次排查**刻意未调用 `/api/user/token`**，规避上一站（HongShi）那种「一调就轮换令牌」的坑。
+- **登记结果（本机）**：
+  - 站点 `#52 TOM&JERRY`（`new-api`，未开系统代理）+ 账号 `#38`（用户名 `3145215575`、`platformUserId 108`、`session` 模式、`checkinEnabled: true`）。
+  - 令牌 `account_tokens #49 li`（`token_group = default`、`value_status = ready`、`is_default = 1`，由上游同步发现，非 metapi 新建）；模型 7 个 / 路由 6 条（`grok-4.5`、`grok-build-0.1`、`gpt-5.5`、`gpt-5.6-luna/sol/terra`）。
+- **验证**：
+  - 签到：`POST /api/checkin/trigger/38` → `{"success":true,"message":"签到成功","reward":"3.947302"}`，余额 `$66.50 → $70.45`；`checkin_logs #1759/#1771` 记录成功；上游 `checked_in_today: true`。
+  - 代理链路：`grok-4.5` 连续 5 次请求经 metapi 全部 `200 success`。
+- **已知情况（站点侧，非配置问题）**：**该站当前所有模型上游都是挂的**，与站内公告一致（“中午grok短暂失活…gpt依旧不可用，等我！！！”）。逐模型直连上游实测：
+  - `grok-4.5` / `grok-build-0.1` → `auth_unavailable: no auth available (providers=xai)`；
+  - `gpt-5.5` / `gpt-5.6-luna` → `auth_unavailable (providers=codex)`；
+  - `gpt-5.6-sol` / `gpt-5.6-terra` → `Personal access token is inactive`。
+  除 `grok-build-0.1` 外，这些模型名同时由 7~8 个其它账号提供，因此**不影响**下游可用性：metapi 的 `PROXY_MAX_CHANNEL_ATTEMPTS`（默认 3）会在命中账号 38 第一次失败后自动换渠道，并给该 channel 写冷却（实测 `route_channels #704/#705` 已 `cooldown_until` 置位）。等站点号池恢复后无需任何操作即可自动恢复。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成（站点侧上游恢复后即可正常出量）
+
 ### 32. 登记「HongShi API」（api.hongshi.cc.cd）
 
 - **类型**：站点登记（无代码改动）
