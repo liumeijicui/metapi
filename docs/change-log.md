@@ -1,3 +1,23 @@
+### 32. 登记「HongShi API」（api.hongshi.cc.cd）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“用户id 308 登录令牌 cCcTZvtR+… 有签到，帮我配置登录一下” + “网址是 https://api.hongshi.cc.cd/profile”）
+- **站点事实（实测）**：
+  - new-api 系（`/api/status` 报 `HongShi API`，`version` 被抹成 `v0.0.0`），`checkin_enabled: true`、`turnstile_check: false`、`email_verification: false`、`linuxdo_oauth/github_oauth/password_login` 均开启，`quota_per_unit: 500000`；**直连可用**（无 CF 盾），因此站点未开系统代理。
+  - 签到：`GET /api/user/checkin` 报 `enabled: true`、奖励区间 `min_quota 500000 ~ max_quota 2500000`（约 $1~$5），账号 `linux_do_id = 367936`（与本机 Linux.do 账号一致）。
+  - **该站 `GET /api/user/token` 会「轮换」访问令牌**：每调用一次就返回一个新值，旧值立刻失效。本次排查时正是这一次无意调用，把用户给的原始令牌 `cCcTZvtR…` 弄失效了（已改用轮换后的新值）。已确认 metapi 代码中**不存在**对该接口的调用（`grep "user/token" src/` 为空），所以凭证在 metapi 手里不会被自己转掉；但**今后手工排查该站时绝不能再调 `/api/user/token`**。
+- **账号与路由**：
+  - 站点 `#51 HongShi API`（`new-api`，未开系统代理）+ 账号 `#37`（用户名 `3145215575`、`platformUserId 308`、凭证为访问令牌的 `session` 模式、`checkinEnabled: true`）。
+  - 上游默认分组（`default`）能用的模型已经很少：站点广告 214 个模型，探测后只有 14 个进路由，其中实测只有 `openai/gpt-oss-20b` 真能出结果，其余多为 `has reached its end of life` 或 `Function '…': Not found for account …`（站点侧渠道已下线）。
+  - 该用户的账号还能选「CF百万请求（每日）」分组，于是**在站点侧另建了一个该分组的令牌并纳入 metapi 管理**：`account_tokens #48 metapi-cf`（`token_group = CF百万请求（每日）`），探测出 **61 个可用模型**（`@cf/openai/gpt-oss-20b`、`@cf/meta/llama-3.3-70b-instruct-fp8-fast`、`@cf/qwen/qwen3-30b-a3b-fp8` 等）。连同默认分组的 14 条，账号共 **75 条路由**。
+  - 令牌自动创建/多令牌同步走的是既有入口 `POST /api/account-tokens/sync/:accountId`（本次返回 `created 1 / updated 1 / total 2`），无需改动代码。
+- **验证**：
+  - 签到：`POST /api/checkin/trigger/37` → `{"success":true,"message":"签到成功","reward":"3.506312"}`；上游 `checked_in_today: true`；余额由 `$7.78` → `$11.28`；`checkin_logs #1758` 记录成功。
+  - 真实调用：经 metapi 请求 `@cf/meta/llama-3.3-70b-instruct-fp8-fast` 与 `@cf/openai/gpt-oss-20b` 均 `200 success`（`proxy_logs #33/#34`，account 37）。
+- **注意**：默认分组里那 13 个已下线模型仍留在路由里，首次被选中会失败一次，之后由既有的失败退避机制避开；这是站点侧渠道下线，不是配置问题。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 31. 登记「Loveyy 公益站」（ai.loveyy.qzz.io）
 
 - **类型**：站点登记（无代码改动）
