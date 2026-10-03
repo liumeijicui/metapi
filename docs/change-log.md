@@ -1,3 +1,24 @@
+### 36. 登记「薄荷 API」（x666.me，Futureppo/new-api 分支）
+
+- **类型**：配置
+- **需求来源**：本会话需求（“帮我登记这个站，登录秘钥 … 用户id 28720 … 支持 linuxdo 登录，签到是外部的提个转轮盘签到”）
+- **站点事实（实测）**：`https://x666.me`，`system_name` 为「薄荷 API」，`version` 为 `custom-20260921-c856c7c`，是 `Futureppo/new-api` 的 fork；`checkin_enabled=false`（站内没有签到）、`linuxdo_oauth=true`（`linuxdo_client_id=4OtAotK6cp4047lgPD4kPXNhWRbRdTw3`、`linuxdo_minimum_trust_level=0`）、`github_oauth=false`、`turnstile_check=false`、`QuotaPerUnit=500000`、`price/usd_exchange_rate=7.3`。**直连可用**（无 CF 盾），未开系统代理。
+- **登记结果**：
+  - 站点 **#54 薄荷 API**（平台 `new-api`，未开系统代理，`externalCheckinUrl` 暂空）。
+  - 账号 **#40**：用户名 `3145215575`、`platformUserId 28720`、登录方式为访问令牌（`credentialMode: session`）、`linux_do_id 367936`、`group level3`、余额约 **$59.40**（`quota 29699750 / used 125250`）；`checkinEnabled: false`。
+  - 令牌：站上已有现成密钥 `li`（id 70592，`token_group = coding-plus`，无限额度），直接接管，无需新建。
+  - 模型 **6 个 / 路由 6 条**，已建好。
+  - 建号时会话清理结果 `no-other-session`（该站没有多余会话可删）。
+- **外部轮盘签到（未完成项）**：用户说明该站的签到在**站外**、是转轮盘形式，但**地址未知**，因此本轮没有写入 `externalCheckinUrl`。已做的排查：
+  - 站点 `/api/status` 的全部字段里**没有任何轮盘/签到相关地址或开关**；站点自身也确认 `checkin_enabled=false`。
+  - 前端 `/assets/index-CUGEGy4k.js`（8.6 MB）里没有 `wheel`/`spin`/`lottery` 的签到实现（`draw`/`spin` 的命中都是绘图库误报）；SPA 也没有 `/wheel`、`/lottery`、`/checkin`、`/spin`、`/lucky`、`/daily` 等路由。
+  - 站内 `chats` 里唯一的外部链接是 `https://check.crond.dev/`（标题「API CHECK」，是模型可用性检测工具，与轮盘无关）；站点头像托管在 `i.111666.best`（=「16图床」，同样无关）。
+  - 按「签到/轮盘/抽奖」等猜测的子域（`x666.me`、`111666.best`、`crond.dev` 下）**全部 NXDOMAIN**，没有命中。
+- **教训（避免以后再踩）**：该站对**任意不存在的路径**都返回 `{"message":"Unauthorized, insufficient privileges","success":false}`，响应长得像“接口存在但没权限”，**不能用它来判断接口是否存在**——第 21 条那种「按响应推断路由」的做法在这个站上不成立。
+- **待办**：拿到外部轮盘签到站地址后，确认它的登录方式（若直接复用 x666 会话，走 `externalCheckinUrl` + cookie 绑定即可），再接入签到流程。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：主体已完成，外部轮盘签到待补充地址
+
 ### 35. 修复 Linux.do 自动重登取不到 state（rc 版接口），并批量启用
 
 - **类型**：缺陷修复 + 配置
