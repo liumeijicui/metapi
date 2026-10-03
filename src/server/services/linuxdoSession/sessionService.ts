@@ -46,6 +46,14 @@ export function captureSiteCredentials(input: { siteId: number }) {
   return linuxdoSession.captureSiteCredentials(input);
 }
 
+/**
+ * Reads the credential a Linux.do handshake just established in the managed
+ * browser, for flows that drive the sign-out/sign-in themselves.
+ */
+export function harvestLinuxDoSiteCredential(siteUrl: string) {
+  return linuxdoSession.harvestSiteCredential(siteUrl);
+}
+
 export function getManagedBrowserProfileDir(): string {
   return linuxdoSession.browser.getBrowserProfileDir();
 }

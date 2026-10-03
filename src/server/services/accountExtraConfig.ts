@@ -49,6 +49,10 @@ type AccountExtraConfig = {
     provider?: unknown;
     [key: string]: unknown;
   };
+  relogin?: {
+    provider?: unknown;
+    [key: string]: unknown;
+  };
   autoRelogin?: AutoReloginConfig;
   sub2apiAuth?: Sub2ApiAuthConfig;
   sub2apiSubscription?: Sub2ApiSubscriptionConfig;
@@ -182,6 +186,46 @@ export function getCredentialModeFromExtraConfig(extraConfig?: ExtraConfigInput)
 export function getOauthProviderFromExtraConfig(extraConfig?: ExtraConfigInput): string | undefined {
   const parsed = parseExtraConfig(extraConfig);
   return normalizeNonEmptyString(parsed.oauth?.provider);
+}
+
+/**
+ * Provider whose sign-in the browser driver can replay for this account.
+ *
+ * Deliberately *not* `oauth.provider`, which answers a different question:
+ * whether the stored credential is itself the upstream credential. That is
+ * true only when the site trades it for a bearer (a `new_api_refresh` cookie,
+ * say). A fork whose management cookie is a plain `session=` keeps its models
+ * behind a separate token, so writing `oauth` for it sends the router into a
+ * cookie the upstream answers 401 to: the account looks signed in while every
+ * model it serves fails. The marker here only tells `autoRelogin` that a
+ * browser handshake is worth trying, and leaves routing untouched.
+ */
+export function getReloginProviderFromExtraConfig(extraConfig?: ExtraConfigInput): string | undefined {
+  const parsed = parseExtraConfig(extraConfig);
+  return normalizeNonEmptyString(parsed.relogin?.provider);
+}
+
+/**
+ * Patch recording that a browser sign-in is available for `provider`.
+ *
+ * `boundAt` is preserved across re-logins: it dates the first link between the
+ * account and the provider, while `lastReloginAt` dates the newest handshake.
+ */
+export function buildReloginMarkerPatch(
+  extraConfig: ExtraConfigInput,
+  provider: string,
+  nowIso: string,
+): { relogin: Record<string, unknown> } {
+  const parsed = parseExtraConfig(extraConfig);
+  const existing = isRecord(parsed.relogin) ? parsed.relogin : {};
+  return {
+    relogin: {
+      ...existing,
+      provider,
+      boundAt: normalizeNonEmptyString(existing.boundAt) ?? nowIso,
+      lastReloginAt: nowIso,
+    },
+  };
 }
 
 function getOauthProvider(input?: OauthProviderInput): string | undefined {

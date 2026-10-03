@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildReloginMarkerPatch,
   buildStoredSub2ApiSubscriptionSummary,
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
   getPlatformUserIdFromExtraConfig,
   getProxyUrlFromExtraConfig,
+  getReloginProviderFromExtraConfig,
   getUseSystemProxyFromExtraConfig,
   resolveProxyUrlFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
@@ -195,6 +197,40 @@ describe('accountExtraConfig', () => {
       apiToken: 'sk-default',
       extraConfig: JSON.stringify({ credentialMode: 'session' }),
     })).toBe(true);
+  });
+
+  it('keeps a Linux.do relogin marker out of the routing decision', () => {
+    // Lanln's fork hands out a plain `session=` cookie that its /v1 answers 401
+    // to, so the account records its Linux.do link under `relogin`: the session
+    // keeps its management role and the models stay behind the managed token.
+    const sessionAccount = {
+      accessToken: 'session=dead',
+      apiToken: 'sk-managed',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        relogin: { provider: 'linuxdo', boundAt: '2026-10-03T01:34:32.264Z' },
+      }),
+    };
+
+    expect(getReloginProviderFromExtraConfig(sessionAccount.extraConfig)).toBe('linuxdo');
+    expect(hasOauthProvider(sessionAccount)).toBe(false);
+    expect(requiresManagedAccountTokens(sessionAccount)).toBe(true);
+    expect(supportsDirectAccountRoutingConnection(sessionAccount)).toBe(false);
+  });
+
+  it('keeps boundAt while dating the newest relogin', () => {
+    const patch = buildReloginMarkerPatch(
+      JSON.stringify({ relogin: { provider: 'linuxdo', boundAt: '2026-01-02T03:04:05.000Z' } }),
+      'linuxdo',
+      '2026-10-03T01:35:45.874Z',
+    );
+
+    expect(patch.relogin).toEqual({
+      provider: 'linuxdo',
+      boundAt: '2026-01-02T03:04:05.000Z',
+      lastReloginAt: '2026-10-03T01:35:45.874Z',
+    });
+    expect(getReloginProviderFromExtraConfig(patch)).toBe('linuxdo');
   });
 
   it('recognizes structured oauth provider columns even when extraConfig omits oauth.provider', () => {

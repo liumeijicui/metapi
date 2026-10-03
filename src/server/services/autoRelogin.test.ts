@@ -14,6 +14,8 @@ function tokenWithSid(sid: string): string {
 const decryptPasswordMock = vi.fn();
 const browserSessionMock = vi.fn();
 const captureHyperMock = vi.fn();
+const linuxDoReloginMock = vi.fn();
+const harvestLinuxDoMock = vi.fn();
 
 const selectGetMock = vi.fn();
 const updateSetMock = vi.fn();
@@ -60,6 +62,14 @@ vi.mock('./assistedLogin/sites/hyper.js', () => ({
   captureHyperGithubCredentials: (...args: unknown[]) => captureHyperMock(...args),
 }));
 
+vi.mock('./assistedLogin/sites/linuxDoOAuthRelogin.js', () => ({
+  reloginWithLinuxDo: (...args: unknown[]) => linuxDoReloginMock(...args),
+}));
+
+vi.mock('./linuxdoSession/sessionService.js', () => ({
+  harvestLinuxDoSiteCredential: (...args: unknown[]) => harvestLinuxDoMock(...args),
+}));
+
 const SITE = {
   id: 32,
   name: 'motomoto',
@@ -99,8 +109,11 @@ describe('autoRelogin', () => {
     adapterMock.revokeSession.mockReset();
     browserSessionMock.mockReset();
     captureHyperMock.mockReset();
+    linuxDoReloginMock.mockReset();
+    harvestLinuxDoMock.mockReset();
     selectGetMock.mockReset();
     updateSetMock.mockReset();
+    vi.unstubAllGlobals();
     selectGetMock.mockReturnValue(undefined);
   });
 
@@ -384,5 +397,80 @@ describe('autoRelogin', () => {
     expect(result?.accessToken).toBe('fresh-bearer');
     expect(captureHyperMock).not.toHaveBeenCalled();
     expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('replays the Linux.do handshake and keeps it out of the routing marker', async () => {
+    // A fork whose management cookie is a plain `session=` cannot serve /v1 with
+    // it, so the account is recorded under `relogin` rather than `oauth`: the
+    // router has to keep handing out the managed token this site's models need.
+    linuxDoReloginMock.mockResolvedValue({ ok: true, platformUserId: 6597, url: 'https://lanln.example/' });
+    harvestLinuxDoMock.mockResolvedValue({
+      accessToken: 'session=fresh',
+      platformUserId: 6597,
+      source: 'cookie',
+    });
+    adapterMock.listSessions.mockResolvedValue([]);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      json: async () => ({ data: { linuxdo_client_id: 'cid-1' } }),
+    })));
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        username: '3145215575',
+        accessToken: 'session=dead',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          platformUserId: 6597,
+          relogin: { provider: 'linuxdo', boundAt: '2026-10-03T01:34:32.264Z' },
+        }),
+      }),
+      { id: 45, name: 'Lanln', url: 'https://lanln.example', platform: 'new-api' },
+    );
+
+    expect(linuxDoReloginMock).toHaveBeenCalledWith(expect.objectContaining({
+      baseUrl: 'https://lanln.example',
+      clientId: 'cid-1',
+      expectedUserId: 6597,
+      hosts: ['lanln.example'],
+      callbackPath: '/api/oauth/linuxdo',
+    }));
+    expect(harvestLinuxDoMock).toHaveBeenCalledWith('https://lanln.example');
+    expect(result?.accessToken).toBe('session=fresh');
+    expect(result?.platformUserId).toBe(6597);
+
+    // The prune that follows the sign-in writes the account row again, so the
+    // credential write is found by what it carries rather than by position.
+    const written = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((updates) => updates.accessToken === 'session=fresh');
+    expect(written).toBeTruthy();
+    expect(written?.status).toBe('active');
+    const extraConfig = JSON.parse(String(written?.extraConfig));
+    expect(extraConfig.relogin).toEqual(expect.objectContaining({ provider: 'linuxdo' }));
+    expect(extraConfig.oauth).toBeUndefined();
+    expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves the account alone while the Linux.do cooldown is running', async () => {
+    // A handshake takes minutes and the same account is retried by both the
+    // hourly balance refresh and the daily check-in; without the cooldown the
+    // second caller starts a run the first one is already paying for.
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        accessToken: 'session=dead',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          relogin: { provider: 'linuxdo' },
+          browserRelogin: { attemptedAt: new Date().toISOString() },
+        }),
+      }),
+      { id: 45, name: 'Lanln', url: 'https://lanln.example', platform: 'new-api' },
+    );
+
+    expect(result).toBeNull();
+    expect(linuxDoReloginMock).not.toHaveBeenCalled();
+    expect(updateSetMock).not.toHaveBeenCalled();
   });
 });

@@ -22,9 +22,11 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
 import {
+  buildReloginMarkerPatch,
   getAutoReloginConfig,
   getOauthProviderFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
+  getReloginProviderFromExtraConfig,
   mergeAccountExtraConfig,
   parseExtraConfig,
   resolveProxyUrlFromExtraConfig,
@@ -295,9 +297,16 @@ async function pruneAfterSignIn(params: {
  * Only the sites that expose such a handshake over plain HTTP are listed, and
  * the account has to carry the provider it used, so a GitHub-bound account is
  * never asked for a Linux.do login.
+ *
+ * The provider may sit under `oauth` or under the routing-neutral `relogin`
+ * marker; `getReloginProviderFromExtraConfig` documents why a Linux.do link is
+ * recorded in the second slot.
  */
 async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
-  if (getOauthProviderFromExtraConfig(account.extraConfig) !== 'github') return null;
+  const provider = getOauthProviderFromExtraConfig(account.extraConfig)
+    ?? getReloginProviderFromExtraConfig(account.extraConfig);
+  if (provider === 'linuxdo') return tryLinuxDoRelogin(account, site);
+  if (provider !== 'github') return null;
 
   // Imported lazily: the site modules pull in the browser/HTTP stacks, and only
   // accounts bound through OAuth ever need them.
@@ -326,6 +335,100 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
     accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
     extraConfig: await persistExtraFields(account, prune.extraFields),
   };
+}
+
+/** Default callback route new-api forks answer the Linux.do handshake on. */
+const LINUXDO_CALLBACK_PATH = '/api/oauth/linuxdo';
+
+/**
+ * Signs the account back in through Linux.do.
+ *
+ * An account bound with 快捷登录 has no password and no GitHub binding, so the
+ * only way back in is the handshake the operator performed by hand: sign out of
+ * the site, then authorize again. `connect.linux.do` refuses plain HTTP clients
+ * (the state is bound to a browsing session and the consent page is behind
+ * Cloudflare), so this runs in the managed browser.
+ *
+ * Two steps, and both matter: the driver performs the handshake and proves the
+ * right account landed, and the harvest turns the browser session it created
+ * into a credential the row can actually send. Skipping the harvest would leave
+ * a signed-in browser with a dead row, which is the state this exists to fix.
+ */
+async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+  let host = '';
+  try {
+    host = new URL(site.url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+
+  // The handshake runs a real browser and takes minutes, and the relays that
+  // need it also throttle hard. Without this, every failed balance refresh would
+  // start another run and keep the account rate-limited instead of reviving it.
+  if (isBrowserReloginCoolingDown(account.extraConfig)) return null;
+  await recordBrowserReloginAttempt(account);
+
+  const clientId = await readLinuxDoClientId(site.url);
+  const expectedUserId = getPlatformUserIdFromExtraConfig(account.extraConfig);
+
+  // Imported lazily: the driver pulls in the browser stack, and only
+  // Linux.do-bound accounts ever reach it.
+  const { reloginWithLinuxDo } = await import('./assistedLogin/sites/linuxDoOAuthRelogin.js');
+  const relogin = await reloginWithLinuxDo({
+    baseUrl: site.url,
+    clientId,
+    expectedUserId,
+    hosts: [host],
+    callbackPath: LINUXDO_CALLBACK_PATH,
+    siteLabel: host,
+  });
+  if (!relogin.ok) return null;
+
+  const { harvestLinuxDoSiteCredential } = await import('./linuxdoSession/sessionService.js');
+  const captured = await harvestLinuxDoSiteCredential(site.url);
+  if (!captured?.accessToken) return null;
+
+  const nowIso = new Date().toISOString();
+  const persisted = await persistCredential(account, {
+    accessToken: captured.accessToken,
+    platformUserId: captured.platformUserId ?? expectedUserId,
+    // The marker, not `oauth`: the harvested credential is the fork's
+    // management cookie, and routing must keep using the managed token.
+    extraFields: buildReloginMarkerPatch(account.extraConfig, 'linuxdo', nowIso),
+  });
+  const prune = await pruneAfterSignIn({
+    account,
+    site,
+    accessToken: persisted.accessToken,
+    platformUserId: persisted.platformUserId,
+  });
+  return {
+    ...persisted,
+    accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+    extraConfig: await persistExtraFields(account, prune.extraFields),
+  };
+}
+
+/**
+ * Reads the OAuth client id the fork advertises, if the edge lets us.
+ *
+ * Optional by design: the driver resolves it inside the page when this comes
+ * back empty, and a shielded `/api/status` is exactly the case that fallback is
+ * for.
+ */
+async function readLinuxDoClientId(siteUrl: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${siteUrl.replace(/\/+$/, '')}/api/status`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload: any = await res.json();
+    const value = payload?.data?.linuxdo_client_id;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

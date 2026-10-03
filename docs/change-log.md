@@ -1,3 +1,46 @@
+### 24. Lanln 的 Linux.do 自动重登（含「重登标记不得影响路由」修复）+ New API 会话有效期调研
+
+- **类型**：功能实现 + 缺陷修复 + 源码调研
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接（关联第 23 条的 Lanln 登记）
+- **目标**：
+  - 给 `https://ai.venlacy.com`（站点 `#45` / 账号 `#31`）配上「Linux.do 快捷登录」的自动重登，让凭据过期后不必人工再登一次。
+  - 回答「New API 的会话过期时间是多少天、源码里写没写」。
+- **实现范围**：
+  - **重登链路**：`tryOauthRelogin` 增加 `linuxdo` 分支 → `tryLinuxDoRelogin`：
+    - 复用 Any Router 那套共享驱动 `reloginWithLinuxDo`（先退站再授权，`hosts` 只放本站域名、回调用 `/api/oauth/linuxdo`），并用 15 分钟冷却（`extraConfig.browserRelogin.attemptedAt`）挡掉「余额刷新 + 定时签到」在同一小时内各起一次浏览器跑批。
+    - `clientId` 先读 `/api/status` 的 `linuxdo_client_id`（被盾挡住就交给驱动在页面里自己解析）。
+    - 驱动只负责「登进去」，凭据要靠新增的 `harvestSiteCredential()` / `harvestLinuxDoSiteCredential()` 从刚登录的浏览器里读回来——否则会出现「浏览器已登录、账号行里还是死密钥」。读完 `parkSiteTab` 把标签页停住，避免中继站 SPA 把刚展示给我们的密钥又轮换掉。
+  - **重登标记写在 `relogin` 而不是 `oauth`（关键修复）**：该 fork 的管理 cookie 是裸 `session=`，它的 `/v1/*` 只认 `Authorization: Bearer`（实测 `Cookie: session=…` 打 `/v1/models` 得 401，而令牌 `C5XJ…Lemx` 得 200）。而 `extraConfig.oauth.provider` 在路由里是「这条凭据本身就是上游凭据」的声明：
+    - `resolveChannelTokenValue()` 见到它就会把 `accessToken`（管理用 session）当成上游凭据发给 `/v1`；
+    - `requiresManagedAccountTokens()` 见到它就不再使用站点上代管令牌。
+    - 结果：账号显示 `healthy`、余额和签到都正常，但**它提供的所有模型都会 401**。改成 `relogin: { provider, boundAt, lastReloginAt }` 后路由语义不变，模型继续走代管令牌。实测路由解析由「通道 `tokenId=null`、凭据取 `session=…`」变为「通道绑定 `tokenId=26`（`C5XJ…Lemx`）」，该令牌直连 `/v1/models` 返回 200。
+    - `getOauthProviderFromExtraConfig()` 与 `getReloginProviderFromExtraConfig()` 并列读取，GitHub 那类仍写 `oauth` 的账号行为不变；`buildReloginMarkerPatch()` 保留首次 `boundAt`、只更新 `lastReloginAt`。
+  - **New API 会话有效期（源码 `QuantumNous/new-api`，HEAD `1a4166d`，2026-10-01）**：
+    - `service/auth_token.go:22` `LoginSessionTTL = 30 * 24 * time.Hour` → **会话（refresh token / 服务端 session）有效期 30 天**。
+    - `service/auth_token.go:20` `AccessTokenTTL = 15 * time.Minute`；`RefreshReplayWindow = 30 * time.Second`；`SecurityProofTTL = time.Minute`。
+    - 以上均为**编译期常量**，没有 env / 配置项可调（全仓仅定义处一处赋值）。
+    - **不是滑动续期**：`RefreshLoginSession()` 只校验 `session.ExpiresAt`，`RotateUserSessionRefresh()` 只换 refresh 值而不延长 `ExpiresAt`，所以 30 天是绝对上限，到期必须重新登录一次——这正是本条的自动重登要兜住的场景。
+    - 并发会话数上限是可配置的：`common/constants.go` 的 `DefaultUserSessionActiveLimit = 50`、`DefaultUserSessionIssuanceLimit = 100` 等，env 名为 `USER_SESSION_ACTIVE_LIMIT` / `USER_SESSION_ISSUANCE_LIMIT` / `USER_SESSION_REVOKED_RETENTION_DAYS`。
+    - 说明：上游主线已无名为 `session` 的 cookie（用 `new_api_refresh`），Lanln 的 `session=` 是该 fork 自己的机制，所以「管理 cookie 不能当上游凭据」这条在它身上才成立。
+- **主要文件**：
+  - `src/server/services/autoRelogin.ts`（含 `.test.ts`）
+  - `src/server/services/accountExtraConfig.ts`（含 `.test.ts`）
+  - `src/server/services/assistedLogin/sessionService.ts`
+  - `src/server/services/linuxdoSession/sessionService.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过；`systemctl restart metapi` 后接口正常。
+  - 新增单测：`autoRelogin.test.ts`（17 例，新增「Linux.do 重登并写 `relogin` 而非 `oauth`」「冷却期内不再起浏览器跑批」）、`accountExtraConfig.test.ts`（20 例，新增「`relogin` 标记不参与路由判定」「`boundAt` 保留、`lastReloginAt` 更新」）。
+  - `npx vitest run`：2932 用例中 2920 通过、4 失败，失败项与前几条完全一致（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus，均为既有环境性失败）。
+  - 实机（站点 `#45` / 账号 `#31`，构建后重启再跑）：
+    - 自动重登：`tryAutoRelogin` 返回 OK，`session=` 凭据轮换（`MTc5MDk5MTMzMX…` → `MTc5MDk5NzE2OX…`），用新凭据读余额成功 `$286.853862`。
+    - 标记落盘：`relogin.boundAt` 保持 `01:34:32Z`，`lastReloginAt` 更新为 `03:12:52Z`，`oauth` 不存在。
+    - 管理链路不受影响：`POST /api/accounts/31/balance` → 200（`$286.853862`），`POST /api/checkin/trigger/31` → 「今日已签到」。
+    - 路由：`previewSelectedChannel('dall-e-3')` → 站点 Lanln / 账号 `#31` / 通道绑定 `tokenId=26`；该令牌直连 `GET /v1/models` 返回 200（28 个模型），而 `Cookie: session=…` 返回 401。
+    - 站点后端本身仍有 `HTTP 522`（`POST /v1/chat/completions` 时而 `You have reached the concurrent request limit`、时而 522），属站点侧状态，与本条无关。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ### 23. Lanln（ai.venlacy.com）登记 + 支持「列表脱敏、逐条查看」的密钥
 
 - **类型**：功能实现 + 站点登记

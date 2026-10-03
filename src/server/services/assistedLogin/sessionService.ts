@@ -814,6 +814,34 @@ export function createAssistedLoginSession(input: {
     }
   }
 
+  /**
+   * Reads the credential a sign-in performed outside this module left behind.
+   *
+   * Some flows cannot use `captureSiteCredentials`: the Linux.do OAuth driver
+   * signs the profile *out* of the site first (a handshake started while a
+   * session is active is read as a bind and refused), so clicking the entry
+   * button again would undo the work. What that driver needs is the second half
+   * only — turn the browser session it just established into a credential the
+   * account row can hold.
+   *
+   * The tab is parked afterwards for the reason `parkSiteTab` documents: a
+   * relay SPA left open rotates the very secret it is showing us.
+   */
+  async function harvestSiteCredential(siteUrl: string): Promise<CapturedCredentials | null> {
+    const context = await browser.ensureManagedBrowserContext();
+    const page = await getSitePage(context);
+    try {
+      await page.bringToFront().catch(() => undefined);
+      await page.goto(siteUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
+        .catch(() => undefined);
+      await settle(page);
+      if (looksSignedOut(page.url())) return null;
+      return await harvestFromPage(page);
+    } finally {
+      await parkSiteTab(page);
+    }
+  }
+
   async function captureSiteCredentials(input: { siteId: number; forceLogin?: boolean }): Promise<CaptureResult> {
     const site = await db
       .select()
@@ -897,6 +925,7 @@ export function createAssistedLoginSession(input: {
     getLoginState,
     openLoginWindow,
     captureSiteCredentials,
+    harvestSiteCredential,
     updateSiteCredentialCookie,
   };
 }
