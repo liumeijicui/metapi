@@ -1,3 +1,32 @@
+### 25. 修复「抓错凭据把会话刷满」——luckyg 账号被 AUTH_SESSION_LIMIT 锁死的根因
+
+- **类型**：缺陷修复 + 事故记录
+- **需求来源**：本会话需求（“lucky 的网站被你一直登录导致会话超了，我也登录不了，删除不了会话”）
+- **问题（已定位到代码）**：
+  - 站点 `https://luckyg.131518.xyz`（站点 `#16` / 账号 `#4`）是较新的 new-api：登录返回**15 分钟的 access JWT** + **可轮换的 `new_api_refresh` cookie**，服务端为每次登录建一条会话。
+  - 我们 09-29 之前抓凭据走的是浏览器，而 `harvestFromPage` 是**先看 localStorage、后看 cookie**。该站点把 access JWT 放在页面存储里，于是账号行存下的是那个 15 分钟 JWT，真正耐用的 `new_api_refresh` cookie 被跳过。
+  - 后果链：JWT 15 分钟即失效 → 每轮巡检（每小时）`HTTP 401 Unauthorized, not logged in` → 触发重登 → **每次重登在站点新增一条会话**，而我们从没持有能用来清理的会话凭据。10-01 11:00 之后 24 次重登把活跃会话堆到站点上限，**10-02 01:13 起站点开始回 `409 AUTH_SESSION_LIMIT`**。
+  - 站点侧语义（源码 `QuantumNous/new-api`，HEAD `1a4166d`）：`service/auth_session.go` 的 `createLoginSession()` 在 `CountActiveUserSessions(userID) >= common.UserSessionActiveLimit`（默认 50，站点可配）时**直接拒绝发新会话**（409 `AUTH_SESSION_LIMIT`），没有“踢掉最旧一条”的兜底；会话有效期 `LoginSessionTTL = 30 天`且**不是滑动续期**。所以上限一旦撞到，任何登录方式（密码 / 验证码 / Passkey / OAuth 都走同一个 `setupLogin`）都进不去，用户本人也无法登录去清理。
+- **当前事实（如实记录，未解决）**：
+  - 本地**不存在**任何可用的 luckyg 凭据。已排查：`hub.db`（只有两条已过期 JWT，sid `a5238573…` / `e71cf29a…`）、`hub.db-wal`、全部浏览器 profile 的 cookie 库（`github-browser`/`chinahk-browser`/`linuxdo-browser`/`checkin-browser/*`，均无 `131518` 记录）、各 profile 的 Local Storage、签到站点的 profile（`checkin-browser/site-16` 的 cookie 库为空，且其 `run.log` 记录登录从未成功）。
+  - 因此**无法**从服务端调用 `DELETE /api/user/sessions/:sid` 或 `POST /api/user/sessions/revoke-others` 去清理会话——这两个路由都需要一个有效会话。
+  - 恢复途径只有两条：① 用**仍持有该站 refresh cookie 的那台设备/浏览器**直接打开站点（refresh 流程不检查会话上限，会自动续上），再走「个人设置 → 会话管理 → 退出其他设备」；② 由站长把该账号的 `auth_version` 提一版（等价于“下线全部设备”）。站点 `email_verification=false`，所以“忘记密码自助重置”这条路走不通。
+- **实现范围（防止再发生）**：
+  - 新增纯函数 `selectHarvestedCredential()` 并让 `harvestFromPage()` 走它，抓取优先级改为：**`new_api_refresh` cookie ＞ 页面存储里的 token ＞ 其他 session cookie**。
+    - 只把 `new_api_refresh` 提到存储之前：其它站点维持原顺序（存储优先），避免改变 SnowAPI 这类「必须带整份 cookie 串过盾」之外的行为。
+    - 该 cookie 是轮换密钥，适配器本来就会拿它换 access token（`isRefreshCookieCredential`），所以存它能让账号在一个会期（30 天）里自行续期，不再每 15 分钟重新登录。
+- **主要文件**：
+  - `src/server/services/assistedLogin/sessionService.ts`
+  - `src/server/services/linuxdoSession/sessionService.ts`（facade 导出）
+  - `src/server/services/linuxdoSession/sessionService.test.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过；`npx vitest run`：2920 通过、4 失败（与前几条一致的既有环境性失败）。
+  - 新增单测 4 例：refresh cookie 胜过页面存储里的 JWT（含从存储补 `platformUserId`/`username`）、无 refresh cookie 时仍存储优先、只有 session cookie 时回落、短值 flag cookie 不算凭据。
+  - 站点行为实测：`POST https://luckyg.131518.xyz/api/user/login` → `409 {"code":"AUTH_SESSION_LIMIT"}`；两条历史 JWT 打到 `/api/user/sessions` → `401 AUTH_TOKEN_EXPIRED`。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：代码侧已完成；账号 `#4` 的站点会话需按上面的两条途径之一清理，服务端无法代为删除
+
 ### 24. Lanln 的 Linux.do 自动重登（含「重登标记不得影响路由」修复）+ New API 会话有效期调研
 
 - **类型**：功能实现 + 缺陷修复 + 源码调研

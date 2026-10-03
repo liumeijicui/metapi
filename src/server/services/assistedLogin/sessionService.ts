@@ -152,6 +152,71 @@ export function pickTokenFromRecords(records: Array<[string, string]>): Captured
   };
 }
 
+/** The cookie a newer new-api fork keeps as its only durable credential. */
+const REFRESH_COOKIE_NAME = 'new_api_refresh';
+
+function isUsableCookie(cookie: { name?: string; value?: string }): boolean {
+  return (cookie.value || '').trim().length >= MIN_CREDENTIAL_LENGTH;
+}
+
+/**
+ * Turns a site's cookie jar into the credential an account row can send.
+ *
+ * Some sites (e.g. SnowAPI) gate the management API behind a shield that checks
+ * the whole jar, so every site-scoped cookie is preserved rather than only the
+ * session one. The site's user id lives only in storage, not in a cookie, so it
+ * is read here too; without it a `New-Api-User`-style header is missing and the
+ * site rejects the credential with 401.
+ */
+function buildCookieCredential(
+  cookies: Array<{ name: string; value: string }>,
+  records: Array<[string, string]>,
+): CapturedCredentials {
+  return {
+    accessToken: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; '),
+    refreshToken: null,
+    tokenExpiresAt: null,
+    username: extractStoredUsername(records),
+    platformUserId: extractStoredUserId(records),
+    source: 'cookie',
+    harvestedKeys: cookies.map((cookie) => cookie.name),
+  };
+}
+
+/**
+ * Picks the credential to keep when a sign-in left more than one behind.
+ *
+ * The order is not cosmetic. A newer new-api fork hands the browser a rotatable
+ * `new_api_refresh` cookie *and* a 15-minute access JWT, and the JWT is the one
+ * the site's own dashboard can reach — so a storage-first harvest stores the
+ * JWT, the account signs in again every quarter hour, and every one of those
+ * sign-ins mints another server-side session. On a fork that caps concurrent
+ * sessions the account then locks itself out with `AUTH_SESSION_LIMIT` — and
+ * the operator cannot even log in to clear the list, because the refusal is the
+ * login itself. The cookie outlives the JWT by weeks and is exchangeable for
+ * access tokens, so it wins whenever it is there.
+ */
+export function selectHarvestedCredential(input: {
+  records: Array<[string, string]>;
+  cookies: Array<{ name: string; value: string }>;
+}): CapturedCredentials | null {
+  const { records } = input;
+  const cookies = input.cookies.filter(isUsableCookie);
+
+  if (cookies.some((cookie) => cookie.name.trim().toLowerCase() === REFRESH_COOKIE_NAME)) {
+    return buildCookieCredential(cookies, records);
+  }
+
+  const fromStorage = pickTokenFromRecords(records);
+  if (fromStorage) return fromStorage;
+
+  if (cookies.some((cookie) => SESSION_COOKIE_NAMES.has(cookie.name.trim().toLowerCase()))) {
+    return buildCookieCredential(cookies, records);
+  }
+
+  return null;
+}
+
 export function createAssistedLoginSession(input: {
   provider: AssistedLoginProvider;
   profileDirName: string;
@@ -280,9 +345,6 @@ export function createAssistedLoginSession(input: {
       records = [];
     }
 
-    const fromStorage = pickTokenFromRecords(records);
-    if (fromStorage) return fromStorage;
-
     try {
       const context = page.context();
       // Query every cookie the context holds rather than only those visible to
@@ -290,12 +352,6 @@ export function createAssistedLoginSession(input: {
       // (e.g. `/api/user/auth`), so a page-URL lookup would never see it.
       const allCookies = await context.cookies();
       const host = safeHost(page.url());
-
-      const matchSessionCookie = (candidates: typeof allCookies) => candidates.find((cookie) => {
-        const name = (cookie.name || '').trim().toLowerCase();
-        if (!SESSION_COOKIE_NAMES.has(name)) return false;
-        return (cookie.value || '').trim().length >= MIN_CREDENTIAL_LENGTH;
-      });
 
       // Cookies must belong to the site being captured. The managed browser
       // keeps several sites open at once, so matching against the whole jar
@@ -306,34 +362,13 @@ export function createAssistedLoginSession(input: {
         if (!host) return true;
         return host === domain || host.endsWith(`.${domain}`);
       });
-      const sessionCookie = matchSessionCookie(cookies);
 
-      if (sessionCookie?.value) {
-        // Some sites (e.g. SnowAPI) gate the management API behind a shield that
-        // checks the whole cookie jar, so every site-scoped cookie is preserved
-        // rather than only the session one.
-        // The site's user id lives only in storage, not in the cookie, so it is
-        // read here too; without it a `New-Api-User`-style header is missing and
-        // the site rejects the credential with 401.
-        const cookieHeader = cookies
-          .filter((cookie) => (cookie.value || '').trim())
-          .map((cookie) => `${cookie.name}=${cookie.value}`)
-          .join('; ');
-        return {
-          accessToken: cookieHeader || `${sessionCookie.name}=${sessionCookie.value}`,
-          refreshToken: null,
-          tokenExpiresAt: null,
-          username: extractStoredUsername(records),
-          platformUserId: extractStoredUserId(records),
-          source: 'cookie',
-          harvestedKeys: cookies.map((cookie) => cookie.name),
-        };
-      }
+      return selectHarvestedCredential({ records, cookies });
     } catch {
-      // ignore
+      // Reading the jar can fail on a context that is closing. Storage alone
+      // still tells us whether this page holds a token worth keeping.
+      return pickTokenFromRecords(records);
     }
-
-    return null;
   }
 
   /**

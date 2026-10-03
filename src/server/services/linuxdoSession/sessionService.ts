@@ -4,6 +4,7 @@ import { assistedLoginProviders } from '../assistedLogin/providers/index.js';
 
 export {
   pickTokenFromRecords,
+  selectHarvestedCredential,
   type AssistedLoginSession,
 } from '../assistedLogin/sessionService.js';
 export type {
