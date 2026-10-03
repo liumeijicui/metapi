@@ -11,7 +11,7 @@
   - 账号 `#37 HongShi`：把凭证换成死值并置 `expired` → `POST /api/accounts/37/balance` → **37 秒内自动重登成功**，凭证换成新的 `new_api_refresh`、状态回 `active`、余额正常（$11.28），并且 `sessionHygiene: {pruned, removed: 1, kept: 1}`——登录后自动清掉多余会话，正是用户要求的行为。
   - 账号 `#39 123nhh`（老形式站点）：同样演练通过。
   - 12 个站逐一核对 `api/oauth/state`：修复后全部拿到 state（10 个走 POST、2 个走 GET）。
-- **配置**：给下列账号写入 `relogin: {provider:"linuxdo"}` 标记（共 12 个新启用，另 5 个此前已有，现计 16 个）：`#5 techmob`、`#6 ultrarouter`、`#7 happycoding`、`#8 coee`、`#9 grok-heavy`、`#26 咕咕嘎嘎`、`#34 霸气公益平台`、`#36 Loveyy`、`#37 HongShi`、`#38 TOM&JERRY`、`#39 123nhh`。
+- **配置**：给下列账号写入 `relogin: {provider:"linuxdo"}` 标记（先写入 12 个，其中 2 个实测无法使用已回滚，故本轮净新增 11 个；另 5 个此前已有，现计 16 个）：`#5 techmob`、`#6 ultrarouter`、`#7 happycoding`、`#8 coee`、`#9 grok-heavy`、`#26 咕咕嘎嘎`、`#34 霸气公益平台`、`#36 Loveyy`、`#37 HongShi`、`#38 TOM&JERRY`、`#39 123nhh`。
   - 启用前逐个核对了站点侧 `linux_do_id == 367936`，避免给非 Linux.do 绑定的账号挂错链路。
   - **两个账号被排除并回滚标记**：`#10 蛙蛙公益站`（回调回「New user registration has been disabled by administrator」，说明该站用户并非 Linux.do 绑定）、`#4 luckyg`（回调回 `Conflict`，Linux.do 账号在该站绑的是另一个用户）。两者的可用路径仍是密码重登，标记留着只会每 15 分钟白跑一次浏览器，因此移除。
   - `#13 fuka` 未启用：该站用户 `linux_do_id` 为空。
