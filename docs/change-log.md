@@ -17,6 +17,7 @@
   - 重登后 Cookie 处于**轮换边界**，此期间反复调 `POST /api/accounts/:id/models` 会让 `refreshModelsForAccount` 拿到 403 并判成“无可用模型”，从而**清空 `model_availability` 与 `route_channels`**。重登后只做一次 `balance` 即可，`models` 只在首次建号时调。
   - 恢复顺序：先 `refreshModelsForAccount(id)` 写回 `model_availability`，再触发一次路由重建（`PUT /api/accounts/:id` 且只改 `checkinEnabled` 这类非凭证字段时 `refreshModels = false`，但结尾会走 `rebuildRoutesBestEffort()`，是最轻的正确入口）。
   - **禁用** `/api/settings/maintenance/clear-cache`：它会整表清空 `model_availability` + `route_channels`。
+  - **上游额度为 0，不是登记问题**：账号已正确绑定 Linux.do（上游 `linux_do_id = 367936`，与 metapi 的 Linux.do 账号一致），但站方给的 `quota = 0`、`used_quota = 0`、`group = default`（分组倍率 1），且站内**没有任何签到/每日领取**（`checkin_enabled = false`，`/api/user/checkin` 回「签到功能未启用」）。因此路由虽然建好，真实调用会被上游拒：`HTTP 403 用户额度不足, 剩余额度: $0.000000`，在 metapi 下游被统一表述为 `No available channels for this model`（`channelSelection` 的兜底文案，容易误判为路由没建好）。额度只能由站方发放（兑换码/站长群），metapi 侧无需也无法改动。
 - **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
 - **状态**：已完成
 
