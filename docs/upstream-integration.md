@@ -307,6 +307,37 @@ CPA 这类站点推荐直接使用 **API Key**：
 
 ---
 
+### X-API
+
+**适用平台：** [X-API](https://x-api.cfd) 自建网关（既不是 New API 也不是 Sub2API）
+
+#### 站点配置
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| **站点名称** | 自定义名称 | `X-API` |
+| **站点 URL** | 站点根地址（**不含** `/v1` 后缀） | `https://x-api.cfd` |
+| **平台类型** | 选择 `xapi`（也可用预设 `X-API`） | - |
+
+#### 账号凭证
+
+**仅支持 API Key：**
+
+- 在站点控制台 `/console/models` 生成 API Key，用「API Key 连接」填入，形如 `xapi_xxxxxxxx`
+- 站点只提供 **Linux.do 快捷登录**（`POST /auth/linuxdo/start`，带 Cloudflare Turnstile 校验），没有用户名密码接口，也没有可供程序调用的会话接口，所以本平台无法做自动重登 / 保活
+
+#### 功能限制
+
+| 功能 | 支持情况 |
+|------|----------|
+| 模型列表获取 | ✅ 支持（`/v1/models`） |
+| 代理调用 | ✅ 支持（`/v1/chat/completions` 等 OpenAI 兼容端点） |
+| 余额查询 | ❌ 不支持（站点无配额接口，API Key 模式下跳过） |
+| 自动签到 | ❌ 不适用（站点没有签到功能） |
+| 账号令牌管理 | ❌ 不适用 |
+
+---
+
 ### Claude (Anthropic)
 
 **适用场景：** 直连 Anthropic Claude API
@@ -398,6 +429,7 @@ CPA 这类站点推荐直接使用 **API Key**：
 | ModelScope / Claude | `claude` | `https://api-inference.modelscope.cn` | 适合 Claude 兼容接入 |
 | 豆包 Coding Plan / OpenAI | `openai` | `https://ark.cn-beijing.volces.com/api/coding/v3` | 适合火山方舟 Coding Plan |
 | 无限星河 | `openai` | `https://infistar.cc/v1` | OpenAI 兼容入口；模型以当前 API Key 的实时模型列表为准 |
+| X-API | `xapi` | `https://x-api.cfd` | 只有 Linux.do 快捷登录，需先在站点生成 API Key |
 
 #### 使用建议
 

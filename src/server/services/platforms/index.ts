@@ -10,6 +10,7 @@ import { DoneHubAdapter } from './doneHub.js';
 import { Sub2ApiAdapter } from './sub2api.js';
 import { OpenAiAdapter } from './openai.js';
 import { OrcaRouterAdapter } from './orcarouter.js';
+import { XApiAdapter } from './xapi.js';
 import { CodexAdapter } from './codex.js';
 import { ClaudeAdapter } from './claude.js';
 import { GeminiAdapter } from './gemini.js';
@@ -29,6 +30,7 @@ const adapters: PlatformAdapter[] = [
   new AntigravityAdapter(),
   new CliProxyApiAdapter(),
   new OrcaRouterAdapter(),
+  new XApiAdapter(),
   new AnyRouterAdapter(),
   new AgentRouterAdapter(),
   new GwRelayAdapter(),

@@ -24,6 +24,7 @@ describe('siteInitializationPresets', () => {
       'modelscope-claude',
       'doubao-coding-openai',
       'orcarouter-openai',
+      'xapi-openai',
       'infistar-openai',
     ]));
 
@@ -147,6 +148,16 @@ describe('siteInitializationPresets', () => {
       docsUrl: 'https://doc.infistar.cc/api-overview',
     });
     expect(infistarPreset?.recommendedModels).toEqual(['qwen-plus']);
+
+    const xapiPreset = getSiteInitializationPreset('xapi-openai');
+    expect(xapiPreset).toMatchObject({
+      id: 'xapi-openai',
+      platform: 'xapi',
+      defaultUrl: 'https://x-api.cfd',
+      initialSegment: 'apikey',
+      recommendedSkipModelFetch: false,
+    });
+    expect(xapiPreset?.recommendedModels).toEqual(expect.arrayContaining(['grok-4.7', 'grok-4.6']));
   });
 
   it('detects Aliyun CodingPlan endpoints by URL', () => {
@@ -231,6 +242,15 @@ describe('siteInitializationPresets', () => {
     expect(detectSiteInitializationPreset('https://infistar.cc/')).toMatchObject({
       id: 'infistar-openai',
       platform: 'openai',
+    });
+
+    expect(detectSiteInitializationPreset('https://x-api.cfd/v1')).toMatchObject({
+      id: 'xapi-openai',
+      platform: 'xapi',
+    });
+    expect(detectSiteInitializationPreset('https://x-api.cfd')).toMatchObject({
+      id: 'xapi-openai',
+      platform: 'xapi',
     });
   });
 

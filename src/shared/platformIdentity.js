@@ -22,6 +22,10 @@ export const PLATFORM_ALIASES = Object.assign(Object.create(null), {
   veloera: 'veloera',
   sub2api: 'sub2api',
   orcarouter: 'orcarouter',
+  xapi: 'xapi',
+  'x-api': 'xapi',
+  'x api': 'xapi',
+  'x-api.cfd': 'xapi',
   openai: 'openai',
   codex: 'codex',
   'chatgpt-codex': 'codex',
@@ -100,6 +104,10 @@ export function detectPlatformByUrlHint(url) {
   // subdomains) so a token is never routed to an unrelated URL containing the
   // provider name in a path, query, or userinfo component.
   if (host === 'api.orcarouter.ai' || host.endsWith('.orcarouter.ai')) return 'orcarouter';
+
+  // X-API ships its own gateway (neither New API nor Sub2API). Its API surface
+  // is the OpenAI-compatible `/v1` one, so the credential is an API key.
+  if (host === 'x-api.cfd' || host.endsWith('.x-api.cfd')) return 'xapi';
 
   return undefined;
 }

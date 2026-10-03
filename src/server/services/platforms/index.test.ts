@@ -72,6 +72,16 @@ describe('getAdapter platform aliases', () => {
     expect(getAdapter('orcarouter')?.platformName).toBe('orcarouter');
   });
 
+  it('supports the dedicated xapi adapter and its aliases', () => {
+    expect(getAdapter('xapi')?.platformName).toBe('xapi');
+    expect(getAdapter('x-api')?.platformName).toBe('xapi');
+  });
+
+  it('detects the xapi site through the dedicated adapter', async () => {
+    const adapter = await detectPlatform('https://x-api.cfd');
+    expect(adapter?.platformName).toBe('xapi');
+  });
+
   it('detects anyrouter URL before generic new-api adapter', async () => {
     const adapter = await detectPlatform('https://anyrouter.top');
     expect(adapter?.platformName).toBe('anyrouter');

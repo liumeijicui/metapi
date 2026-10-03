@@ -86,6 +86,13 @@ const INFISTAR_RECOMMENDED_MODELS = Object.freeze([
   'qwen-plus',
 ]);
 
+const XAPI_RECOMMENDED_MODELS = Object.freeze([
+  'grok-4.7',
+  'grok-4.6',
+  'grok-4.5',
+  'grok-4.20-multi-agent-0309',
+]);
+
 const SITE_INITIALIZATION_PRESETS = Object.freeze([
   Object.freeze({
     id: 'codingplan-openai',
@@ -310,6 +317,21 @@ const SITE_INITIALIZATION_PRESETS = Object.freeze([
     docsUrl: 'https://doc.infistar.cc/api-overview',
     matches(url) {
       return matchesHostAndPaths(url, 'infistar.cc', ['/', '/v1']);
+    },
+  }),
+  Object.freeze({
+    id: 'xapi-openai',
+    label: 'X-API',
+    providerLabel: 'X-API',
+    description: 'X-API 自建网关，只提供 Linux.do 快捷登录；在站点生成 API Key 后用「API Key 连接」接入 OpenAI 兼容端点。',
+    platform: 'xapi',
+    defaultUrl: 'https://x-api.cfd',
+    initialSegment: 'apikey',
+    recommendedSkipModelFetch: false,
+    recommendedModels: XAPI_RECOMMENDED_MODELS,
+    docsUrl: 'https://x-api.cfd',
+    matches(url) {
+      return matchesHostAndPaths(url, 'x-api.cfd', ['/', '/v1']);
     },
   }),
 ]);

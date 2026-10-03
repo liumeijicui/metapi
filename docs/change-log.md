@@ -1,3 +1,33 @@
+### 27. 新增 X-API（x-api.cfd）平台适配器并登记站点
+
+- **类型**：新平台接入
+- **需求来源**：本会话需求（“这是模型调用需要的 sk key `xapi_...`，这是网址 https://x-api.cfd/console/models，只能 linux do 快捷登录”）
+- **站点事实（实测）**：
+  - `https://x-api.cfd` 是**自建网关**，不是 New API / Sub2API：`/api/status` 返回 `{"error":{"type":"not_found",...,"source":"x-api"}}`，`/api/user/self`、`/api/user/checkin`、`/api/user/sessions`、`/api/oauth/linuxdo` 全部 404。
+  - 只有 **Linux.do 快捷登录**：`POST /auth/linuxdo/start` 需要 Cloudflare Turnstile token（`/api/public-config` 的 `turnstile_enabled: true`），没有用户名密码接口；登录后是服务端会话（`/api/me`、`/api/keys`），**API Key 不能当会话用**。
+  - **没有签到**：前端 bundle 中「签到」出现 0 次，也没有 checkin 路由 ⇒ 以 API Key 连接，`checkinEnabled: false`。
+  - 用户给出的 `xapi_...` 是**站点自己的 API Key**：`GET /v1/models` 返回 5 个模型，`POST /v1/chat/completions`（`grok-4.6`）实测 200。
+- **实现范围**：
+  - 新增 `XApiAdapter`（`platformName: 'xapi'`），继承 `StandardApiProviderAdapterBase`：`getModels` 走标准 `/v1/models`（自动兼容站点 URL 带不带 `/v1`），`getBalance` 沿用基类返回 0，`login` / `checkin` 显式回报「不支持」而不是抛错。
+  - **不设置 `balanceUnavailableReason`**：余额接口检查在该标记之前命中，若设置会把 API Key 账号标成 `degraded`；API Key 账号本来就会以 `proxy_only` 跳过余额刷新。
+  - `src/shared/platformIdentity.js`：新增别名 `xapi` / `x-api` / `x api` / `x-api.cfd`，并按 **host 精确匹配** `x-api.cfd`（含子域）识别平台，与 OrcaRouter 同样避免被 URL 路径 / query 里的同名文本误判。
+  - 注册进 `adapters`；前端补齐平台入口：`defaultConnectionSegment`（API Key 优先）、`Sites.tsx`（平台下拉 + 徽章色）、`token-routes/utils.ts`（默认 openai 端点）、`payloadRuleProtocolOptions.ts`。
+  - `siteInitializationPresets`：新增 `xapi-openai` 预设（默认 URL `https://x-api.cfd`，`recommendedSkipModelFetch: false`，推荐模型 `grok-4.7` / `grok-4.6` / `grok-4.5` / `grok-4.20-multi-agent-0309`）。
+  - 文档：`README.md` / `README_EN.md` / `docs/getting-started.md` / `docs/upstream-integration.md`（新增 X-API 章节与预设表行）。
+  - **保活（未做）**：站点没有会话接口，Linux.do 快捷登录又需要 Turnstile，当前无法做自动重登；如果以后要保活，需要新增浏览器驱动并在 `autoRelogin` 加分枝。
+- **登记结果（本机）**：站点 `#46 X-API`（`platform: xapi`，`https://x-api.cfd`）+ 账号 `#32`（`credentialMode: apikey`，`checkinEnabled: false`）。
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`、`tsc -p tsconfig.web.json --noEmit`：通过；`npm run build:server`：通过；重启 `metapi.service`。
+  - 新增单测：`xapi.test.ts`（4 例）、`index.test.ts` +2 例、`platformIdentity.test.ts` +3 条断言、`siteInitializationPresets.test.ts` +2 条断言、`defaultConnectionSegment.test.ts` +1 条断言。
+  - 接口实测：`POST /api/sites/detect` 返回 `platform: xapi` / 预设 `xapi-openai`；`POST /api/accounts` 返回 `modelCount: 5`；账号模型列表 5 个；`POST /v1/chat/completions`（`grok-4.6`）经代理 200 且回复「你好」。
+- **主要文件**：
+  - `src/server/services/platforms/xapi.ts`
+  - `src/server/services/platforms/index.ts`
+  - `src/shared/platformIdentity.js`
+  - `src/shared/siteInitializationPresets.js`
+  - `src/web/pages/Sites.tsx`
+- **状态**：已完成
+
 ### 26. 「每次登录后都清掉其他会话」补齐所有登录入口
 
 - **类型**：功能补齐 + 缺陷修复

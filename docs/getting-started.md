@@ -139,7 +139,7 @@ npm run dev
 - 填写站点名称（自己想怎么取就怎么取）和 URL
 - 按你手上的上游形态选择：
   - 有后台面板：`new-api` / `one-api` / `one-hub` / `done-hub` / `veloera` / `anyrouter` / `sub2api`
-  - 通用兼容接口：`openai` / `claude` / `gemini` / `cliproxyapi` / `orcarouter`
+  - 通用兼容接口：`openai` / `claude` / `gemini` / `cliproxyapi` / `orcarouter` / `xapi`
   - 官方入口：直接在下拉里选对应**官方预设**，例如阿里云 / 智谱 / 豆包 Coding Plan，DeepSeek，Moonshot，MiniMax，ModelScope，OrcaRouter，无限星河
 - 平台通常可自动检测；如果因为防护页、反向代理或特殊路径导致检测失败，再手动选择。
 - 可选是否开启系统代理，方便国内机器访问国外中转站。
@@ -193,6 +193,7 @@ npm run dev
 
 - `openai`
 - `orcarouter`
+- `xapi`（X-API 只有 Linux.do 快捷登录，需在该站生成 API Key）
 - `claude`
 - `gemini`
 - `cliproxyapi`
