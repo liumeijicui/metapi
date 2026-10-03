@@ -581,6 +581,75 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return normalized;
   }
 
+  /**
+   * True when the site printed a key as `C5XJ**********Lemx`.
+   *
+   * Forks that police distribution list every key masked: the list endpoint
+   * answers with a placeholder, so a caller that stores it verbatim has a token
+   * row that cannot call anything. The placeholder is worth recognising so the
+   * reveal below can be attempted, and so a reveal that comes back masked is not
+   * mistaken for a real key.
+   */
+  private isMaskedTokenKey(key: string | null | undefined): boolean {
+    const value = (key || '').trim();
+    return value.includes('*') || value.includes('•');
+  }
+
+  /**
+   * Asks the site for one token's plaintext.
+   *
+   * Masking the list is not the same as withholding the key: these forks ship a
+   * per-row reveal (`POST /api/token/{id}/key`) that the web UI itself calls when
+   * the operator clicks 复制. A fork without it answers 404, which is exactly the
+   * old behaviour, so nothing is lost by trying.
+   */
+  private async revealTokenKey(
+    baseUrl: string,
+    headers: Record<string, string>,
+    tokenId: number,
+  ): Promise<string | null> {
+    try {
+      const res = await this.fetchJson<any>(`${baseUrl}/api/token/${tokenId}/key`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({}),
+      });
+      const key = typeof res?.data?.key === 'string' ? res.data.key.trim() : '';
+      if (!key || this.isMaskedTokenKey(key)) return null;
+      return key;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Replaces masked keys in place with the values the site is willing to hand out.
+   *
+   * Best-effort and bounded: one extra request per masked row (the rows that
+   * already carry a real key cost nothing), and a refusal leaves the masked value
+   * in place for the caller to record as pending. Sequential rather than
+   * parallel — these are the free relays that throttle by egress IP, and a burst
+   * is what earns a 429.
+   */
+  private async revealMaskedTokenKeys(
+    baseUrl: string,
+    headers: Record<string, string>,
+    items: any[],
+    limit = 20,
+  ): Promise<void> {
+    let attempted = 0;
+    for (const item of items) {
+      if (attempted >= limit) return;
+      const key = typeof item?.key === 'string' ? item.key.trim() : '';
+      if (!key || !this.isMaskedTokenKey(key)) continue;
+      const tokenId = Number(item?.id);
+      if (!Number.isFinite(tokenId) || tokenId <= 0) continue;
+      attempted += 1;
+      const revealed = await this.revealTokenKey(baseUrl, headers, tokenId);
+      if (revealed) item.key = revealed;
+    }
+  }
+
   private parseUserInfo(data: any): UserInfo {
     return {
       username: data?.username || data?.display_name || '',
@@ -1303,7 +1372,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
         const headers: Record<string, string> = { Cookie: cookie };
         this.appendUserIdCompatibilityHeaders(headers, userId);
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
-        const normalized = this.normalizeTokenItems(this.parseTokenItems(res));
+        const rawItems = this.parseTokenItems(res);
+        await this.revealMaskedTokenKeys(baseUrl, headers, rawItems);
+        const normalized = this.normalizeTokenItems(rawItems);
         if (normalized.length > 0) return normalized;
       } catch {}
     }
@@ -2142,10 +2213,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
   private async getApiTokensWithUser(baseUrl: string, accessToken: string, userId: number | null): Promise<ApiTokenInfo[]> {
     try {
-      const res = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, {
-        headers: this.authHeaders(accessToken, userId || undefined),
-      });
-      const normalized = this.normalizeTokenItems(this.parseTokenItems(res));
+      const headers = this.authHeaders(accessToken, userId || undefined);
+      const res = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
+      const rawItems = this.parseTokenItems(res);
+      await this.revealMaskedTokenKeys(baseUrl, headers, rawItems);
+      const normalized = this.normalizeTokenItems(rawItems);
       if (normalized.length > 0) return normalized;
       if (this.isTokenListResponse(res)) return [];
     } catch {}

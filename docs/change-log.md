@@ -1,3 +1,32 @@
+### 23. Lanln（ai.venlacy.com）登记 + 支持「列表脱敏、逐条查看」的密钥
+
+- **类型**：功能实现 + 站点登记
+- **需求来源**：本会话需求，未提供 GitHub Issue 链接
+- **目标**：
+  - 登记 `https://ai.venlacy.com`（站点名 `Lanln`），账号 `3145215575`（用户 id `6597`），开启签到。
+  - 该站的令牌列表只给脱敏值，注册后不要停在「请手动补全明文 token」上。
+- **实现范围**：
+  - 站点 `#45`（`platform=new-api`、`checkin_enabled=true`、无 Turnstile、登录只有 LinuxDO OAuth），账号 `#31`。
+  - `NewApiAdapter` 新增脱敏密钥揭示：列表里长得像 `C5XJ**********Lemx` 的 key，改用该 fork 的逐条查看接口 `POST /api/token/{id}/key` 取明文（站点自己的「复制」按钮走的就是它）。
+    - 只在 key 含 `*`/`•` 且该行有数字 id 时才多打一次请求，已经拿到明文的行不产生额外请求；顺序执行且上限 20 条，避免把按出口 IP 限流的公益站打成 429。
+    - 没有该接口的 fork 会返回 404，行为与改动前完全一致：仍是脱敏值，仍记为待补全。
+    - 返回体若仍是脱敏值也视作失败，不会把一个占位符当成真密钥存下来。
+- **主要文件**：
+  - `src/server/services/platforms/newApi.ts`（含 `.test.ts`）
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过。
+  - 新增单测：`newApi.test.ts` 覆盖「脱敏值经逐条查看拿到明文」「fork 无该接口时原样保留脱敏值且不误判」。
+  - `npx vitest run`：2928 用例中 4 失败，均为既有环境性失败（generate-icons、index.default-path、factoryResetService、siteProxy、rebind-panel-focus）。
+  - 实机（站点 #45 / 账号 #31）：
+    - 绑定前用凭据直连：`GET /api/user/self` 返回 id `6597`、用户名 `3145215575`、`linux_do_id=367936`，余额 `$283.17`。
+    - 令牌同步：修复前为「2 条脱敏令牌待补全」，修复后 `maskedPending=0`、`updated=2`、默认令牌 `#26`，两条（`claude`/`li`）状态均为 `ready`；用取到的明文密钥直连站点 `GET /v1/models` 返回 28 个模型。
+    - 模型与路由：`refreshModelsForAccount` 拉到 28 个模型，重建出 28 条通道（账号 #31 + 令牌 #26），全部 enabled。
+    - 签到：`POST /api/checkin/trigger/31` 返回「签到成功」，奖励 `$3.681276`；刷新余额 `$286.85`，账号 `active`、运行状态 `healthy`。
+    - 代理：请求确实被路由到本站通道（代理日志 `accountId=31`、渠道 `239/231/237/229`），但站点此刻**自己**返回 `HTTP 522: Connection timed out`——直连 `POST https://ai.venlacy.com/v1/chat/completions` 同样 522，属站点后端当前不可用，与登记无关；站点恢复后即可用。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成
+
 ### 22. 枫叶公益登记 + 修复「换票丢密钥」与「限流被误判为凭据过期」
 
 - **类型**：缺陷修复 + 站点登记

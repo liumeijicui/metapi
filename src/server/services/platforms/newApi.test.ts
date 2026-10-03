@@ -1032,6 +1032,67 @@ describe('NewApiAdapter', () => {
     expect(isEdgeRateLimitResponse(403, null, '')).toBe(false);
   });
 
+  it('reveals a masked key through the per-row endpoint instead of settling for the placeholder', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+    const revealCalls: string[] = [];
+    server = createServer((req, res) => {
+      if (req.url === '/api/token/?p=0&size=100') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          data: { items: [{ id: 10384, name: 'claude', key: 'C5XJ**********Lemx', status: 1 }] },
+        }));
+        return;
+      }
+      if (req.url === '/api/token/10384/key') {
+        revealCalls.push(`${req.method} ${req.url}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          data: { key: 'C5XJ2kZ9T0J3so8Ag0FlrqDHabunCrqOqfPTfRy5MTvCLemx' },
+          success: true,
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, 'session-token', 6597);
+
+    expect(tokens[0].key).toBe('C5XJ2kZ9T0J3so8Ag0FlrqDHabunCrqOqfPTfRy5MTvCLemx');
+    expect(revealCalls).toEqual(['POST /api/token/10384/key']);
+  });
+
+  it('keeps the masked placeholder when the fork has no reveal endpoint', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+    server = createServer((req, res) => {
+      if (req.url === '/api/token/?p=0&size=100') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          data: { items: [{ id: 7, name: 'plain', key: 'FULL-PLAINTEXT-KEY', status: 1 },
+            { id: 8, name: 'hidden', key: 'C5XJ**********Lemx', status: 1 }] },
+        }));
+        return;
+      }
+      // No reveal route on this fork: every attempt is a 404.
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, 'session-token', 6597);
+
+    expect(tokens.map((t) => t.key)).toEqual(['FULL-PLAINTEXT-KEY', 'C5XJ**********Lemx']);
+  });
+
   it('reports a throttled refresh exchange as a rate limit instead of a dead credential', async () => {
     await new Promise<void>((resolve, reject) => {
       server.close((err?: Error) => (err ? reject(err) : resolve()));
