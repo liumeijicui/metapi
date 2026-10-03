@@ -1,3 +1,28 @@
+### 30. 登记「Fengwind API」（api.fengwind.com）并支持 SSO 型福利站签到
+
+- **类型**：功能扩展 + 站点登记
+- **需求来源**：本会话需求（“https://api-donation.fengwind.com/ 有 linux 登录，签到好像是另开的一个签到站，额度有效期选择永久”）
+- **站点事实（实测）**：
+  - 主站 `https://api.fengwind.com` 是 Sub2API：`GET /api/v1/settings/public` 报 `linuxdo` 登录/注册均开启，会话是 JWT（`auth_token` + 可轮换的 `refresh_token`），`POST /api/v1/auth/refresh` 可续期，`/api/v1/auth/me` 报用户 `id 2975`。
+  - 用户提到的“签到站”是**独立福利站** `https://api-welfalre.fengwind.com`（`service: welfare`，`/api/health` 报 `0.1.34`）：签到接口 `POST /api/checkin`、状态 `GET /api/checkin/status`，**认证是 Bearer 而不是 Cookie**（`missing bearer token`），并且状态里带 `validity_options`：`d1/d2/d3/d5/d7/permanent`（`permanent` 的 `multiplier_bps` 只有 1000，即折扣最狠，换来“永久”不过期）。
+  - 福利站不直接接 Linux.do：登录走 `https://api.fengwind.com/sso/continue?client_id=welfare...`，即**主站 SSO**；纯 HTTP 可用主站令牌 `POST /api/v1/sso/code`（`client_id: welfare`）拿到一次性 code，再 `POST /api/auth/sso/exchange` 换成福利站 `access_token`（有效期约 3 天）。
+  - 捐赠站 `https://api-donation.fengwind.com` 是同一家的第三个服务（`service: donation`），与本需求无关：它按捐赠周期性发额度（策略里额度只有 7~28 天），没有签到接口。
+- **实现范围（本次代码改动）**：
+  - `accountExtraConfig`：`externalCheckin` 增加 `bearerToken` / `ssoClientId` / `validityOptionId`，并且三者任一存在即视为已绑定（此前必须有 `cookieHeader`，否则整条绑定被丢弃）。
+  - `platforms/sub2api`：外部签到在“Cookie 会话”之外新增“Bearer 福利站”分支。绑定里带 `ssoClientId` 时，**每次签到现用主站令牌换一枚新福利站令牌**（无需再存第二个会过期的密钥，福利站令牌过期即自愈）；随后先查 `/api/checkin/status` 判断 `enabled` / `checked_in_today` / `can_check_in`，再按 `validityOptionId` 带上 `validity_option_id` + `validity_policy_version` 调签到接口，并把 `validity_label_snapshot`（如“永久”）写进签到结果。
+  - 老的 Cookie 型福利站行为不变（含 `mode` 透传、`already` 文案、401 提示）。
+- **登记结果（本机）**：
+  - 站点 `#49 Fengwind API`（`sub2api`，`externalCheckinUrl = https://api-welfalre.fengwind.com`，未开系统代理——直连正常）。
+  - 账号 `#35`（`platformUserId 2975`，`credentialMode: session`，凭证为主站 access + `sub2apiAuth.refreshToken`/`tokenExpiresAt`，`checkinEnabled: true`）；主站 access 约 1 天有效，由既有 `sub2apiRefreshScheduler` 自动续期；福利站令牌不落库，靠 SSO 每次现取。
+  - 绑定：`externalCheckin = { ssoClientId: "welfare", userId: 6130, validityOptionId: "permanent" }`。
+- **验证**：
+  - 今日签到已用纯 HTTP 完成：`POST /api/checkin` 带 `validity_option_id: permanent` → `status: pending_credit`、`amount 0.76`、`validity_label_snapshot: 永久`；主站 `/api/v1/auth/me` 余额同步显示 `$0.76`。
+  - metapi 触发 `POST /api/checkin/trigger/35` → `{"success":true,"message":"今日已签到","status":"success"}`，`checkin_logs` 记录 `success / 今日已签到`（走的是新写的 SSO 换令牌 → 状态查询分支）。
+  - 建号时模型发现通过（`runtimeHealth: healthy`）、上游 `sk-` 令牌已自动创建。
+- **注意**：`permanent` 的额度系数是 `0.1`（基础 $2~$15 折后约 $0.2~$1.5），比默认 `d2`（0.8）低很多——永久不过期但单次金额小，这是用户明确要求的选择。
+- **主要文件**：`src/server/services/accountExtraConfig.ts`、`src/server/services/platforms/sub2api.ts`、`src/server/services/platforms/sub2api.test.ts`、`docs/change-log.md`
+- **状态**：已完成
+
 ### 29. 登记「霸气公益平台」（ai.121628.xyz）
 
 - **类型**：站点登记（无代码改动）

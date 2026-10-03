@@ -23,8 +23,23 @@ type Sub2ApiSubscriptionConfig = {
 
 type ExternalCheckinConfig = {
   cookieHeader?: unknown;
+  /**
+   * Bearer credential for welfare services that authenticate the check-in with
+   * an `Authorization` header instead of a session cookie. Stored separately
+   * from `cookieHeader` so neither shape has to be sniffed at request time.
+   */
+  bearerToken?: unknown;
   userId?: unknown;
   mode?: unknown;
+  /**
+   * SSO client id the welfare service is registered under on the main site.
+   * When present, the check-in mints its own welfare token through the main
+   * site's `/api/v1/sso/code` instead of replaying a captured one, so an
+   * expired welfare session heals itself on the next run.
+   */
+  ssoClientId?: unknown;
+  /** Credit validity option to ask for, e.g. `permanent`. */
+  validityOptionId?: unknown;
   savedAt?: unknown;
 };
 
@@ -395,11 +410,17 @@ export function getSub2ApiSubscriptionFromExtraConfig(
 
 export type ManagedExternalCheckinSession = {
   /** Cookie header for the welfare site, e.g. `sidv=...`. */
-  cookieHeader: string;
+  cookieHeader?: string;
+  /** Bearer credential for welfare sites that want an `Authorization` header. */
+  bearerToken?: string;
   /** Welfare site user id; callers fall back to the account's platform user id. */
   userId?: number;
   /** Site-specific check-in mode, e.g. `normal` or `lucky`. */
   mode?: string;
+  /** Main-site SSO client id used to mint a fresh welfare session on demand. */
+  ssoClientId?: string;
+  /** Credit validity option to request, e.g. `permanent`. */
+  validityOptionId?: string;
   /** When this session was captured; useful for diagnostics only. */
   savedAt?: string;
 };
@@ -418,14 +439,23 @@ export function getExternalCheckinSessionFromExtraConfig(
   const raw = parsed.externalCheckin;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const cookieHeader = normalizeNonEmptyString(raw.cookieHeader);
-  if (!cookieHeader) return null;
+  const bearerToken = normalizeNonEmptyString(raw.bearerToken);
+  const ssoClientId = normalizeNonEmptyString(raw.ssoClientId);
+  // Any one of the three bindings is enough to run a check-in: the cookie, a
+  // captured bearer token, or the SSO client id the check-in mints its own
+  // token from.
+  if (!cookieHeader && !bearerToken && !ssoClientId) return null;
   const userId = normalizeUserId(raw.userId);
   const mode = normalizeNonEmptyString(raw.mode);
+  const validityOptionId = normalizeNonEmptyString(raw.validityOptionId);
   const savedAt = normalizeNonEmptyString(raw.savedAt);
   return {
-    cookieHeader,
+    ...(cookieHeader ? { cookieHeader } : {}),
+    ...(bearerToken ? { bearerToken } : {}),
+    ...(ssoClientId ? { ssoClientId } : {}),
     ...(userId ? { userId } : {}),
     ...(mode ? { mode } : {}),
+    ...(validityOptionId ? { validityOptionId } : {}),
     ...(savedAt ? { savedAt } : {}),
   };
 }

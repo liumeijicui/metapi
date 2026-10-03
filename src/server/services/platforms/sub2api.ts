@@ -13,6 +13,7 @@ import {
   UserInfo,
 } from './base.js';
 import type { CheckinContext, LoginResult } from './base.js';
+import { createHash } from 'node:crypto';
 import { stripTrailingSlashes } from '../urlNormalization.js';
 import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -922,6 +923,31 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       };
     }
 
+    // Welfare deployments speak two different dialects and neither is guessable
+    // from the URL. The older one replays a captured session cookie; the newer
+    // one wants a bearer token and hands it out through the main site's own SSO
+    // (`/api/v1/sso/code`), which is why that binding stores only the client id
+    // and mints a fresh token per run instead of hoarding one that expires.
+    if (session.ssoClientId) {
+      const minted = await this.mintExternalCheckinToken(
+        baseUrl,
+        accessToken,
+        externalCheckinUrl,
+        session.ssoClientId,
+      );
+      if (!minted.token) return { success: false, message: minted.message };
+      return this.checkinOnBearerWelfareService(externalCheckinUrl, minted.token, session);
+    }
+    if (session.bearerToken) {
+      return this.checkinOnBearerWelfareService(externalCheckinUrl, session.bearerToken, session);
+    }
+    if (!session.cookieHeader) {
+      return {
+        success: false,
+        message: '外部签到站会话未绑定：请先完成签到站的 LinuxDo 授权，再重试签到',
+      };
+    }
+
     const userId = session.userId ?? platformUserId;
     if (!userId) {
       return { success: false, message: '外部签到缺少用户 ID：请在账号配置中补充 platformUserId' };
@@ -968,6 +994,172 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
     const siteMessage = typeof payload?.error === 'string' ? payload.error.trim() : '';
     return { success: false, message: siteMessage || `外部签到失败：HTTP ${response.status}` };
+  }
+
+  /**
+   * Mints a one-shot SSO code on the main site and exchanges it for a welfare
+   * session token.
+   *
+   * The welfare service is a separate deployment that trusts the main site, so
+   * an account that already holds a main-site session can obtain a fresh welfare
+   * token whenever it needs one. Doing that per run keeps the check-in working
+   * after the welfare token expires, without a second stored secret to rotate.
+   */
+  private async mintExternalCheckinToken(
+    mainSiteUrl: string,
+    accessToken: string,
+    welfareUrl: string,
+    ssoClientId: string,
+  ): Promise<{ token: string; message: string }> {
+    const state = createHash('sha1')
+      .update(`${Date.now()}:${Math.random()}`)
+      .digest('hex');
+    const redirectUri = `${stripTrailingSlashes(welfareUrl)}/auth/callback`;
+    const headers = this.buildAuthHeader(accessToken);
+
+    let code = '';
+    try {
+      const payload = this.parseSub2ApiEnvelope<{ code?: unknown }>(
+        await this.fetchJson<any>(`${normalizeBaseUrl(mainSiteUrl)}/api/v1/sso/code`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ client_id: ssoClientId, redirect_uri: redirectUri, state }),
+        }),
+        '/api/v1/sso/code',
+      );
+      code = typeof payload?.code === 'string' ? payload.code.trim() : '';
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes('HTTP 401')) {
+        return { token: '', message: '外部签到站单点登录失败：主站会话已失效（HTTP 401 未登录）' };
+      }
+      return { token: '', message: `外部签到站单点登录失败：${raw}` };
+    }
+    if (!code) {
+      return { token: '', message: '外部签到站单点登录失败：主站未返回授权码' };
+    }
+
+    try {
+      const exchange = await this.fetchJson<any>(
+        `${stripTrailingSlashes(welfareUrl)}/api/auth/sso/exchange`,
+        { method: 'POST', body: JSON.stringify({ code, state }) },
+      );
+      const token = typeof exchange?.data?.access_token === 'string'
+        ? exchange.data.access_token.trim()
+        : '';
+      if (!token) {
+        const siteMessage = typeof exchange?.message === 'string' ? exchange.message.trim() : '';
+        return { token: '', message: `外部签到站单点登录失败：${siteMessage || '福利站未返回访问令牌'}` };
+      }
+      return { token, message: '' };
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      return { token: '', message: `外部签到站单点登录失败：${raw}` };
+    }
+  }
+
+  /**
+   * Runs the daily check-in on a bearer-authenticated welfare service.
+   *
+   * The service answers with a status object first — the only honest source for
+   * whether today's reward is still available — and takes the credit-validity
+   * option (`permanent`, `d7`, …) with the draw, so an account configured for a
+   * longer validity keeps asking for it instead of silently taking the default.
+   */
+  private async checkinOnBearerWelfareService(
+    welfareUrl: string,
+    token: string,
+    session: { validityOptionId?: string },
+  ): Promise<CheckinResult> {
+    const base = stripTrailingSlashes(welfareUrl);
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    let status: any;
+    try {
+      status = this.parseSub2ApiEnvelope<any>(
+        await this.fetchJson<any>(`${base}/api/checkin/status`, { headers }),
+        '/api/checkin/status',
+      );
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes('HTTP 401')) {
+        return {
+          success: false,
+          message: '外部签到会话已失效（HTTP 401 未登录），请重新完成签到站的 LinuxDo 授权',
+        };
+      }
+      return { success: false, message: `外部签到状态查询失败：${raw}` };
+    }
+
+    if (status?.enabled === false) {
+      return { success: false, message: '外部签到站未启用签到' };
+    }
+    if (status?.checked_in_today === true) {
+      return { success: false, message: '今日已签到' };
+    }
+    if (status?.can_check_in === false) {
+      const reason = typeof status?.eligibility_reason === 'string' ? status.eligibility_reason.trim() : '';
+      return {
+        success: false,
+        message: reason ? `外部签到站当前不可签到：${reason}` : '外部签到站当前不可签到',
+      };
+    }
+
+    const body: Record<string, unknown> = {};
+    const validityOptionId = (session.validityOptionId || '').trim();
+    if (validityOptionId) {
+      body.validity_option_id = validityOptionId;
+      const policyVersion = this.parsePositiveInteger(status?.validity_policy_version);
+      if (policyVersion) body.validity_policy_version = policyVersion;
+    }
+
+    let payload: any;
+    try {
+      payload = this.parseSub2ApiEnvelope<any>(
+        await this.fetchJson<any>(`${base}/api/checkin`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        }),
+        '/api/checkin',
+      );
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes('HTTP 401')) {
+        return {
+          success: false,
+          message: '外部签到会话已失效（HTTP 401 未登录），请重新完成签到站的 LinuxDo 授权',
+        };
+      }
+      return { success: false, message: `外部签到失败：${raw}` };
+    }
+
+    if (payload?.checked_in_today === true) {
+      return { success: false, message: '今日已签到' };
+    }
+    const settled = typeof payload?.status === 'string' ? payload.status.trim() : '';
+    if (settled !== 'credited' && settled !== 'pending_credit') {
+      const siteMessage = typeof payload?.message === 'string' ? payload.message.trim() : '';
+      return { success: false, message: siteMessage || '外部签到未生效：站点未返回入账结果' };
+    }
+
+    const amount = typeof payload?.amount === 'number' && Number.isFinite(payload.amount)
+      ? payload.amount
+      : undefined;
+    const validityLabel = typeof payload?.validity_label_snapshot === 'string'
+      ? payload.validity_label_snapshot.trim()
+      : '';
+    const validityNote = validityLabel ? `（额度有效期：${validityLabel}）` : '';
+    return {
+      success: true,
+      message: amount === undefined
+        ? `外部签到成功${validityNote}`
+        : `外部签到成功，获得 $${amount}${validityNote}`,
+      ...(amount === undefined ? {} : { reward: String(amount) }),
+    };
   }
 
   // --- Daily lottery ---

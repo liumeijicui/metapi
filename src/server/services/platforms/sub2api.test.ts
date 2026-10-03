@@ -314,6 +314,167 @@ describe('Sub2ApiAdapter', () => {
     expect(result.message).toContain('LinuxDo');
   });
 
+  it('mints a welfare session through the main site SSO and sends the validity option', async () => {
+    let ssoAuth = '';
+    let ssoBody: any = null;
+    let exchangeBody: any = null;
+    let statusAuth = '';
+    let checkinAuth = '';
+    let checkinBody: any = null;
+
+    await startServer((req, res) => {
+      const json = (status: number, payload: unknown) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      const readBody = (run: (body: any) => void) => {
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => run(raw ? JSON.parse(raw) : {}));
+      };
+
+      if (req.url === '/api/v1/sso/code' && req.method === 'POST') {
+        ssoAuth = String(req.headers.authorization || '');
+        readBody((body) => {
+          ssoBody = body;
+          json(200, { code: 0, message: 'success', data: { code: 'sso-code-1', state: body.state } });
+        });
+        return;
+      }
+      if (req.url === '/api/auth/sso/exchange' && req.method === 'POST') {
+        readBody((body) => {
+          exchangeBody = body;
+          json(200, { code: 0, message: 'success', data: { access_token: 'welfare-token-1' } });
+        });
+        return;
+      }
+      if (req.url === '/api/checkin/status') {
+        statusAuth = String(req.headers.authorization || '');
+        json(200, {
+          code: 0,
+          message: 'success',
+          data: {
+            enabled: true,
+            checked_in_today: false,
+            can_check_in: true,
+            validity_choice_enabled: true,
+            validity_policy_version: 3,
+          },
+        });
+        return;
+      }
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        checkinAuth = String(req.headers.authorization || '');
+        readBody((body) => {
+          checkinBody = body;
+          json(200, {
+            code: 0,
+            message: 'success',
+            data: {
+              status: 'pending_credit',
+              amount: 0.76,
+              validity_option_id: 'permanent',
+              validity_label_snapshot: '永久',
+            },
+          });
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'main-site-token', 2975, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({
+        externalCheckin: { ssoClientId: 'welfare', userId: 6130, validityOptionId: 'permanent' },
+      }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.reward).toBe('0.76');
+    expect(result.message).toContain('永久');
+    expect(ssoAuth).toBe('Bearer main-site-token');
+    expect(ssoBody.client_id).toBe('welfare');
+    expect(ssoBody.redirect_uri).toBe(`${baseUrl}/auth/callback`);
+    expect(typeof ssoBody.state).toBe('string');
+    expect(ssoBody.state.length).toBeGreaterThan(0);
+    expect(exchangeBody.code).toBe('sso-code-1');
+    expect(exchangeBody.state).toBe(ssoBody.state);
+    expect(statusAuth).toBe('Bearer welfare-token-1');
+    expect(checkinAuth).toBe('Bearer welfare-token-1');
+    expect(checkinBody).toEqual({ validity_option_id: 'permanent', validity_policy_version: 3 });
+  });
+
+  it('uses the stored bearer token when the welfare binding has no SSO client id', async () => {
+    let seenAuth = '';
+    await startServer((req, res) => {
+      const json = (payload: unknown) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      if (req.url === '/api/checkin/status') {
+        json({ code: 0, message: 'success', data: { enabled: true, checked_in_today: false, can_check_in: true } });
+        return;
+      }
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        seenAuth = String(req.headers.authorization || '');
+        json({ code: 0, message: 'success', data: { status: 'credited', amount: 4 } });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 2975, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { bearerToken: 'welfare-bearer' } }),
+    });
+
+    expect(result).toMatchObject({ success: true, reward: '4' });
+    expect(seenAuth).toBe('Bearer welfare-bearer');
+  });
+
+  it('reports the welfare validity service check-in as already done today', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { enabled: true, checked_in_today: true, can_check_in: false },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 2975, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { bearerToken: 'welfare-bearer' } }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('今日已签到');
+  });
+
+  it('reports an expired welfare bearer session on HTTP 401', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/checkin/status') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 401, message: 'missing bearer token' }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin('https://api.example.com', 'jwt-token', 2975, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { bearerToken: 'stale-bearer' } }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('会话已失效');
+  });
+
   it('asks for the welfare session when none is bound', async () => {
     const result = await adapter.checkin('https://api.example.com', 'jwt-token', 341, {
       externalCheckinUrl: 'https://checkin.example.com',
