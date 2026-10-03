@@ -1,3 +1,26 @@
+### 37. 接入薄荷 API 的外部轮盘签到（up.x666.me），并支持会话自动续期
+
+- **类型**：功能 + 配置
+- **需求来源**：本会话需求（用户提供外部签到地址 `https://up.x666.me/`），补完第 36 条的遗留项
+- **站点事实（实测）**：
+  - `up.x666.me`（标题「薄荷公益站升档」）是与中转站 `x666.me` **分开部署**的签到站，Go 写的，**有独立的 Linux.do OAuth 应用**（`client_id=p4V7ALyYtjreFlru3Mp5V5enzhpMYxcy`，回调 `/api/auth/callback`），所以中转站的 `new_api_refresh` 在它这儿完全用不上。
+  - 凭证是回调下发的 **`auth_token` JWT（30 天有效）**，`linux_do_id=367936`；奖励直接加在同一个账号的额度上（`current_quota` 与中转站 `quota` 一致），所以这一站本质是「用签到给中转站加额度」。
+  - 签到接口 `POST /api/checkin/spin`（无 body）；**必须带 `Origin: https://up.x666.me`**，否则回「跨站请求被拒绝（缺少 Origin）」。状态读 `GET /api/checkin/status`（`can_spin`、`today_record`），用户信息读 `GET /api/user/info`。全程**纯 HTTP 可用**，不需要浏览器（只有续期需要）。
+- **改动**：
+  - `src/server/services/platforms/mintWheelCheckin.ts`（新）：轮盘方言。`runMintWheelCheckin()` 发一次 POST，把 `{success:true}` 当作中奖（`reward` 取站点的 `label`，如「150次」），把 `message` 为「今日已签到」的那种**重复运行**折成 `success:true`——那是当天已领取，不是需要重试的故障。另导出 `upsertAuthTokenCookie()` / `readAuthTokenCookie()` 维护绑定里的 cookie。
+  - `src/server/services/platforms/newApi.ts`：`checkin()` 支持 `CheckinContext`；站点声明了 `externalCheckinUrl` 时**优先走外部轮盘**，没有绑定会话就明确报「外部签到站会话未绑定」，不再去戳中转站那条不存在的签到路由。
+  - `src/server/services/assistedLogin/sites/mintWheelRelogin.ts`（新）：续期驱动。复用托管浏览器（`linuxdo` profile）打开签到站 → 页面内 `GET /api/auth/login` 取 `auth_url`（state 由站点服务端生成）→ 过 Cloudflare → 点授权页的「允许」（它是个 `<a href="/oauth2/approve/…">`，不是按钮）→ **等 `auth_token` 的值「变化」**（同名 cookie 会被重写，只等「存在」会拿到旧值），返回新 token。这里不学中转站那条链路先退出登录——签到站没有会话列表、也没有 bind/login 之分，退了只会白扔一个还能用的会话。
+  - `src/server/services/checkinService.ts`：签到失败且消息命中「外部签到会话已失效」时，自动续期一次并重试。这是中转站自己的自动重登**修不了**的那一类故障——凭证属于另一个部署、另一个 OAuth 应用。
+  - `src/web/pages/Accounts.tsx`：外部签到绑定输入框原来只对 `sub2api` 显示，现在 `new-api` 也显示（否则界面上根本没法绑），文案同步说明「会先尝试自动续期」。
+- **验证（真实演练）**：
+  - 首次真实抽奖：`level 6 / 150次 / quota 75000`，额度 `29699750 → 29774750`，与站点记录一致。
+  - **过期演练**：把账号绑定改成死值 `auth_token=dead-token-for-drill` → `POST /api/checkin/trigger/40` → **12.8 秒**内完成「401 → 托管浏览器重新授权 → 写回新 token → 重试」，返回 `{"success":true,"message":"今日已签到"}`；落库的 cookie 已换成新 JWT（315 字符）。
+  - 单测：`mintWheelCheckin.test.ts` 10 例（中奖/重复/OAuth 边界/Origin/cookie 助手）、`newApi.test.ts` 新增 2 例（走外部轮盘、未绑定时不回退），相关文件全绿；`tsc -p tsconfig.server.json` 通过。
+- **配置**：站点 **#54** 写入 `externalCheckinUrl=https://up.x666.me`；账号 **#40** `checkinEnabled=true` 且 `extraConfig.externalCheckin.cookieHeader=auth_token=…`。
+- **已知边界**：`auth_token` 30 天过期；自动续期依赖托管浏览器里仍然登录着的 Linux.do 会话（该会话在，续期就无人值守；不在则需要人工重登 Linux.do）。
+- **主要文件**：`src/server/services/platforms/mintWheelCheckin.ts`（+`.test.ts`）、`src/server/services/platforms/newApi.ts`、`src/server/services/assistedLogin/sites/mintWheelRelogin.ts`、`src/server/services/checkinService.ts`、`src/web/pages/Accounts.tsx`、`docs/change-log.md`
+- **状态**：已完成
+
 ### 36. 登记「薄荷 API」（x666.me，Futureppo/new-api 分支）
 
 - **类型**：配置

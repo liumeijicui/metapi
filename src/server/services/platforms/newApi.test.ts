@@ -17,6 +17,7 @@ const COOKIE_SESSION_TOKEN = 'cookie-session-token';
 const COOKIE_REQUIRES_USER_TOKEN = 'cookie-requires-user';
 const COOKIE_REQUIRES_X_USER_ID_TOKEN = 'cookie-requires-x-user-id';
 const CHECKIN_ALREADY_TOKEN = 'checkin-already-token';
+const EXTERNAL_WHEEL_TOKEN = 'external-wheel-token';
 const CHECKIN_DAILY_TOKEN = 'checkin-daily-token';
 const CHECKIN_DAILY_ALREADY_TOKEN = 'checkin-daily-already-token';
 const CHECKIN_DAILY_COOKIE_TOKEN = 'checkin-daily-cookie-token';
@@ -550,6 +551,17 @@ describe('NewApiAdapter', () => {
 
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
+        return;
+      }
+
+      if (req.url === '/api/checkin/spin') {
+        if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`auth_token=${EXTERNAL_WHEEL_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, level: 6, quota: 300000, label: '300次', message: '恭喜获得 300次！' }));
+          return;
+        }
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: '未提供认证信息' }));
         return;
       }
 
@@ -1244,6 +1256,33 @@ describe('NewApiAdapter', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toBe('今天已经签到过啦');
+  });
+
+  it('runs the declared external wheel instead of the relay check-in route', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, 'relay-session-token', 11494, {
+      externalCheckinUrl: baseUrl,
+      extraConfig: JSON.stringify({ externalCheckin: { cookieHeader: `auth_token=${EXTERNAL_WHEEL_TOKEN}` } }),
+    });
+
+    expect(result).toEqual({
+      success: true,
+      message: '恭喜获得 300次！',
+      reward: '300次',
+    });
+    expect(requests.some((r) => r.url === '/api/checkin/spin')).toBe(true);
+    expect(requests.some((r) => r.url === '/api/user/daily')).toBe(false);
+  });
+
+  it('reports an unbound external wheel session instead of falling back to the relay', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, 'relay-session-token', 11494, {
+      externalCheckinUrl: baseUrl,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('未绑定');
+    expect(requests.some((r) => r.url === '/api/user/daily')).toBe(false);
   });
 
   it('checks in through /api/user/daily on forks that moved the endpoint', async () => {

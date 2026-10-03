@@ -8,6 +8,7 @@ import { refreshBalance } from './balanceService.js';
 import { parseCheckinRewardAmount } from './checkinRewardParser.js';
 import {
   getAutoReloginConfig,
+  getExternalCheckinSessionFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
@@ -34,6 +35,7 @@ import { tryAutoRelogin } from './autoRelogin.js';
 import { runDailyLottery } from './lotteryService.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
+import { readAuthTokenCookie, upsertAuthTokenCookie } from './platforms/mintWheelCheckin.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -271,6 +273,51 @@ async function tryBrowserCheckin(site: any, account: any): Promise<BrowserChecki
   return { result: outcome.result, accessToken: accessToken || undefined };
 }
 
+/**
+ * The wheel's own wording for "the stored session is gone"; the relay uses the
+ * same phrase family for its unused-relogin path, so the check names the wheel
+ * explicitly instead of matching on 401 alone.
+ */
+const EXTERNAL_CHECKIN_SESSION_EXPIRED = /外部签到会话已失效/;
+
+/**
+ * Re-runs the wheel's Linux.do handshake in the managed browser and stores the
+ * fresh `auth_token`.
+ *
+ * The wheel session is a 30-day JWT that nothing else in metapi can rotate: it
+ * belongs to a different deployment and a different OAuth application than the
+ * relay credential, so the relay's own auto-relogin would leave it untouched.
+ * Without this the daily draw simply starts failing on day 31 until an operator
+ * pastes a new cookie by hand.
+ */
+async function renewExternalCheckinSession(account: any, site: any): Promise<boolean> {
+  const externalCheckinUrl = (site?.externalCheckinUrl || '').trim();
+  if (!externalCheckinUrl) return false;
+
+  const existing = getExternalCheckinSessionFromExtraConfig(account.extraConfig);
+  const previousToken = readAuthTokenCookie(existing?.cookieHeader);
+
+  const { reloginMintWheel } = await import('./assistedLogin/sites/mintWheelRelogin.js');
+  const relogin = await reloginMintWheel({ baseUrl: externalCheckinUrl, previousToken });
+  if (!relogin.ok || !relogin.authToken) return false;
+
+  const merged = mergeAccountExtraConfig(account.extraConfig, {
+    externalCheckin: {
+      ...(existing || {}),
+      cookieHeader: upsertAuthTokenCookie(existing?.cookieHeader, relogin.authToken),
+      savedAt: new Date().toISOString(),
+    },
+  });
+
+  await db
+    .update(schema.accounts)
+    .set({ extraConfig: merged, updatedAt: new Date().toISOString() })
+    .where(eq(schema.accounts.id, account.id))
+    .run();
+  account.extraConfig = merged;
+  return true;
+}
+
 export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
   const rows = await db
     .select()
@@ -343,6 +390,14 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       })));
 
   let result = await runCheckin(activeAccessToken);
+
+  // A wheel session that lapsed is the one failure the relay's own auto-relogin
+  // cannot repair, so it is renewed here and the draw retried once.
+  if (!result.success && EXTERNAL_CHECKIN_SESSION_EXPIRED.test(result.message || '')) {
+    if (await renewExternalCheckinSession(account, site).catch(() => false)) {
+      result = await runCheckin(activeAccessToken);
+    }
+  }
 
   // A refusal the site stated outright outranks the generic failure that
   // triggered this retry, so it is captured here and written once the verdict

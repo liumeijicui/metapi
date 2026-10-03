@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement, type SiteSessionInfo, type LoginResult } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type CheckinContext, type SiteAnnouncement, type SiteSessionInfo, type LoginResult } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -14,6 +14,8 @@ import {
   setModelContextLengths,
 } from '../modelContextLengthCache.js';
 import { normalizeCheckinReward, quotaToUsd } from './quota.js';
+import { runMintWheelCheckin } from './mintWheelCheckin.js';
+import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
 
 /**
  * A refresh cookie yields a short-lived access token. Exchanging it on every
@@ -1755,7 +1757,28 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
   }
 
-  async checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult> {
+  async checkin(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+    context?: CheckinContext,
+  ): Promise<CheckinResult> {
+    // A site may hand its daily check-in to a separate welfare deployment
+    // (`up.x666.me` for x666.me). That wheel speaks its own protocol and
+    // authenticates with its own Linux.do session, so when one is declared the
+    // relay's own check-in route is not what the operator wants run.
+    const externalCheckinUrl = (context?.externalCheckinUrl || '').trim();
+    if (externalCheckinUrl) {
+      const session = getExternalCheckinSessionFromExtraConfig(context?.extraConfig);
+      if (!session) {
+        return {
+          success: false,
+          message: '外部签到站会话未绑定：请先完成签到站的 Linux.do 授权，再重试签到',
+        };
+      }
+      return runMintWheelCheckin(externalCheckinUrl, session);
+    }
+
     accessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     let firstFailureMessage: string | undefined;

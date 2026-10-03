@@ -2792,12 +2792,12 @@ export default function Accounts() {
                     />
                   </>
                 )}
-                {(editingAccount?.site?.platform || "").toLowerCase() ===
-                  "sub2api" &&
-                  editingAccount?.site?.externalCheckinUrl ? (
+                {["sub2api", "new-api"].includes(
+                  (editingAccount?.site?.platform || "").toLowerCase(),
+                ) && editingAccount?.site?.externalCheckinUrl ? (
                   <>
                     <input
-                      placeholder="外部签到站会话 Cookie（如 sidv=xxx，留空则解绑）"
+                      placeholder="外部签到站会话 Cookie（如 sidv=xxx 或 auth_token=xxx，留空则解绑）"
                       value={editForm.externalCheckinCookie}
                       onChange={(e) =>
                         setEditForm((prev) => ({
@@ -2815,8 +2815,9 @@ export default function Accounts() {
                       }}
                     >
                       用于 {editingAccount?.site?.externalCheckinUrl}{" "}
-                      的每日签到。会话过期后，在浏览器登录该签到站，从开发者工具复制新
-                      Cookie 粘贴到这里即可恢复正常签到。
+                      的每日签到。会话过期后会自动在托管浏览器里重新授权；若自动续期
+                      失败，再在浏览器登录该签到站、从开发者工具复制新 Cookie 粘贴到
+                      这里即可恢复。
                     </div>
                   </>
                 ) : null}
