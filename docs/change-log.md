@@ -1,3 +1,25 @@
+### 38. 登记「君の公益」（muyuan.do，带 Cloudflare 盾）
+
+- **类型**：配置
+- **需求来源**：本会话需求（“帮我登记这个网站，登录秘钥 … 用户id 13274”）
+- **站点事实（实测）**：
+  - `https://muyuan.do`，`system_name = 君の公益`，`version = dev-d8d06cf`（New API），`checkin_enabled = false`（站内没有签到）、`linuxdo_oauth = true`（`linuxdo_client_id = BhXQoUAlShhv8gX3J7AwTIYflzanZghI`、`linuxdo_minimum_trust_level = 1`）、`github_oauth = false`、`price = 1`。
+  - 账号 id 13274（显示名「柳眉积翠」、`linux_do_id 367936`、`group = default`），`quota 3635967707 / used 67003623` → 余额 **$7271.94**，历史 2561 次请求。
+  - 站上已有两个现成密钥（`朱` id 59174、`君の的公益` id 36040，均 `default` 分组、无限额度、无模型限制），metapi 直接接管，未新建。
+- **这道盾的坑（重点）**：站点整个域名挂在 Cloudflare 托管挑战后面，裸 HTTP 一律 403 `Just a moment...`。用托管浏览器过完盾后拿到 `cf_clearance`，但**该 cookie 绑定的是过盾时的出口 IP**——
+  - 排查时先用 curl 验证「带 cookie 就通」，忽略了 shell 里 `HTTPS_PROXY=http://127.0.0.1:7890` 会让 curl 走代理，而 undici 默认**不读环境变量代理**，于是同一个 cookie 在 undici 上稳定 403，看起来像「undici 被盾拦」，实际是出口 IP 不一致。显式对比 `curl --noproxy '*'`（403）与 `curl -x http://127.0.0.1:7890`（200）后结论确定。
+  - 因此这个站必须**走系统代理**（`useSystemProxy=true` → `http://127.0.0.1:7890`，与过盾时同一出口），同时在站点 `customHeaders` 里带 `Cookie: cf_clearance=…` 与过盾时的 `User-Agent`（并开 `customHeadersOverrideRequestHeaders`，否则会被各适配器自带的 UA 覆盖掉，Cloudflare 会因此判定失败）。
+  - 单纯设置 proxyUrl 或单纯设 cookie 都无效，两者必须与 UA 一起配对。
+- **登记结果**：
+  - 站点 **`#55 君の公益`**（`new-api`，`useSystemProxy=true`，`customHeaders` = `{cookie: cf_clearance=…, user-agent: Chrome/126 Linux}`）。
+  - 账号 **`#41`**（用户名 `3145215575`、`platformUserId 13274`、访问令牌登录、`status=active`、余额 **$7271.94 / quota $7405.94**）。
+  - 模型 **25 个**；`checkinEnabled` 设为 **false**——站点自己回「签到功能未启用」，触发一次得到的是 `skipped`（不是失败），关掉可以少跑无意义的一轮。
+  - 路由：现阶段只落了 **glm-5.2** 一条通道（站点对其余模型回 `No available channel for model … under group default`，是站点侧上游没配通道，不是 metapi 的问题；站方补了渠道后重新探测即可）。`glm-5.2` 已经过 metapi 端到端实测（`POST /v1/chat/completions` 正常返回）。
+- **教训（避免以后再踩）**：判断「是不是盾拦的」不能只看请求方是不是浏览器，CF 的 `cf_clearance` 与**出口 IP + UA** 绑定；诊断时必须先弄清该请求究竟从哪个 IP 出去（环境变量代理只对部分客户端生效，这份差异曾直接导致误判）。
+- **运维注意**：`cf_clearance` 过期或站点重新发挑战时，余额/模型/代理调用都会开始 403；届时重新过盾、更新站点 `customHeaders` 里的 cookie 与 UA 即可。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 37. 接入薄荷 API 的外部轮盘签到（up.x666.me），并支持会话自动续期
 
 - **类型**：功能 + 配置
