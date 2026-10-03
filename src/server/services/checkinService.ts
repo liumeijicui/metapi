@@ -13,12 +13,19 @@ import {
   mergeAccountExtraConfig,
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
+  shouldPruneOtherSessions,
 } from './accountExtraConfig.js';
+import { applyRotatedCredentialIfCarried } from './accountCredentialRotation.js';
+import { pruneOtherSessions } from './sessionHygiene.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { classifyFailureReason } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
-import { withAccountCredentialContext, withAccountProxyOverride } from './siteProxy.js';
+import {
+  getAccountCredentialContext,
+  withAccountCredentialContext,
+  withAccountProxyOverride,
+} from './siteProxy.js';
 import {
   asBrowserSessionCredential,
   runBrowserSessionCheckin,
@@ -117,6 +124,77 @@ type BrowserCheckinAttempt = {
 };
 
 /**
+ * Retires the sessions a browser sign-in just superseded.
+ *
+ * Runs inside the account's credential scope because such a sign-in hands back
+ * a rolling `new_api_refresh` cookie: the prune exchanges it, and only the scope
+ * knows which row the replacement belongs to. Without it the row would be left
+ * holding the secret the cleanup just retired.
+ *
+ * Best-effort by design. A site with no session API answers `unsupported` and
+ * writes nothing, and a site that refuses the deletes still leaves the check-in
+ * this was called from perfectly intact.
+ */
+async function pruneSessionsAfterBrowserSignIn(params: {
+  account: any;
+  site: any;
+  accessToken: string;
+  platformUserId?: number;
+}): Promise<void> {
+  const { account, site, accessToken, platformUserId } = params;
+  const adapter = getAdapter(site.platform);
+  if (!adapter) return;
+
+  try {
+    const { outcome, rotated } = await withAccountCredentialContext(
+      { accountId: account.id, siteId: site.id },
+      async () => {
+        const prune = await pruneOtherSessions({
+          adapter,
+          siteUrl: site.url,
+          accessToken,
+          platformUserId,
+          enabled: shouldPruneOtherSessions(account.extraConfig),
+        });
+        return { outcome: prune, rotated: getAccountCredentialContext()?.rotated };
+      },
+    );
+    // A site without the API says nothing either way; recording `unsupported`
+    // would rewrite an unrelated account row on every single check-in.
+    if (outcome.status !== 'pruned' && outcome.status !== 'skipped') return;
+
+    const latest = await db
+      .select({ extraConfig: schema.accounts.extraConfig })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    const updates: Record<string, unknown> = {
+      extraConfig: mergeAccountExtraConfig(latest?.extraConfig ?? account.extraConfig, {
+        sessionHygiene: {
+          outcome: outcome.status === 'skipped' ? outcome.reason : outcome.status,
+          ...(outcome.status === 'pruned'
+            ? { removed: outcome.removed, kept: outcome.kept }
+            : {}),
+          updatedAt: new Date().toISOString(),
+        },
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+    // The prune may have spent the cookie this run stored; writing the value
+    // captured before it would put the retired secret back.
+    const rotatedValue = applyRotatedCredentialIfCarried(accessToken, rotated);
+    if (rotatedValue !== accessToken) updates.accessToken = rotatedValue;
+
+    await db.update(schema.accounts)
+      .set(updates)
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+  } catch {
+    // Cleanup is a courtesy; the sign-in it follows is the thing that matters.
+  }
+}
+
+/**
  * Answers a browser-only check-in challenge.
  *
  * Some New API forks protect the check-in endpoint with Cloudflare Turnstile,
@@ -174,6 +252,19 @@ async function tryBrowserCheckin(site: any, account: any): Promise<BrowserChecki
       })
       .where(eq(schema.accounts.id, account.id))
       .run();
+
+    // That sign-in also minted a server-side session, and the browser only
+    // signs in when the stored one had already lapsed — so without this the
+    // account would add one session per run and never retire any. On a fork
+    // that caps concurrent sessions the list fills up and the site then refuses
+    // *every* sign-in with `AUTH_SESSION_LIMIT`, including the operator's own,
+    // which is precisely the outage this cleanup prevents.
+    await pruneSessionsAfterBrowserSignIn({
+      account,
+      site,
+      accessToken,
+      platformUserId: getPlatformUserIdFromExtraConfig(account.extraConfig),
+    });
   }
 
   if (outcome.kind !== 'result') return null;

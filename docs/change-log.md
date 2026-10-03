@@ -1,3 +1,33 @@
+### 26. 「每次登录后都清掉其他会话」补齐所有登录入口
+
+- **类型**：功能补齐 + 缺陷修复
+- **需求来源**：本会话需求（“你每次登录后都要把其他的登录会话给删除”），承接第 25 条 luckyg 被会话上限锁死的事故
+- **目标**：不论账号走哪条登录路径，登录成功后都自动退掉被它取代的会话，不再让「登录 → 新增一条会话 → 从不清理」慢慢把站点配额堆满。
+- **审计结果（改动前）**：
+  - 已清理：`POST /api/accounts/login`（建号绑定）、`assistedLogin` 抓取（重新绑定）、`manualAccountCreationService`、`autoRelogin` 的密码重登 / GitHub OAuth / Linux.do OAuth / new-api 浏览器重登。
+  - **未清理（真正的漏洞）**：`checkinService.tryBrowserCheckin()`。签到被 Turnstile 挡住时它会用浏览器**重新登录**并把新凭据写回账号行，却从不清理——而这条路径恰恰只在「已存会话早已失效」时才触发，也就是每次运行都可能新增一条服务端会话。luckyg 的会话就是这样攒满的。
+  - **未清理（次要）**：`autoRelogin` 里辉哥中转（`gwrelay`）的浏览器登录分支，只写凭据不清理。
+- **实现范围**：
+  - `checkinService` 新增 `pruneSessionsAfterBrowserSignIn()`，在浏览器签到写入新凭据之后立即调用：
+    - 在**账号凭据作用域内**执行，因为该凭据常是滚动的 `new_api_refresh` cookie，清理过程会花掉它并从 `Set-Cookie` 拿回新的值，只有作用域知道回写到哪一行；回写走 `applyRotatedCredentialIfCarried()`，避免把已作废的密钥写回去。
+    - 只记录 `pruned` / `skipped` 两种结果。站点没有会话接口时返回 `unsupported`，不落盘任何字段——否则每次签到都会去改一条与它无关的账号记录。
+    - 全程 best-effort：清理失败不影响签到本身。
+  - `autoRelogin` 的 gwrelay 分支补上与其它重登路径相同的 `pruneAfterSignIn`（该面板没有会话接口，实际会得到 `unsupported`）。
+  - 开关沿用既有的 `autoRelogin.pruneOtherSessions`（默认开启，显式设为 `false` 才关闭）。
+- **仍然无解的部分**：`agentrouter` / `anyrouter` 走 Linux.do 驱动重登，但这两个平台**没有会话接口**（`adapter.listSessions` 不存在），清理无从下手，只能记为 `unsupported`。
+- **主要文件**：
+  - `src/server/services/checkinService.ts`
+  - `src/server/services/checkinService.autoRelogin.test.ts`
+  - `src/server/services/autoRelogin.ts`
+  - `docs/change-log.md`
+- **验证**：
+  - `npx tsc -p tsconfig.server.json --noEmit`：通过；`npm run build:server`：通过；`npx vitest run`：2938 用例中 2926 通过、4 失败（与前几条一致的既有环境性失败）；重启服务后接口正常。
+  - 新增单测 2 例（`checkinService.autoRelogin.test.ts`，23 例全过）：
+    - 浏览器签到后被取代的两条会话被退掉（`revokeSession` 收到 `old-one`/`old-two`，**不含**本次登录的 `mine-sid`），并写入 `sessionHygiene { outcome: pruned, removed: 2, kept: 1 }`；
+    - 凭据是无法辨认归属的透明 cookie 时**一条都不删**（避免把账号自己踢下线）。
+- **交付物**：代码、单元测试与持续变更日志；无新增 PDF 或截图。
+- **状态**：已完成（luckyg 账号 `#4` 现有的满额会话仍需按第 25 条的途径清理）
+
 ### 25. 修复「抓错凭据把会话刷满」——luckyg 账号被 AUTH_SESSION_LIMIT 锁死的根因
 
 - **类型**：缺陷修复 + 事故记录

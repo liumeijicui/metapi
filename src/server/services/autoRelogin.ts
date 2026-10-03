@@ -505,7 +505,21 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
       password,
     });
     if (!outcome.ok || !outcome.accessToken) return null;
-    return persistCredential(account, { accessToken: outcome.accessToken });
+    // Same hygiene as every other sign-in: this one minted a session too, so
+    // the entries it superseded are retired before the run ends. A panel with
+    // no session API reports `unsupported` and changes nothing.
+    const persisted = await persistCredential(account, { accessToken: outcome.accessToken });
+    const prune = await pruneAfterSignIn({
+      account,
+      site,
+      accessToken: persisted.accessToken,
+      platformUserId: persisted.platformUserId,
+    });
+    return {
+      ...persisted,
+      accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+      extraConfig: await persistExtraFields(account, prune.extraFields),
+    };
   }
 
   if (platform !== 'new-api') return null;

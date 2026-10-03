@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const adapterMock = {
   checkin: vi.fn(),
   login: vi.fn(),
+  listSessions: vi.fn(),
+  revokeSession: vi.fn(),
 };
 
 const notifyMock = vi.fn();
@@ -109,6 +111,8 @@ describe('checkinService auto relogin', () => {
   beforeEach(() => {
     adapterMock.checkin.mockReset();
     adapterMock.login.mockReset();
+    adapterMock.listSessions.mockReset();
+    adapterMock.revokeSession.mockReset();
     notifyMock.mockReset();
     reportTokenExpiredMock.mockReset();
     refreshBalanceMock.mockReset();
@@ -926,5 +930,115 @@ describe('checkinService auto relogin', () => {
     // The turnstile verdict still stands on its own: the run is recorded as
     // "needs a person" rather than failed, and no browser was spent on it.
     expect(result.status).toBe('skipped');
+  });
+
+  it('retires the sessions a browser sign-in just superseded', async () => {
+    // The run only reaches the browser because the stored session had already
+    // lapsed, so the sign-in it performs mints another server-side session. A
+    // fork that caps concurrent sessions counts every one of them, and once the
+    // list is full it refuses *all* sign-ins — the operator's included, which
+    // is the state luckyg ended up in. Retiring the superseded entries at the
+    // moment they are known to be dead is what keeps that from accumulating.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'new_api_refresh=stale-sid.stale-secret',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            credentialMode: 'session',
+            platformUserId: 698,
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: true, message: '浏览器签到成功（已通过站点人机校验）' },
+        logDir: '/data/metapi/checkin-browser/site-16/runs/site-16-x',
+        profileDir: '/data/metapi/checkin-browser/site-16/profiles/site-16',
+      },
+      accessToken: 'new_api_refresh=mine-sid.mine-secret',
+    });
+    adapterMock.listSessions.mockResolvedValue([
+      { sid: 'mine-sid', current: true },
+      { sid: 'old-one', current: false },
+      { sid: 'old-two', current: false },
+    ]);
+    adapterMock.revokeSession.mockResolvedValue(true);
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    const revokedSids = adapterMock.revokeSession.mock.calls.map((call) => call[3]);
+    expect(revokedSids).toEqual(['old-one', 'old-two']);
+    // The session the sign-in just created is the one thing that must survive.
+    expect(revokedSids).not.toContain('mine-sid');
+
+    const hygieneWrite = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((updates) => updates.extraConfig !== undefined);
+    const extraConfig = JSON.parse(String(hygieneWrite?.extraConfig));
+    expect(extraConfig.sessionHygiene).toEqual(expect.objectContaining({
+      outcome: 'pruned',
+      removed: 2,
+      kept: 1,
+    }));
+  });
+
+  it('spares the session list when the credential cannot name its own session', async () => {
+    // An opaque cookie from an older fork identifies nothing. Guessing which
+    // entry is ours would let the cleanup sign the account out — exactly the
+    // outage this is meant to prevent — so nothing is deleted.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'session=opaque-cookie-value',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            credentialMode: 'session',
+            autoRelogin: { username: '3145215575', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 16,
+          name: 'luckyg',
+          url: 'https://luckyg.131518.xyz',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: true, message: '浏览器签到成功（已通过站点人机校验）' },
+        logDir: '/data/metapi/checkin-browser/site-16/runs/site-16-x',
+        profileDir: '/data/metapi/checkin-browser/site-16/profiles/site-16',
+      },
+      accessToken: 'session=fresh-opaque-cookie',
+    });
+    adapterMock.listSessions.mockResolvedValue([{ sid: 'someone-else', current: false }]);
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    expect(adapterMock.revokeSession).not.toHaveBeenCalled();
   });
 });
