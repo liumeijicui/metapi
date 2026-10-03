@@ -1,3 +1,19 @@
+### 29. 登记「霸气公益平台」（ai.121628.xyz）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“登记这个网站 https://ai.121628.xyz/sign-in 用户名密码 3145215575/liyaodong7238508”）
+- **站点事实（实测）**：
+  - new-api `v1.0.0-rc.41`，站名「霸气公益平台」；`password_login_enabled: true`、**`turnstile_check: false`**（登录/签到都不需要人机校验），账号 `linux_do_id: 367936`。
+  - **无签到**：`/api/status` 的 `checkin_enabled` 为 `false`，`GET/POST /api/user/checkin` 都回「签到功能未启用」。
+  - 站点广告 90 个模型，但令牌所在分组是「免费分组 (distributor)」，该分组只对 52 个模型有可用渠道（`agnes-*` 等 38 个直接回 `No available channel for model … under group 免费分组`）。metapi 探测后只给这 52 个建路由，与站点实际能力一致，非配置问题。
+- **登记结果（本机）**：站点 `#48 霸气公益平台`（`new-api`，未开系统代理——直连正常，与 seekai 不同）+ 账号 `#34`（用户名 `3145215575`、`credentialMode: session`、`platformUserId: 7525`、密码已加密存为 `autoRelogin`、**`checkinEnabled: false`**）。建号时会话清理退掉 2 条多余会话。
+- **验证**：
+  - 密码登录成功、模型同步 90 个（其中 52 个建成路由）、余额刷新 `$0.998`（`quota 499000 / 500000`）。
+  - 失效重登演练：把凭证改成死值并置 `status=expired` → `POST /api/accounts/34/balance` → 自动用密码重登换回新 `new_api_refresh`、状态回 `active`。
+  - 代理实测：`POST /v1/chat/completions`（`deepseek-v4-flash-free`）经 metapi 200，`proxy_logs` 记录 `account_id=34 / success`。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 28. GitHub 快捷登录站点改为纯 HTTP 自动重登（并登记 SeekAi 站点）
 
 - **类型**：功能泛化 + 站点登记
