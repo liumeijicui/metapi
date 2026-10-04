@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type CheckinContext, type SiteAnnouncement, type SiteSessionInfo, type LoginResult } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type CheckinContext, type SiteAnnouncement, type SiteSessionInfo, type LoginResult, type PerfMetricsModel, type PerfMetricsOutcome, type PerfMetricsSample, type PerfMetricsSummary } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -74,6 +74,89 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && value.trim() ? Number.parseFloat(value) : Number.NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function describePerfMetricsHttpFailure(status: number): string {
+  if (status === 401) return 'HTTP 401：站点判定当前凭据无效';
+  if (status === 403) return 'HTTP 403：被站点边缘 / WAF 拦截（可能需要过盾）';
+  if (status === 429) return 'HTTP 429：站点限流';
+  if (status === 200) return 'HTTP 200：返回内容不是 JSON（可能被盾拦截）';
+  return `HTTP ${status}：模型监控接口未返回可用数据`;
+}
+
+/**
+ * 归一化 `GET /api/perf-metrics/summary`。
+ *
+ * 同一接口在上游有两个版本的形状：新版本给 `summary` + `window_*` +
+ * `recent_success_series`（每个点带 ts），旧版本只给 `models[]`，并且用
+ * `recent_success_rates`（纯数字数组，没有时间轴）。两种都要能吃下，
+ * 否则一半站点会变成「解析失败」。
+ */
+export function parsePerfMetricsSummaryPayload(payload: unknown): PerfMetricsSummary | null {
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
+  const rawData = record && 'data' in record ? record.data : payload;
+  const data = rawData && typeof rawData === 'object' && !Array.isArray(rawData)
+    ? rawData as Record<string, unknown>
+    : null;
+  if (!data || !Array.isArray(data.models)) return null;
+
+  const models: PerfMetricsModel[] = [];
+  for (const rawModel of data.models as unknown[]) {
+    if (!rawModel || typeof rawModel !== 'object') continue;
+    const model = rawModel as Record<string, unknown>;
+    const modelName = typeof model.model_name === 'string' ? model.model_name.trim() : '';
+    if (!modelName) continue;
+
+    const recentSuccess: PerfMetricsSample[] = [];
+    if (Array.isArray(model.recent_success_series)) {
+      for (const rawPoint of model.recent_success_series as unknown[]) {
+        const point = rawPoint && typeof rawPoint === 'object' ? rawPoint as Record<string, unknown> : null;
+        const rate = toFiniteNumber(point?.success_rate);
+        if (rate === null) continue;
+        recentSuccess.push({ ts: toFiniteNumber(point?.ts), rate });
+      }
+    }
+    if (!recentSuccess.length && Array.isArray(model.recent_success_rates)) {
+      for (const rawRate of model.recent_success_rates as unknown[]) {
+        const rate = toFiniteNumber(rawRate);
+        if (rate === null) continue;
+        recentSuccess.push({ ts: null, rate });
+      }
+    }
+
+    models.push({
+      modelName,
+      avgLatencyMs: toFiniteNumber(model.avg_latency_ms) ?? 0,
+      successRate: toFiniteNumber(model.success_rate) ?? 0,
+      avgTps: toFiniteNumber(model.avg_tps) ?? 0,
+      recentSuccess,
+    });
+  }
+
+  const rawSummary = data.summary && typeof data.summary === 'object'
+    ? data.summary as Record<string, unknown>
+    : null;
+
+  return {
+    summary: rawSummary
+      ? {
+        avgLatencyMs: toFiniteNumber(rawSummary.avg_latency_ms) ?? 0,
+        successRate: toFiniteNumber(rawSummary.success_rate) ?? 0,
+        avgTps: toFiniteNumber(rawSummary.avg_tps) ?? 0,
+      }
+      : null,
+    windowStart: toFiniteNumber(data.window_start),
+    windowEnd: toFiniteNumber(data.window_end),
+    showThroughput: typeof data.show_throughput === 'boolean' ? data.show_throughput : null,
+    models,
+  };
+}
+
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
 
@@ -113,6 +196,82 @@ export class NewApiAdapter extends BasePlatformAdapter {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * 站点自己的模型监控读数（成功率 / 延迟 / 吞吐）。
+   *
+   * 这个接口是给已登录用户看的，普通用户权限即可；凭据既可能是会话 cookie
+   * 也可能是 access token，所以统一走 `buildCredentialRequestHeaders`。
+   */
+  async getPerfMetricsSummary(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+    hours = 24,
+  ): Promise<PerfMetricsOutcome> {
+    const root = (baseUrl || '').replace(/\/+$/, '');
+    if (!root) return { ok: false, unsupported: true, message: '站点地址为空' };
+
+    const safeHours = Number.isFinite(hours) && hours > 0 ? Math.trunc(hours) : 24;
+    const url = `${root}/api/perf-metrics/summary?hours=${safeHours}`;
+
+    let bearer = accessToken;
+    try {
+      bearer = await this.resolveBearerToken(root, accessToken);
+    } catch (error) {
+      return { ok: false, unsupported: false, message: (error as Error)?.message || '凭据兑换失败' };
+    }
+
+    const headers = this.buildCredentialRequestHeaders(bearer, platformUserId);
+    const unsupportedMessage = '站点没有 /api/perf-metrics 接口（版本较旧）';
+
+    try {
+      // 先做一次带状态码的探查：通用 JSON 通道会把 404 与「被盾拦住」都吞成
+      // null，只有它能区分「站点版本旧」和「这次请求失败」。
+      const probed = await this.probePerfMetricsEndpoint(url, headers);
+      if (probed.status === 200 && probed.data) {
+        const parsed = parsePerfMetricsSummaryPayload(probed.data);
+        return parsed
+          ? { ok: true, data: parsed }
+          : { ok: false, unsupported: false, message: '上游返回的模型监控数据无法解析' };
+      }
+
+      // 站点可能挂着一层 shield 挑战：再走通用通道一次，它负责解挑战并刷新
+      // Cloudflare 凭证。
+      const retried = await this.fetchJsonRaw<unknown>(url, { method: 'GET', headers });
+      if (retried) {
+        const parsed = parsePerfMetricsSummaryPayload(retried);
+        if (parsed) return { ok: true, data: parsed };
+      }
+
+      if (probed.status === 404) {
+        return { ok: false, unsupported: true, message: unsupportedMessage };
+      }
+      return { ok: false, unsupported: false, message: describePerfMetricsHttpFailure(probed.status) };
+    } catch (error) {
+      return { ok: false, unsupported: false, message: `请求上游失败：${(error as Error)?.message || 'unknown error'}` };
+    }
+  }
+
+  private async probePerfMetricsEndpoint(
+    url: string,
+    headers: Record<string, string>,
+  ): Promise<{ status: number; data: unknown }> {
+    const { fetch } = await import('undici');
+    const merged: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'User-Agent': this.resolveUserAgent(),
+      ...this.normalizeHeaders(headers),
+    };
+    const requestOrigin = this.deriveRequestOrigin(url);
+    if (requestOrigin) {
+      if (!merged['Origin']) merged['Origin'] = requestOrigin;
+      if (!merged['Referer']) merged['Referer'] = `${requestOrigin}/`;
+    }
+    const res = await fetch(url, await withSiteProxyRequestInit(url, { method: 'GET', headers: merged }));
+    const text = await res.text();
+    return { status: res.status, data: this.parseJsonSafe<unknown>(text) };
   }
 
   private tryDecodeUserId(token: string): number | null {

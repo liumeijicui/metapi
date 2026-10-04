@@ -56,7 +56,7 @@ const zhToEn: Record<string, string> = {
   '模型路由': 'Model Routes',
   '使用日志': 'Usage Logs',
   '暂无使用日志': 'No Usage Logs',
-  '可用性监控': 'Availability Monitor',
+  '模型监控': 'Model Monitor',
   'Linux.do 快捷登录': 'Linux.do Assisted Sign-in',
   '系统': 'System',
   '设置': 'Settings',

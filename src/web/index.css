@@ -5590,127 +5590,207 @@ textarea {
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* ===== Monitor Embed ===== */
-.monitor-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: calc(100vh - 140px);
-}
-
-.monitor-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.monitor-tabs {
-  padding: 8px;
+/* ===== Model Monitor ===== */
+.model-monitor-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
-.monitor-tab {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+.model-monitor-toolbar {
   padding: 10px 12px;
-  background: var(--color-bg);
-  color: var(--color-text-primary);
-  text-align: left;
-  cursor: pointer;
+  margin-bottom: 12px;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  transition: all 0.18s ease;
-}
-
-.monitor-tab:hover {
-  border-color: var(--color-primary);
-  transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
-}
-
-[data-theme="dark"] .monitor-tab:hover {
-  box-shadow: 0 10px 22px rgba(2, 6, 23, 0.42);
-}
-
-.monitor-tab.active {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.monitor-tab-desc {
-  font-size: 12px;
-  color: var(--color-text-muted);
-}
-
-.monitor-frame-shell {
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 10px;
-  min-height: 560px;
-}
-
-.monitor-oauth-hint {
-  padding: 12px 14px;
-  border: 1px solid rgba(59, 130, 246, 0.28);
-  background: rgba(59, 130, 246, 0.08);
-}
-
-[data-theme="dark"] .monitor-oauth-hint {
-  border-color: rgba(96, 165, 250, 0.34);
-  background: rgba(30, 64, 175, 0.18);
-}
-
-.monitor-cookie-row {
-  margin-top: 10px;
-  display: flex;
-  gap: 8px;
   flex-wrap: wrap;
 }
 
-.monitor-cookie-input {
-  flex: 1;
-  min-width: 280px;
-  padding: 9px 12px;
+.model-monitor-toolbar select {
+  padding: 7px 10px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-bg-card);
   color: var(--color-text-primary);
-  outline: none;
+  font-size: 13px;
+  max-width: 190px;
 }
 
-.monitor-cookie-input:focus {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+.model-monitor-view-toggle {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
 }
 
-.monitor-hint {
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  background: rgba(251, 191, 36, 0.16);
-  color: #92400e;
-  padding: 8px 10px;
+.model-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 12px;
+}
+
+.model-monitor-card {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-monitor-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-monitor-model-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-monitor-card-site {
   font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-[data-theme="dark"] .monitor-hint {
-  border-color: rgba(250, 204, 21, 0.42);
-  background: rgba(161, 98, 7, 0.25);
-  color: #fbbf24;
+.model-monitor-rate {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-.monitor-iframe {
+.model-monitor-rate.is-excellent { color: #10b981; }
+.model-monitor-rate.is-good { color: #34d399; }
+.model-monitor-rate.is-warning { color: #f59e0b; }
+.model-monitor-rate.is-critical { color: #ef4444; }
+.model-monitor-rate.is-unknown { color: var(--color-text-muted); }
+
+.model-monitor-bars {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 12px;
+}
+
+.model-monitor-bar {
+  flex: 1 1 0;
+  min-width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.model-monitor-bar.is-excellent { background: #10b981; }
+.model-monitor-bar.is-good { background: #34d399; }
+.model-monitor-bar.is-warning { background: #f59e0b; }
+.model-monitor-bar.is-critical { background: #ef4444; }
+.model-monitor-bar.is-unknown { background: rgba(148, 163, 184, 0.18); }
+
+.model-monitor-card-metrics {
+  display: flex;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-primary);
+}
+
+.model-monitor-card-metrics em {
+  font-style: normal;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-right: 4px;
+}
+
+.model-monitor-failures {
+  padding: 0;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.model-monitor-failures-head {
   width: 100%;
-  min-height: 540px;
-  height: calc(100vh - 270px);
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.model-monitor-failures-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-monitor-failures-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.model-monitor-site-name {
+  font-weight: 600;
+  min-width: 96px;
+}
+
+.model-monitor-failure-message {
+  color: var(--color-text-secondary);
+  flex: 1 1 240px;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.model-monitor-failure-time {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.model-monitor-legend {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.model-monitor-legend .model-monitor-bar {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  margin: 0 2px 0 8px;
+}
+
+@media (max-width: 768px) {
+  .model-monitor-view-toggle {
+    margin-left: 0;
+  }
+
+  .model-monitor-toolbar select {
+    max-width: none;
+    flex: 1 1 140px;
+  }
 }
 
 @media (max-width: 1280px) {

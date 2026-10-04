@@ -174,7 +174,7 @@ Thank you to all our sponsors for supporting the project's long-term feature dev
     </td>
     <td align="center">
       <img src="docs/screenshots/monitor.png" alt="monitor" style="width:100%;height:auto;"/>
-      <div><b>Availability Monitor</b> — Channel health real-time monitoring</div>
+      <div><b>Model Monitor</b> — Success rate, latency and throughput per model</div>
     </td>
   </tr>
   <tr>

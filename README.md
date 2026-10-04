@@ -170,7 +170,7 @@
     </td>
     <td align="center">
       <img src="docs/screenshots/monitor.png" alt="monitor" style="width:100%;height:auto;"/>
-      <div><b>可用性监控</b> — 通道健康度实时监测</div>
+      <div><b>模型监控</b> — 各站模型成功率、延迟与吞吐</div>
     </td>
   </tr>
   <tr>

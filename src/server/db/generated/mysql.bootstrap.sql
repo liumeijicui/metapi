@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS `site_api_endpoints` (`id` INT AUTO_INCREMENT NOT NUL
 CREATE TABLE IF NOT EXISTS `site_day_usage` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `local_day` TEXT NOT NULL, `site_id` INT NOT NULL, `total_calls` INT NOT NULL DEFAULT 0, `success_calls` INT NOT NULL DEFAULT 0, `failed_calls` INT NOT NULL DEFAULT 0, `total_tokens` INT NOT NULL DEFAULT 0, `total_summary_spend` DOUBLE NOT NULL DEFAULT 0, `total_site_spend` DOUBLE NOT NULL DEFAULT 0, `total_latency_ms` INT NOT NULL DEFAULT 0, `latency_count` INT NOT NULL DEFAULT 0, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS `site_disabled_models` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `site_id` INT NOT NULL, `model_name` TEXT NOT NULL, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS `site_hour_usage` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `bucket_start_utc` TEXT NOT NULL, `site_id` INT NOT NULL, `total_calls` INT NOT NULL DEFAULT 0, `success_calls` INT NOT NULL DEFAULT 0, `failed_calls` INT NOT NULL DEFAULT 0, `total_tokens` INT NOT NULL DEFAULT 0, `total_summary_spend` DOUBLE NOT NULL DEFAULT 0, `total_site_spend` DOUBLE NOT NULL DEFAULT 0, `total_latency_ms` INT NOT NULL DEFAULT 0, `latency_count` INT NOT NULL DEFAULT 0, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS `site_model_monitor_models` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `site_id` INT NOT NULL, `model_name` TEXT NOT NULL, `avg_latency_ms` DOUBLE, `success_rate` DOUBLE, `avg_tps` DOUBLE, `recent_success` TEXT, `window_start` INT, `window_end` INT, `show_throughput` INT, `fetched_at` VARCHAR(191) NOT NULL, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS `site_model_monitor_sites` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `site_id` INT NOT NULL, `status` VARCHAR(191) NOT NULL DEFAULT 'pending', `message` TEXT, `models_count` INT NOT NULL DEFAULT 0, `credential_kind` TEXT, `credential_id` INT, `show_throughput` INT, `summary_avg_latency_ms` DOUBLE, `summary_success_rate` DOUBLE, `summary_avg_tps` DOUBLE, `window_start` INT, `window_end` INT, `fetched_at` VARCHAR(191), `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS `token_model_availability` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `token_id` INT NOT NULL, `model_name` TEXT NOT NULL, `available` BOOLEAN, `latency_ms` INT, `checked_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`token_id`) REFERENCES `account_tokens`(`id`) ON DELETE CASCADE);
 CREATE UNIQUE INDEX `admin_snapshots_namespace_key_unique` ON `admin_snapshots` (`namespace`(191), `snapshot_key`(191));
 CREATE UNIQUE INDEX `downstream_api_keys_key_unique` ON `downstream_api_keys` (`key`(191));
@@ -40,6 +42,8 @@ CREATE UNIQUE INDEX `site_api_endpoints_site_url_unique` ON `site_api_endpoints`
 CREATE UNIQUE INDEX `site_day_usage_day_site_unique` ON `site_day_usage` (`local_day`(191), `site_id`);
 CREATE UNIQUE INDEX `site_disabled_models_site_model_unique` ON `site_disabled_models` (`site_id`, `model_name`(191));
 CREATE UNIQUE INDEX `site_hour_usage_hour_site_unique` ON `site_hour_usage` (`bucket_start_utc`(191), `site_id`);
+CREATE UNIQUE INDEX `site_model_monitor_models_site_model_unique` ON `site_model_monitor_models` (`site_id`, `model_name`(191));
+CREATE UNIQUE INDEX `site_model_monitor_sites_site_unique` ON `site_model_monitor_sites` (`site_id`);
 CREATE UNIQUE INDEX `sites_platform_url_unique` ON `sites` (`platform`(191), `url`(191));
 CREATE UNIQUE INDEX `token_model_availability_token_model_unique` ON `token_model_availability` (`token_id`, `model_name`(191));
 CREATE INDEX `account_tokens_account_enabled_idx` ON `account_tokens` (`account_id`, `enabled`);
@@ -103,6 +107,9 @@ CREATE INDEX `site_day_usage_site_id_idx` ON `site_day_usage` (`site_id`);
 CREATE INDEX `site_disabled_models_site_id_idx` ON `site_disabled_models` (`site_id`);
 CREATE INDEX `site_hour_usage_hour_idx` ON `site_hour_usage` (`bucket_start_utc`(191));
 CREATE INDEX `site_hour_usage_site_id_idx` ON `site_hour_usage` (`site_id`);
+CREATE INDEX `site_model_monitor_models_model_name_idx` ON `site_model_monitor_models` (`model_name`(191));
+CREATE INDEX `site_model_monitor_models_site_id_idx` ON `site_model_monitor_models` (`site_id`);
+CREATE INDEX `site_model_monitor_sites_status_idx` ON `site_model_monitor_sites` (`status`(191));
 CREATE INDEX `sites_status_idx` ON `sites` (`status`(191));
 CREATE INDEX `token_model_availability_available_idx` ON `token_model_availability` (`available`);
 CREATE INDEX `token_model_availability_model_name_idx` ON `token_model_availability` (`model_name`(191));

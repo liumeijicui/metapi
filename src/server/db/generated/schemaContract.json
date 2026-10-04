@@ -1998,6 +1998,188 @@
         }
       }
     },
+    "site_model_monitor_models": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "avg_latency_ms": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "success_rate": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "avg_tps": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "recent_success": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "window_start": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "window_end": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "show_throughput": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fetched_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "site_model_monitor_sites": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'pending'",
+          "primaryKey": false
+        },
+        "message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "models_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "credential_kind": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "credential_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "show_throughput": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "summary_avg_latency_ms": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "summary_success_rate": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "summary_avg_tps": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "window_start": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "window_end": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fetched_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "sites": {
       "columns": {
         "id": {
@@ -2896,6 +3078,47 @@
       "unique": false
     },
     {
+      "name": "site_model_monitor_models_model_name_idx",
+      "table": "site_model_monitor_models",
+      "columns": [
+        "model_name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_model_monitor_models_site_id_idx",
+      "table": "site_model_monitor_models",
+      "columns": [
+        "site_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_model_monitor_models_site_model_unique",
+      "table": "site_model_monitor_models",
+      "columns": [
+        "site_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
+      "name": "site_model_monitor_sites_site_unique",
+      "table": "site_model_monitor_sites",
+      "columns": [
+        "site_id"
+      ],
+      "unique": true
+    },
+    {
+      "name": "site_model_monitor_sites_status_idx",
+      "table": "site_model_monitor_sites",
+      "columns": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
       "name": "sites_platform_url_unique",
       "table": "sites",
       "columns": [
@@ -3078,6 +3301,21 @@
       "table": "site_hour_usage",
       "columns": [
         "bucket_start_utc",
+        "site_id"
+      ]
+    },
+    {
+      "name": "site_model_monitor_models_site_model_unique",
+      "table": "site_model_monitor_models",
+      "columns": [
+        "site_id",
+        "model_name"
+      ]
+    },
+    {
+      "name": "site_model_monitor_sites_site_unique",
+      "table": "site_model_monitor_sites",
+      "columns": [
         "site_id"
       ]
     },
@@ -3299,6 +3537,28 @@
     },
     {
       "table": "site_hour_usage",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_model_monitor_models",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_model_monitor_sites",
       "columns": [
         "site_id"
       ],

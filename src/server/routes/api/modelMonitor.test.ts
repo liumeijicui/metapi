@@ -1,0 +1,94 @@
+import Fastify, { type FastifyInstance } from 'fastify';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+type DbModule = typeof import('../../db/index.js');
+
+describe('model monitor routes', () => {
+  let app: FastifyInstance;
+  let db: DbModule['db'];
+  let schema: DbModule['schema'];
+  let dataDir = '';
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-model-monitor-routes-'));
+    process.env.DATA_DIR = dataDir;
+
+    await import('../../db/migrate.js');
+    const dbModule = await import('../../db/index.js');
+    const routesModule = await import('./modelMonitor.js');
+    db = dbModule.db;
+    schema = dbModule.schema;
+
+    app = Fastify();
+    await app.register(routesModule.modelMonitorRoutes);
+  });
+
+  beforeEach(async () => {
+    await db.delete(schema.siteModelMonitorModels).run();
+    await db.delete(schema.siteModelMonitorSites).run();
+    await db.delete(schema.sites).run();
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Demo',
+      url: 'https://demo.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    await db.insert(schema.siteModelMonitorModels).values([
+      { siteId: site.id, modelName: 'gpt-5.5', successRate: 99, avgLatencyMs: 700, avgTps: 60, fetchedAt: '2026-10-04T03:00:00.000Z' },
+      { siteId: site.id, modelName: 'grok-4.5', successRate: 40, avgLatencyMs: 9000, avgTps: 5, fetchedAt: '2026-10-04T03:00:00.000Z' },
+    ]).run();
+    await db.insert(schema.siteModelMonitorSites).values({
+      siteId: site.id,
+      status: 'ok',
+      modelsCount: 2,
+      fetchedAt: '2026-10-04T03:00:00.000Z',
+    }).run();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.DATA_DIR;
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it('returns the overview with server-side filters and last update time', async () => {
+    const all = await app.inject({ method: 'GET', url: '/api/model-monitor/overview' });
+    expect(all.statusCode).toBe(200);
+    const allBody = all.json();
+    expect(allBody.updatedAt).toBe('2026-10-04T03:00:00.000Z');
+    expect(allBody.models.map((row: any) => row.modelName)).toEqual(['gpt-5.5', 'grok-4.5']);
+    expect(allBody.sites).toHaveLength(1);
+
+    const filtered = await app.inject({
+      method: 'GET',
+      url: '/api/model-monitor/overview?model=grok&minSuccessRate=90',
+    });
+    expect(filtered.json().models).toHaveLength(0);
+
+    const matched = await app.inject({ method: 'GET', url: '/api/model-monitor/overview?model=grok' });
+    expect(matched.json().models.map((row: any) => row.modelName)).toEqual(['grok-4.5']);
+  });
+
+  it('rejects unknown sort keys by falling back to success rate', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/model-monitor/overview?sort=drop%20table',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().models[0].modelName).toBe('gpt-5.5');
+  });
+
+  it('queues a collection run when refresh is requested', async () => {
+    const response = await app.inject({ method: 'POST', url: '/api/model-monitor/refresh' });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(typeof body.taskId).toBe('string');
+  });
+});

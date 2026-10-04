@@ -18,7 +18,7 @@ import { searchRoutes } from './routes/api/search.js';
 import { eventsRoutes } from './routes/api/events.js';
 import { taskRoutes } from './routes/api/tasks.js';
 import { testRoutes } from './routes/api/test.js';
-import { monitorRoutes } from './routes/api/monitor.js';
+import { modelMonitorRoutes } from './routes/api/modelMonitor.js';
 import { assistedLoginRoutes } from './routes/api/assistedLogin.js';
 import {
   startAssistedLoginWatchSchedulers,
@@ -45,6 +45,10 @@ import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
 } from './services/modelAvailabilityProbeService.js';
+import {
+  startModelMonitorScheduler,
+  stopModelMonitorScheduler,
+} from './services/modelMonitorService.js';
 import {
   startChannelRecoveryProbeScheduler,
   stopChannelRecoveryProbeScheduler,
@@ -229,7 +233,7 @@ await app.register(siteAnnouncementsRoutes);
 await app.register(updateCenterRoutes);
 await app.register(taskRoutes);
 await app.register(testRoutes);
-await app.register(monitorRoutes);
+await app.register(modelMonitorRoutes);
 await app.register(assistedLoginRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
@@ -269,6 +273,7 @@ await startScheduler();
 await reloadBackupWebdavScheduler();
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
+startModelMonitorScheduler();
 startChannelRecoveryProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
 startAssistedLoginWatchSchedulers();
@@ -288,6 +293,7 @@ app.addHook('onClose', async () => {
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
   stopModelAvailabilityProbeScheduler();
+  stopModelMonitorScheduler();
   stopChannelRecoveryProbeScheduler();
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();

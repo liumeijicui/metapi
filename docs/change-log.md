@@ -1,3 +1,37 @@
+### 45. 菜单「可用性监控」改成「模型监控」：按站点拉取上游模型广场数据，卡片式展示 + 7-12 点每 15 分钟采集
+
+- **类型**：功能（菜单改造 + 后端采集 + 前端新页面）
+- **需求来源**：本会话（用户：「可用性监控感觉完全没有什么用，我想在这里显示模型监控……定时 15min 拉取这些网站的模型监控到我们表里，然后显示在页面上……看着和 new-api 的模型广场差不多效果就行」）
+- **一、数据源与字段（先实测再动手，不是猜的）**
+  - 端点是 **`GET /api/perf-metrics/summary?hours=24`**，**普通用户权限**就能读；凭据既可以是账号的会话（bearer / cookie），也可以是站点的 `sk-` 密钥。
+  - 上游有两个版本的响应形状，解析器两种都吃：
+    - 新版：`{ summary:{avg_latency_ms,success_rate,avg_tps}, window_start, window_end, models:[{model_name, avg_latency_ms, success_rate, avg_tps, recent_success_series:[{ts,success_rate}]}] }`
+    - 旧版：只有 `models:[{..., recent_success_rates:[100,100,100]}]`（纯数字数组，**没有时间轴**），另有 `{models:[], show_throughput:false}` 表示「站点没数据」。
+  - 所以 `recent_success` 存成 `[{ts, rate}]`，旧版补齐 `ts: null`，前端按「有 ts 就按 `window_start` 落格、没有就尾部右对齐」渲染 24 根彩色成功率柱。
+- **二、表只存最新（新增 2 张表，迁移 `0028_site_model_monitor`）**
+  - `site_model_monitor_sites`：每站点一行，记 `status`（`ok`/`empty`/`unsupported`/`error`）、失败原因、模型数、用到的凭据（`account`/`api_token` + id）、站点级 summary 与 `fetched_at`。
+  - `site_model_monitor_models`：`(site_id, model_name)` 唯一，只保留最近一轮；每轮把该站点上游已经不再返回的模型删掉，避免表随时间无限增长（单测覆盖）。
+  - 采集失败时**不清空**上一轮数据，页面不会因为一次抖动变空白；失败原因写在站点行上。
+- **三、定时任务：7:00–12:00、每 15 分钟、上一轮没跑完就跳过**
+  - 触发用**每分钟 tick + 窗口判断**（`isModelMonitorWindowOpen` 支持跨夜与 `start===end` 视为全天），不用整点 cron 扇出；窗口内距上次启动不足 `intervalMs` 不重复触发。
+  - **单飞**：`runModelMonitorFetch()` 进行中时再次调用直接复用同一轮（`isModelMonitorRunning()`），手动点「立即采集」也走这条路径，所以不会出现上一轮没跑完、下一轮又叠上去的情况。
+  - 站点**串行**采集，每站 `modelMonitorTimeoutMs`（默认 30s）超时兜底；上一轮跑通的凭据记在库里，下一轮优先命中，不再从头逐个试。
+  - 可用环境变量覆盖：`MODEL_MONITOR_ENABLED` / `MODEL_MONITOR_INTERVAL_MS` / `MODEL_MONITOR_TIMEOUT_MS` / `MODEL_MONITOR_WINDOW_START_HOUR` / `MODEL_MONITOR_WINDOW_END_HOUR`。
+- **四、页面（`/monitor`，照 new-api 模型广场的方框卡片做）**
+  - 顶部两张统计卡：模型数 / 覆盖站点、平均成功率 / **最近更新时间**（相对时间，悬停看绝对时间）与采集窗口说明。
+  - 工具栏：模型名搜索、站点下拉、最低成功率、排序（成功率/延迟/吞吐/站点）、**卡片视图 / 表格视图**切换。
+  - 卡片：模型名 + 右上角成功率（按 ≥100/≥90/≥70/<70 着色）、站点名、24 格成功率色带、延迟与吞吐。
+  - 「未取到数据的站点」可展开，逐站显示状态徽章、**真实原因**（例如 `HTTP 401：站点判定当前凭据无效`）与时间——不写「401」这类只有内行才懂的字样。
+  - 顺手**删掉了上一版的 LDOH iframe 代理整条链路**（`/api/monitor/*`、`/monitor-proxy/*` 路由与旧页面），`/monitor` 现在就是新页面；桌面端口令守卫里那条同源放行规则仍保留（对其它同源链接同样适用）。
+- **五、实测（生产库 + 真实站点，不是造数据）**
+  - 首轮 39 个活跃站点全部跑完：**22 站取到数据、657 个模型**；`unsupported` 11 站（sub2api/agentrouter/xapi/gwrelay 等平台没有这个接口，或 new-api 版本较旧回 404）、`empty` 3 站（`{models:[], show_throughput:false}`）、`error` 3 站。
+  - `error` 的都给了上游真实原因：Any Router 是 **HTTP 200 但返回的不是 JSON（被盾拦）**，luckyg 与 蛙蛙 是 **HTTP 401 凭据无效**（与第 44 条结论一致，不再是含糊的「没有凭据」——站点账号全部过期时也会照试一次，好让页面显示上游的原话）。
+- **六、验证**
+  - 新增单测 **18 例**：`modelMonitorService.test.ts`（窗口边界/跨夜、脏数据解析、采集成功写入、上一轮模型被清掉、失败保留旧数据、单飞复用、过期账号也照试、筛选与四种排序）、`newApi.perfMetricsPayload.test.ts`（新旧两种响应形状 + 空数据 + 脏行）、`modelMonitor.test.ts`（路由筛选、非法 sort 兜底、refresh 入队）。
+  - 回归：`newApi` / `migrate` / `runtimeSchemaBootstrap` 等相关 **83 例全绿**；`tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`npm run build:server`、`vite build`、`repo:drift-check`（0 violations）均通过；重启服务后实测接口与页面正常。
+  - 重新生成并提交了 schema 三件套（drizzle 迁移 + SQLite journal + `schemaContract.json` 与 MySQL/Postgres bootstrap/upgrade），并把 README / `docs/index.md` 的菜单截图说明从「可用性监控」改成「模型监控」（截图已重新采集）。
+- **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
+- **状态**：已完成（`unsupported` 的 8 个站点是站点侧没有这个接口，无法通过本站改造解决）
 ### 44. luckyg / 蛙蛙公益站 的恢复排查：两站都卡在站点侧，自动清理机制本身已验证有效
 
 - **类型**：事故排查 + 验证（无代码改动）

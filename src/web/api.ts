@@ -1426,14 +1426,27 @@ export const api = {
   testNotification: () =>
     request("/api/settings/notify/test", { method: "POST" }),
 
-  // Monitor embed
-  getMonitorConfig: () => request("/api/monitor/config"),
-  updateMonitorConfig: (data: { ldohCookie?: string | null }) =>
-    request("/api/monitor/config", {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
-  initMonitorSession: () => request("/api/monitor/session", { method: "POST" }),
+  // 模型监控：上游 /api/perf-metrics/summary 的采集结果（只保留最新一轮）
+  getModelMonitorOverview: (params?: {
+    siteId?: number | null;
+    model?: string | null;
+    minSuccessRate?: number | null;
+    sort?: string | null;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.siteId) query.set("siteId", String(params.siteId));
+    if (params?.model) query.set("model", params.model);
+    if (params?.minSuccessRate != null) {
+      query.set("minSuccessRate", String(params.minSuccessRate));
+    }
+    if (params?.sort) query.set("sort", params.sort);
+    const suffix = query.toString();
+    return request(`/api/model-monitor/overview${suffix ? `?${suffix}` : ""}`, {
+      timeoutMs: 60_000,
+    });
+  },
+  refreshModelMonitor: () =>
+    request("/api/model-monitor/refresh", { method: "POST" }),
 
   // Assisted login (managed browser session reused for community-site sign-in)
   getAssistedLoginProviders: () =>

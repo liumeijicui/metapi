@@ -57,6 +57,52 @@ export const siteDisabledModels = sqliteTable('site_disabled_models', {
   siteIdIdx: index('site_disabled_models_site_id_idx').on(table.siteId),
 }));
 
+// 上游 /api/perf-metrics/summary 的采集结果。每个站点一行，记录最近一次
+// 采集的状态、用到的凭据与站点级汇总，供页面显示「最近更新时间」和失败原因。
+export const siteModelMonitorSites = sqliteTable('site_model_monitor_sites', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  status: text('status').notNull().default('pending'), // 'ok' | 'empty' | 'unsupported' | 'error'
+  message: text('message'),
+  modelsCount: integer('models_count').notNull().default(0),
+  credentialKind: text('credential_kind'), // 'account' | 'api_token'
+  credentialId: integer('credential_id'),
+  showThroughput: integer('show_throughput', { mode: 'boolean' }),
+  summaryAvgLatencyMs: real('summary_avg_latency_ms'),
+  summarySuccessRate: real('summary_success_rate'),
+  summaryAvgTps: real('summary_avg_tps'),
+  windowStart: integer('window_start'),
+  windowEnd: integer('window_end'),
+  fetchedAt: text('fetched_at'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteUnique: uniqueIndex('site_model_monitor_sites_site_unique').on(table.siteId),
+  statusIdx: index('site_model_monitor_sites_status_idx').on(table.status),
+}));
+
+// 只保存最新一次采集结果：同一站点 + 模型唯一。上游不提供历史回填，
+// 所以这里不做时间序列，避免表无限增长。
+export const siteModelMonitorModels = sqliteTable('site_model_monitor_models', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  modelName: text('model_name').notNull(),
+  avgLatencyMs: real('avg_latency_ms'),
+  successRate: real('success_rate'),
+  avgTps: real('avg_tps'),
+  recentSuccess: text('recent_success'), // JSON: [{ ts: number | null, rate: number }]
+  windowStart: integer('window_start'),
+  windowEnd: integer('window_end'),
+  showThroughput: integer('show_throughput', { mode: 'boolean' }),
+  fetchedAt: text('fetched_at').notNull(),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteModelUnique: uniqueIndex('site_model_monitor_models_site_model_unique').on(table.siteId, table.modelName),
+  siteIdIdx: index('site_model_monitor_models_site_id_idx').on(table.siteId),
+  modelNameIdx: index('site_model_monitor_models_model_name_idx').on(table.modelName),
+}));
+
 export const accounts = sqliteTable('accounts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),

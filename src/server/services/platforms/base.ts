@@ -211,6 +211,40 @@ export interface LotteryDrawOutcome {
   todayDraws?: number;
 }
 
+/** 上游模型监控里的单个成功率采样点；ts 缺失表示上游没给时间轴。 */
+export interface PerfMetricsSample {
+  ts: number | null;
+  rate: number;
+}
+
+export interface PerfMetricsModel {
+  modelName: string;
+  avgLatencyMs: number;
+  successRate: number;
+  avgTps: number;
+  recentSuccess: PerfMetricsSample[];
+}
+
+export interface PerfMetricsSummary {
+  summary: {
+    avgLatencyMs: number;
+    successRate: number;
+    avgTps: number;
+  } | null;
+  windowStart: number | null;
+  windowEnd: number | null;
+  showThroughput: boolean | null;
+  models: PerfMetricsModel[];
+}
+
+/**
+ * 站点自己的模型监控读数。失败时把「站点没有这个接口」与「这次请求失败」
+ * 分开，页面才能区分「站点版本旧」和「凭据/网络挂了」。
+ */
+export type PerfMetricsOutcome =
+  | { ok: true; data: PerfMetricsSummary }
+  | { ok: false; unsupported: boolean; message: string };
+
 export interface PlatformAdapter {
   readonly platformName: string;
   /**
@@ -230,6 +264,12 @@ export interface PlatformAdapter {
   getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null>;
   getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]>;
   getSiteAnnouncements(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteAnnouncement[]>;
+  /**
+   * 站点自己的模型监控（成功率 / 延迟 / 吞吐）。只有带
+   * `GET /api/perf-metrics/summary` 的 new-api 构建才有；调用方按能力判断，
+   * 不支持时返回 `unsupported`，而不是靠捕获 404。
+   */
+  getPerfMetricsSummary?(baseUrl: string, accessToken: string, platformUserId?: number, hours?: number): Promise<PerfMetricsOutcome>;
   getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]>;
   createApiToken(baseUrl: string, accessToken: string, platformUserId?: number, options?: CreateApiTokenOptions): Promise<boolean>;
   /**

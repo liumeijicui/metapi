@@ -83,7 +83,7 @@ features:
     </figure>
     <figure class="home-carousel-slide">
       <img src="./screenshots/monitor.png" alt="可用性监控" />
-      <figcaption>可用性监控</figcaption>
+      <figcaption>模型监控</figcaption>
     </figure>
   </div>
 </div>

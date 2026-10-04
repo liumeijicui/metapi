@@ -148,6 +148,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),
     modelAvailabilityProbeTimeoutMs: Math.max(3_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 15_000))),
     modelAvailabilityProbeConcurrency: Math.max(1, Math.min(16, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_CONCURRENCY, 1)))),
+    // 模型监控采集：默认每天 07:00-12:00（[start, end) 小时区间）每 15 分钟一轮。
+    modelMonitorEnabled: parseBoolean(env.MODEL_MONITOR_ENABLED, true),
+    modelMonitorIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_MONITOR_INTERVAL_MS, 15 * 60 * 1000))),
+    modelMonitorTimeoutMs: Math.max(5_000, Math.trunc(parseNumber(env.MODEL_MONITOR_TIMEOUT_MS, 30_000))),
+    modelMonitorWindowStartHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_START_HOUR, 7)))),
+    modelMonitorWindowEndHour: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_END_HOUR, 12)))),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),
