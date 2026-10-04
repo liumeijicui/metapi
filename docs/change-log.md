@@ -1,3 +1,21 @@
+### 41. 启动时清扫「孤儿托管浏览器」：重启后不再残留几百 MB 的僵尸 Chrome
+
+- **类型**：修复（资源回收）
+- **需求来源**：本会话（用户要求「直接 1 个浏览器、顺序执行，监控内存和进程数量，看是否已经解决」，并在排查中反馈过服务器被压死、SSH 登不上）
+- **现象（实测取证）**：第 40 条收成单通道串行后，重启 metapi 服务，`ps` 里仍躺着 **14 个 chromium 进程**，其中一个是更早的诊断脚本留下的孤儿：`--remote-debugging-port=9333 --user-data-dir=.../linuxdo-browser`，**父进程已是 init**，独占约 450MB。而它并不被新服务接管——`/api/assisted-login/linuxdo/status` 显示 `running:false`。
+- **根因**：托管浏览器「生命周期归启动它的进程所有、空闲时自行关闭、重启后重新挂载」这条规则，**没有覆盖启动者崩溃/被 kill 的情况**。孤儿进程带着 profile 锁和几百 MB 内存继续跑，原有回收是**惰性**的——只在下一次有流程真的要用浏览器时才顺带发现并接管，在那之前它就是纯浪费；在小内存机器上，这就是「有 headroom」和「开始吃 swap」的差别。
+- **改动**：
+  - `src/server/services/managedBrowserReaper.ts`（新）：`reapStrandedManagedBrowsersAndWait()` 扫描 `/proc`，凡命令行**同时**含 `--user-data-dir=` 与 `chrom`、且 profile 路径落在 `config.dataDir` 之下、且不是自己的进程，即认定为本安装的孤儿托管浏览器；先 `SIGTERM`（让 Chromium 干净地释放 profile 锁），等 3 秒，仍存活再 `SIGKILL`。`platform !== 'linux'` 直接返回 0，任何异常都被吞掉——读不到 `/proc` 的主机也应能正常启动并服务。
+  - `src/server/index.ts`：在 `await app.listen(...)` **之前**调用。启动这一刻不可能有「我们自己的」浏览器在合法运行，所以扫到的一律是残留，先清干净再对外服务。
+- **验证（实测，非推理）**：
+  - 重启前 14 个 chromium → 重启日志打印 `[Startup] Reaped 10 stranded managed browser process(es)`，随后 chromium 归零；系统已用内存 **888MB → 743MB**。
+  - 从 0 个浏览器起跑两轮全量签到：均为 `success 29 / skipped 2 / failed 2`，单轮约 5~6 分钟；**浏览器类报错数为 0**（`浏览%` / `ECONNREFUSED` / `session_rejected` / `no_verdict` / `timeout` 全部为 0）。
+  - 峰值稳定锁在 **2 个浏览器实例 / 23 进程 / 1.2GB**（= 常驻 linuxdo-browser + 1 个签到用浏览器），**全程未超过**；`checkin-browser/site-xx` 严格一个接一个、用后即退；任务结束 chromium 归零，系统 730MB、swap 仅用 5MB。
+  - 新增 5 例单测（命中受管 profile、命中签到 profile、忽略他人 profile、忽略无 profile 参数的浏览器、忽略仅碰巧提到路径的非浏览器进程）全绿；`tsc -p tsconfig.server.json` 通过。
+- **备注**：剩余 4 条非成功项均为**站点侧既有问题**，非本次改动引起：`luckyg`（站点登录会话数已达上限）、`grok-heavy`（Turnstile 需人工）、`l0veyou`（Sub2API 不支持签到）、`Fate`（`Unauthorized, invalid access token`）。
+- **主要文件**：`src/server/services/managedBrowserReaper.ts`（新）、`src/server/services/managedBrowserReaper.test.ts`（新）、`src/server/index.ts`
+- **状态**：已完成
+
 ### 40. 浏览器工作收成单通道串行，止住每小时整点爆发的「拉不起浏览器」
 
 - **类型**：修复（并发治理）

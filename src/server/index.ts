@@ -30,6 +30,7 @@ import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
+import { reapStrandedManagedBrowsersAndWait } from './services/managedBrowserReaper.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
@@ -297,6 +298,14 @@ app.addHook('onClose', async () => {
 
 // Start server
 try {
+  // A managed Chromium that outlived the process which launched it holds its
+  // profile lock and a few hundred megabytes, and nothing here would notice it
+  // until some flow happened to want the browser again. Sweep before serving.
+  const strandedBrowsers = await reapStrandedManagedBrowsersAndWait();
+  if (strandedBrowsers > 0) {
+    console.log(`[Startup] Reaped ${strandedBrowsers} stranded managed browser process(es)`);
+  }
+
   await app.listen({ port: config.port, host: config.listenHost });
   const summaryLines = buildStartupSummaryLines({
     port: config.port,
