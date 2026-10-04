@@ -106,6 +106,22 @@ export interface ApiTokenInfo {
   tokenGroup?: string | null;
 }
 
+/**
+ * A key the site minted, together with whatever its own create response said
+ * about it.
+ *
+ * Some relays print a key exactly once — in the answer to the create call — and
+ * mask it in every later listing. For those the create response is the only
+ * moment the plaintext exists, so a caller that drops it ends up with a key on
+ * the site that nothing here can ever route through. `key` stays null for sites
+ * that keep the value to themselves; callers then read the listing as before.
+ */
+export interface CreatedApiToken {
+  name: string;
+  key: string | null;
+  tokenGroup?: string | null;
+}
+
 export interface SiteAnnouncement {
   sourceKey: string;
   title: string;
@@ -216,6 +232,13 @@ export interface PlatformAdapter {
   getSiteAnnouncements(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteAnnouncement[]>;
   getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]>;
   createApiToken(baseUrl: string, accessToken: string, platformUserId?: number, options?: CreateApiTokenOptions): Promise<boolean>;
+  /**
+   * The same write as `createApiToken`, but it also reports the key the site
+   * answered with. Optional on purpose: an adapter whose listing already carries
+   * plaintext keys has nothing to gain from it, and callers check for the
+   * capability rather than relying on a not-implemented default.
+   */
+  createApiTokenWithValue?(baseUrl: string, accessToken: string, platformUserId?: number, options?: CreateApiTokenOptions): Promise<CreatedApiToken | null>;
   deleteApiToken(baseUrl: string, accessToken: string, tokenKey: string, platformUserId?: number): Promise<boolean>;
   /**
    * Both are absent on sites with no session-management API. Callers check for

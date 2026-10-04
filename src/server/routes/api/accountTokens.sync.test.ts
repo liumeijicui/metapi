@@ -9,19 +9,33 @@ import { mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
+const createApiTokenWithValueMock = vi.fn();
 const getUserGroupsMock = vi.fn();
 const deleteApiTokenMock = vi.fn();
+
+/**
+ * Flipped per test. The capability is what tells the sync whether creating a key
+ * can still yield a usable value, so it has to be absent for the adapters that
+ * cannot, rather than being a no-op that always looks available.
+ */
+let apiTokenWithValueEnabled = false;
 
 type AccountTokenServiceModule = typeof import('../../services/accountTokenService.js');
 
 vi.mock('../../services/platforms/index.js', () => ({
-  getAdapter: () => ({
-    getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
-    getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
-    createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
-    getUserGroups: (...args: unknown[]) => getUserGroupsMock(...args),
-    deleteApiToken: (...args: unknown[]) => deleteApiTokenMock(...args),
-  }),
+  getAdapter: () => {
+    const adapter: Record<string, unknown> = {
+      getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
+      getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
+      createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
+      getUserGroups: (...args: unknown[]) => getUserGroupsMock(...args),
+      deleteApiToken: (...args: unknown[]) => deleteApiTokenMock(...args),
+    };
+    if (apiTokenWithValueEnabled) {
+      adapter.createApiTokenWithValue = (...args: unknown[]) => createApiTokenWithValueMock(...args);
+    }
+    return adapter;
+  },
 }));
 
 type DbModule = typeof import('../../db/index.js');
@@ -84,8 +98,10 @@ describe('account tokens sync routes with site status', () => {
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
+    createApiTokenWithValueMock.mockReset();
     getUserGroupsMock.mockReset();
     deleteApiTokenMock.mockReset();
+    apiTokenWithValueEnabled = false;
     seedId = 0;
 
     await db.delete(schema.accountTokens).run();
@@ -188,6 +204,130 @@ describe('account tokens sync routes with site status', () => {
       .all();
     expect(tokenRows.length).toBe(1);
     expect(tokenRows[0].token).toBe('sk-auto-created-token');
+  });
+
+  // Relays of the sub2api family answer `****...****` in both the list and the
+  // per-key read, and ship no reveal route: the create response is the only
+  // place the plaintext exists. Reading the list back instead would file a
+  // pending placeholder for a key that is in fact usable.
+  it('keeps the value a masked site only hands back at creation', async () => {
+    const { account, site } = await seedAccount({ siteStatus: 'active' });
+    apiTokenWithValueEnabled = true;
+    getApiTokensMock.mockResolvedValue([
+      { name: 'li', key: '****...****', enabled: true, tokenGroup: '17' },
+    ]);
+    createApiTokenWithValueMock.mockResolvedValue({
+      name: 'metapi',
+      key: 'sk-only-printed-once',
+      tokenGroup: '17',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      keyCreated: true,
+    });
+    expect(createApiTokenWithValueMock).toHaveBeenCalledTimes(1);
+    expect(createApiTokenWithValueMock.mock.calls[0][0]).toBe(site.url);
+    expect(createApiTokenMock).not.toHaveBeenCalled();
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    const ready = tokenRows.filter((row) => row.valueStatus === 'ready');
+    expect(ready.map((row) => row.token)).toEqual(['sk-only-printed-once']);
+    expect(ready[0].tokenGroup).toBe('17');
+    // The unusable listing entry is still recorded, so the operator can see it.
+    expect(tokenRows.some((row) => row.valueStatus === 'masked_pending')).toBe(true);
+  });
+
+  // The gate matters: minting a key on a fork that will not print it leaves a
+  // key upstream that nothing here can ever use, i.e. worse than doing nothing.
+  it('does not mint a key when the site cannot hand the value back', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'li', key: '****...****', enabled: true, tokenGroup: 'default' },
+    ]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: true, synced: true, reason: 'upstream_masked_tokens' });
+    expect(createApiTokenMock).not.toHaveBeenCalled();
+    expect(createApiTokenWithValueMock).not.toHaveBeenCalled();
+  });
+
+  it('stores the creation-time value from the create route as well', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    apiTokenWithValueEnabled = true;
+    createApiTokenWithValueMock.mockResolvedValue({
+      name: 'metapi',
+      key: 'sk-created-via-route',
+      tokenGroup: '17',
+    });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'li', key: '****...****', enabled: true, tokenGroup: '17' },
+    ]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, name: 'metapi', group: '17' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: true, createdViaUpstream: true });
+    expect(createApiTokenWithValueMock.mock.calls[0][3]).toMatchObject({ name: 'metapi', group: '17' });
+    // Exactly one key: the sync that follows the create must not mint a second,
+    // default-group one behind it just because the listing masks everything.
+    expect(createApiTokenWithValueMock).toHaveBeenCalledTimes(1);
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows.filter((row) => row.valueStatus === 'ready').map((row) => row.token))
+      .toContain('sk-created-via-route');
+  });
+
+  // An account that already routes must not gather a new key every time the site
+  // masks its listing.
+  it('leaves an account with a usable key alone when the listing is masked', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    apiTokenWithValueEnabled = true;
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'existing',
+      token: 'sk-already-usable',
+      tokenGroup: '17',
+      valueStatus: 'ready',
+      enabled: true,
+      isDefault: true,
+      source: 'manual',
+    }).run();
+    getApiTokensMock.mockResolvedValue([
+      { name: 'li', key: '****...****', enabled: true, tokenGroup: '17' },
+    ]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenWithValueMock).not.toHaveBeenCalled();
+    expect(createApiTokenMock).not.toHaveBeenCalled();
   });
 
   // Sites with no credential cannot be read at all, so the batch sync has to say

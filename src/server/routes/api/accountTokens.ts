@@ -16,6 +16,7 @@ import {
   setDefaultToken,
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
+import { type ApiTokenInfo, type CreatedApiToken } from '../../services/platforms/base.js';
 import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { withAccountCredentialContext, withAccountProxyOverride } from '../../services/siteProxy.js';
@@ -73,12 +74,8 @@ type CoverageRefreshFailureItem = {
   discoveredApiToken: false;
 };
 
-type UpstreamApiTokenLike = {
-  name?: string | null;
-  key?: string | null;
-  enabled?: boolean | null;
-  tokenGroup?: string | null;
-};
+/** A listing entry, i.e. exactly what an adapter's `getApiTokens` returns. */
+type UpstreamApiTokenLike = ApiTokenInfo;
 
 /** The concrete adapter type, so the helper below needs no separate import. */
 type SiteAdapter = NonNullable<ReturnType<typeof getAdapter>>;
@@ -96,11 +93,78 @@ const SYNC_ALL_BATCH_SIZE = 3;
 
 /** Name given to a key this server creates when the site has none yet. */
 const AUTO_CREATED_TOKEN_NAME = 'metapi';
+
+/** True when a listing entry carries a placeholder instead of a readable key. */
+function isMaskedUpstreamTokenKey(key: string | null | undefined): boolean {
+  const value = (key || '').trim();
+  return value.includes('*') || value.includes('•');
+}
+
+/** Turns a key the site handed over once into a listing entry the sync understands. */
+function capturedTokenToListEntry(created: CreatedApiToken): UpstreamApiTokenLike {
+  return {
+    name: created.name,
+    key: created.key ?? '',
+    enabled: true,
+    tokenGroup: created.tokenGroup ?? null,
+  };
+}
+
+/**
+ * Prepends keys that only ever existed in a create response.
+ *
+ * Relays that mask their listing never echo these values back, so without this
+ * the sync would see a masked placeholder and file a pending row for a key that
+ * is in fact usable.
+ */
+function mergeCapturedTokens(
+  captured: UpstreamApiTokenLike[],
+  listed: UpstreamApiTokenLike[],
+): UpstreamApiTokenLike[] {
+  if (captured.length === 0) return listed;
+  const seen = new Set(listed.map((item) => (item.key || '').trim()).filter(Boolean));
+  const extra = captured.filter((item) => {
+    const key = (item.key || '').trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return extra.length > 0 ? [...extra, ...listed] : listed;
+}
 /**
  * Total budget for creating a missing key, including the follow-up listing call.
  * Creating a key is a write, so it gets a slightly larger window than a read.
  */
 const TOKEN_CREATE_TIMEOUT_MS = TOKEN_SYNC_TIMEOUT_MS * 2;
+
+/**
+ * Asks the site to mint a key and keeps whatever its answer carried.
+ *
+ * Prefers the value-returning write when the adapter has one: on relays that
+ * mask their listing, the create response is the only place the plaintext ever
+ * appears, so a caller that reads back the list instead would store a
+ * placeholder for a key that exists upstream but cannot be used here.
+ */
+async function createUpstreamToken(
+  adapter: SiteAdapter,
+  siteUrl: string,
+  accessToken: string,
+  platformUserId: number | null,
+  proxyUrl: string | null,
+): Promise<CreatedApiToken | null> {
+  const options = { name: AUTO_CREATED_TOKEN_NAME, unlimitedQuota: true };
+  return withTimeout(
+    () => withAccountProxyOverride(proxyUrl, async () => {
+      if (typeof adapter.createApiTokenWithValue === 'function') {
+        return adapter.createApiTokenWithValue(siteUrl, accessToken, platformUserId ?? undefined, options);
+      }
+      const ok = await adapter.createApiToken(siteUrl, accessToken, platformUserId ?? undefined, options);
+      return ok ? { name: AUTO_CREATED_TOKEN_NAME, key: null } : null;
+    }),
+    TOKEN_CREATE_TIMEOUT_MS,
+    `token create timeout (${Math.round(TOKEN_CREATE_TIMEOUT_MS / 1000)}s)`,
+  );
+}
 
 /**
  * Reads the account's keys, and when the site has none, creates one and reads it
@@ -115,8 +179,15 @@ async function loadOrCreateUpstreamTokens(input: {
   accessToken: string;
   platformUserId: number | null;
   proxyUrl: string | null;
+  /**
+   * Whether a listing where every entry is masked may be answered by minting a
+   * key. Callers that have just created one themselves pass false, otherwise the
+   * sync would immediately create a second, default-group key behind it.
+   */
+  allowMaskedCreate?: boolean;
 }): Promise<{ tokens: UpstreamApiTokenLike[]; created: boolean; createUnsupported: boolean }> {
   const { adapter, siteUrl, accessToken, platformUserId, proxyUrl } = input;
+  const allowMaskedCreate = input.allowMaskedCreate ?? true;
   if (!adapter) return { tokens: [], created: false, createUnsupported: true };
 
   const listTokens = async () => withTimeout(
@@ -127,7 +198,25 @@ async function loadOrCreateUpstreamTokens(input: {
   );
 
   let tokens = await listTokens();
-  if (tokens.length > 0) return { tokens, created: false, createUnsupported: false };
+  if (tokens.length > 0) {
+    // Every entry masked means the account has nothing this server can route
+    // with, and the fork may simply have no reveal route at all. Where the
+    // adapter can report the value at creation, mint one instead of leaving the
+    // account unroutable.
+    const allMasked = tokens.every((token) => isMaskedUpstreamTokenKey(token.key));
+    if (!allowMaskedCreate || !allMasked || typeof adapter.createApiTokenWithValue !== 'function') {
+      return { tokens, created: false, createUnsupported: false };
+    }
+    const captured = await createUpstreamToken(adapter, siteUrl, accessToken, platformUserId, proxyUrl);
+    if (captured?.key) {
+      return {
+        tokens: mergeCapturedTokens([capturedTokenToListEntry(captured)], tokens),
+        created: true,
+        createUnsupported: false,
+      };
+    }
+    return { tokens, created: false, createUnsupported: false };
+  }
 
   // Older deployments expose only the singular accessor; treat it as a list.
   const fallback = await withTimeout(
@@ -144,30 +233,26 @@ async function loadOrCreateUpstreamTokens(input: {
     };
   }
 
-  const createResult = await withTimeout(
-    () => withAccountProxyOverride(proxyUrl,
-      () => adapter.createApiToken(siteUrl, accessToken, platformUserId ?? undefined, {
-        name: AUTO_CREATED_TOKEN_NAME,
-        unlimitedQuota: true,
-      })),
-    TOKEN_CREATE_TIMEOUT_MS,
-    `token create timeout (${Math.round(TOKEN_CREATE_TIMEOUT_MS / 1000)}s)`,
-  );
-  if (!createResult) {
+  const created = await createUpstreamToken(adapter, siteUrl, accessToken, platformUserId, proxyUrl);
+  if (!created) {
     return { tokens: [], created: false, createUnsupported: true };
   }
 
   tokens = await listTokens();
   if (tokens.length === 0) {
-    const created = await withTimeout(
+    const createdKey = await withTimeout(
       () => withAccountProxyOverride(proxyUrl,
         () => adapter.getApiToken(siteUrl, accessToken, platformUserId ?? undefined)),
       TOKEN_SYNC_TIMEOUT_MS,
       `token sync timeout (${Math.round(TOKEN_SYNC_TIMEOUT_MS / 1000)}s)`,
     );
-    if (created) {
-      tokens = [{ name: 'default', key: created, enabled: true, tokenGroup: 'default' }];
+    if (createdKey) {
+      tokens = [{ name: 'default', key: createdKey, enabled: true, tokenGroup: 'default' }];
     }
+  }
+
+  if (created.key) {
+    tokens = mergeCapturedTokens([capturedTokenToListEntry(created)], tokens);
   }
 
   return { tokens, created: true, createUnsupported: false };
@@ -291,7 +376,10 @@ async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMe
   }
 }
 
-async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExecutionResult> {
+async function executeAccountTokenSync(
+  row: AccountWithSiteRow,
+  options?: { extraTokens?: UpstreamApiTokenLike[] },
+): Promise<SyncExecutionResult> {
   const accountId = row.accounts.id;
   const base = {
     accountId,
@@ -396,6 +484,17 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
     const platformUserId = resolvePlatformUserId(row.accounts.extraConfig, row.accounts.username);
     const accountProxyUrl = getProxyUrlFromExtraConfig(row.accounts.extraConfig);
 
+    // Only an account with nothing usable is worth minting a key for; otherwise a
+    // masked-only listing would quietly accumulate default-group keys every sync.
+    const usableLocalTokens = await db.select({ id: schema.accountTokens.id })
+      .from(schema.accountTokens)
+      .where(and(
+        eq(schema.accountTokens.accountId, accountId),
+        eq(schema.accountTokens.enabled, true),
+        eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+      ))
+      .all();
+
     // A site with no key yet is not a dead end: create one, otherwise the freshly
     // bound account has nothing to route with and silently stays unused.
     const { tokens, created: keyCreated, createUnsupported } = await withAccountCredentialContext(
@@ -406,6 +505,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
         accessToken: row.accounts.accessToken,
         platformUserId: platformUserId ?? null,
         proxyUrl: accountProxyUrl ?? null,
+        allowMaskedCreate: usableLocalTokens.length === 0 && (options?.extraTokens?.length ?? 0) === 0,
       }),
     );
 
@@ -427,7 +527,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
 
     const convergence = await convergeAccountMutation({
       accountId,
-      upstreamTokens: tokens,
+      upstreamTokens: mergeCapturedTokens(options?.extraTokens ?? [], tokens),
     });
     const synced = convergence.tokenSync!;
     if ((synced.maskedPending || 0) > 0) {
@@ -759,32 +859,38 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
-    const createdViaUpstream = await withAccountProxyOverride(
+    const createOptions = {
+      name: asTrimmedString(body.name),
+      group: asTrimmedString(body.group),
+      unlimitedQuota,
+      remainQuota,
+      expiredTime,
+      allowIps: asTrimmedString(body.allowIps),
+      modelLimitsEnabled,
+      modelLimits: asTrimmedString(body.modelLimits),
+    };
+    const createdToken = await withAccountProxyOverride(
       getProxyUrlFromExtraConfig(account.extraConfig),
       () => withAccountCredentialContext(
         { accountId: account.id, siteId: site.id },
-        () => adapter.createApiToken(
-          site.url,
-          account.accessToken,
-          platformUserId,
-          {
-            name: asTrimmedString(body.name),
-            group: asTrimmedString(body.group),
-            unlimitedQuota,
-            remainQuota,
-            expiredTime,
-            allowIps: asTrimmedString(body.allowIps),
-            modelLimitsEnabled,
-            modelLimits: asTrimmedString(body.modelLimits),
-          },
-        ),
+        async () => {
+          if (typeof adapter.createApiTokenWithValue === 'function') {
+            return adapter.createApiTokenWithValue(site.url, account.accessToken, platformUserId, createOptions);
+          }
+          const ok = await adapter.createApiToken(site.url, account.accessToken, platformUserId, createOptions);
+          return ok ? { name: createOptions.name || AUTO_CREATED_TOKEN_NAME, key: null } : null;
+        },
       ),
     );
-    if (!createdViaUpstream) {
+    if (!createdToken) {
       return reply.code(502).send({ success: false, message: '站点创建令牌失败' });
     }
 
-    const syncResult = await executeAccountTokenSync(row);
+    // The value handed back here may be the only copy: relays that mask their
+    // listing never echo it again, so it travels into the sync explicitly.
+    const syncResult = await executeAccountTokenSync(row, {
+      extraTokens: createdToken.key ? [capturedTokenToListEntry(createdToken)] : [],
+    });
     appendTokenSyncEvent(syncResult);
 
     if (syncResult.status === 'failed') {

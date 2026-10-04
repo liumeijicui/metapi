@@ -1,3 +1,31 @@
+### 43. 删除 Fate 站；补齐缺密钥的站点，并在「只给掩码」的站点上接住创建时的明文
+
+- **类型**：功能 + 修复 + 运维
+- **需求来源**：本会话（用户要求「把 fate 删了，然后检查一下哪些网站的 sk- 开头的密钥还没有的，可以通过 token 登录原网站帮我同步过来，有多个分组的可以建多个密钥，有些密钥可能加密了，注意这些」）
+- **一、删除 `Fate` 站（`#38`）**：先 `sqlite3 .backup` 落库备份（`/home/app/metapi-backups/hub-pre-fate-delete-20261004.db`，`integrity_check` ok），再走 `DELETE /api/sites/38`，账号 `#23` 及其令牌/签到日志随之级联清除。删前该站账号已 `expired` 且连续 5 轮 `Unauthorized, invalid access token`。
+- **二、密钥审计与补齐（改前 6 个账号一把可用密钥都没有）**
+  - 有账号但无任何密钥：`chinahk#14`、`llmpm#15`、`100xlabs#17`、`林夕(k40)#18`、`Columbina#24`；只有掩码没有明文：`哈基米API站#21`。
+  - 同步后：`chinahk`（default + `free` 分组）、`llmpm`、`Columbina`（default + `vip` 分组）由同步直接建出；`100xlabs`、`林夕(k40)` 走下面第三条的修复后各得 1 把可用密钥；`motomoto` 顺带更新 1 条。
+  - **实测可用**（不是只看入库）：4 把新密钥直接打站点 `/v1/models`，全部 `HTTP 200`（k40 2 个模型、100xlabs 4 个、chinahk-free 91 个、Columbina-vip 2 个）。
+  - 改后仍无可用密钥的只剩 4 处，且都是站点侧原因，非本次遗漏：`luckyg#4`（站点登录会话数上限，账号 `expired`）、`蛙蛙公益站#10`（`expired`，重登返回 401）、`哈基米API站#21`（见下）、`X-API#46`（api-key 连接，本就不走账号令牌表）。
+- **三、代码修复：sub2api 系「只给掩码」的站，明文只存在于创建响应里**
+  - **取证**：`sub2api` 系（100xlabs、林夕(k40)）的列表与单条读取一律回 `"key":"****...****"`，且没有取明文的路由（`POST /api/v1/keys/{id}/key` → `404 page not found`）。但**创建**的响应体里带着明文 `sk-…`。原实现的 `createApiToken()` 只返回 `boolean`，把这段明文丢掉了——于是在这类站上建出来的密钥，站点有、本地读不到，等于白建。
+  - **改动**：
+    - `base.ts`：新增 `CreatedApiToken` 与可选的 `createApiTokenWithValue()`。可选是刻意的——列表本身就有明文的适配器（new-api）无需实现，调用方用「能力是否存在」判断，而不是靠一个假的默认实现。
+    - `sub2api.ts`：`createApiToken()` 改为薄封装，真正逻辑落在 `createApiTokenWithValue()`，把创建响应里的 `key`/`group_id` 带回来；值是掩码或缺失时回 `key: null`，让调用方退回读列表，而不是把占位符当密钥存下来。`tokenGroup` **只记站点确实存下的分组**：站点会拒绝「号池为空」的分组并把密钥落到默认分组，把请求值当结果记会写错。
+    - `accountTokens.ts`：新增 `createUpstreamToken()` 统一走「能拿明文就拿」的创建路径；`executeAccountTokenSync()` 新增 `extraTokens`，把创建响应里的值显式送进同步（列表已掩码，只能这样带过去），`mergeCapturedTokens()` 按值去重。
+- **四、顺带修掉一个自己引入的重复建 key 缺陷（创建接口触发时）**
+  - **现象**：用「多分组建多把」跑完，站点侧多出 27 把 `metapi` 密钥（k40 13 把、100xlabs 14 把），而请求只有 6~7 次。
+  - **根因**：显式创建之后再走的那次同步里，列表**全是掩码**，于是「全掩码就补建一把」的新逻辑又触发了一次，凭空多建一把默认分组的密钥。
+  - **修法**：补建只在「该账号本地确实没有可用密钥」**且**「调用方这次没有刚建好并带明文进来」时才允许（`allowMaskedCreate`）。另外，链路不可回读明文（适配器没有 `createApiTokenWithValue`）的站点**一律不建**——否则只会在站点留下一把谁也读不到的密钥，比不建更糟。
+  - **清理**：把误建的全部删掉（站点侧按 id `DELETE /api/v1/keys/{id}` 共 27 把，本地对应记录同步删除），保留各站原有的 `li`/`jia`，再各留 1 把默认分组的可用密钥；删后站点侧与本地都已复核。
+- **五、哈基米API站（`#21`）：会话已修，密钥需人工**
+  - 会话确实失效（`Unauthorized, invalid access token`）。用 `autoRelogin` 里存的账号密码走健康检查里的重登，`access_token` 已换成新 `session=…`。
+  - 但密钥拿不到：列表回 `v6cc**********qe25`，该分支**没有取明文接口**（`/api/token/{id}/key` → 404），而**新建**密钥被站点拦下：`{"code":"VERIFICATION_REQUIRED","message":"需要安全验证"}`——即需要过一道人工安全验证。这正是用户说的「有些密钥可能加密了」。**结论**：只能在网页上手动建一把 key 再贴进来，自动化到不了。
+- **验证**：新增 6 例单测（`accountTokens.sync.test.ts` 4 例：掩码站接住创建明文、不能回读时不建、创建接口存下明文、已有可用密钥时不重复建；`sub2api.test.ts` 2 例：创建响应带回明文、响应也是掩码时回 null）；`accountTokens.sync` 34 例、`sub2api` 51 例、以及令牌/批量相关共 **96 例全绿**；`tsc -p tsconfig.server.json` 通过；构建并重启后 `/api/sites` 200。
+- **主要文件**：`src/server/services/platforms/base.ts`、`src/server/services/platforms/sub2api.ts`、`src/server/routes/api/accountTokens.ts`、`src/server/services/platforms/sub2api.test.ts`、`src/server/routes/api/accountTokens.sync.test.ts`
+- **状态**：已完成（哈基米的密钥为站点要求人工验证，已说明）
+
 ### 42. 运维：清掉孤儿浏览器 profile，并给 metapi 加一道内存保险丝
 
 - **类型**：运维（资源回收 + 防整机拖死）

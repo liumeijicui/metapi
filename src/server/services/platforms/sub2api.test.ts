@@ -1081,6 +1081,52 @@ describe('Sub2ApiAdapter', () => {
     expect(created).toBe(true);
   });
 
+  // This family prints a key once, in the create response, and answers
+  // `****...****` from then on. Dropping that value leaves a key on the site
+  // that nothing here can route through.
+  it('returns the key the create response printed', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/keys' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { id: 7, key: 'sk-printed-once', name: 'metapi', group_id: 17 },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const created = await adapter.createApiTokenWithValue(baseUrl, 'jwt-token', undefined, {
+      name: 'metapi',
+      group: '17',
+    });
+
+    expect(created).toEqual({ name: 'metapi', key: 'sk-printed-once', tokenGroup: '17' });
+  });
+
+  it('reports no value when the create response is masked too', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/keys' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { id: 8, key: '****...****', name: 'metapi', group_id: 17 },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const created = await adapter.createApiTokenWithValue(baseUrl, 'jwt-token', undefined, { name: 'metapi' });
+
+    // A placeholder is not a key: the caller must fall back to the listing
+    // rather than storing something unusable as if it were real.
+    expect(created?.key).toBeNull();
+  });
+
   it('binds an available group when creating a key without an explicit group', async () => {
     await startServer((req, res) => {
       if (req.url === '/api/v1/groups/available') {

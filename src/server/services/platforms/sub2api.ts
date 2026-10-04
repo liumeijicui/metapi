@@ -3,6 +3,7 @@ import {
   BasePlatformAdapter,
   CheckinResult,
   BalanceInfo,
+  CreatedApiToken,
   CreateApiTokenOptions,
   LotteryDrawOutcome,
   LotteryDrawRequest,
@@ -1390,9 +1391,25 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   override async createApiToken(
     baseUrl: string,
     accessToken: string,
-    _platformUserId?: number,
+    platformUserId?: number,
     options?: CreateApiTokenOptions,
   ): Promise<boolean> {
+    const created = await this.createApiTokenWithValue(baseUrl, accessToken, platformUserId, options);
+    return created !== null;
+  }
+
+  /**
+   * This family only ever prints a key in the create response: both the list and
+   * the per-key read answer `****...****`, and no reveal route exists. Returning
+   * the value here is therefore the only way a key this server mints stays
+   * usable — `createApiToken` alone would leave an unreadable key on the site.
+   */
+  async createApiTokenWithValue(
+    baseUrl: string,
+    accessToken: string,
+    _platformUserId?: number,
+    options?: CreateApiTokenOptions,
+  ): Promise<CreatedApiToken | null> {
     const normalizedBase = normalizeBaseUrl(baseUrl);
     const payload: Record<string, unknown> = {
       name: (options?.name || '').trim() || 'metapi',
@@ -1432,13 +1449,28 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
             headers,
             body: JSON.stringify(attempt),
           });
-          this.parseSub2ApiEnvelope<any>(res, endpoint);
-          return true;
+          const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+          const key = typeof data?.key === 'string' ? data.key.trim() : '';
+          const groupIdValue = Number.parseInt(String(data?.group_id ?? data?.groupId ?? ''), 10);
+          return {
+            name: typeof data?.name === 'string' && data.name.trim()
+              ? data.name.trim()
+              : (options?.name || '').trim() || 'metapi',
+            // A masked value is not a key; report null so the caller falls back
+            // to reading the listing instead of storing a placeholder.
+            key: key && !key.includes('*') && !key.includes('•') ? key : null,
+            // Only the group the site actually stored. Reporting the requested
+            // one would be a guess: a group whose pool is empty is refused, and
+            // the create then lands in whatever group the site falls back to.
+            tokenGroup: Number.isFinite(groupIdValue) && groupIdValue > 0
+              ? String(groupIdValue)
+              : null,
+          };
         } catch {}
       }
     }
 
-    return false;
+    return null;
   }
 
   override async deleteApiToken(
