@@ -1,3 +1,4 @@
+import { browserLane } from '../shared/browserLane.js';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { assistedLoginSessions } from './assistedLogin/sessionRegistry.js';
@@ -177,7 +178,9 @@ export async function refreshCloudflareClearance(siteUrl: string): Promise<Refre
   const task = (async (): Promise<RefreshResult> => {
     const site = await findSiteByUrl(siteUrl);
     if (!site) return { ok: false, message: '未找到匹配的站点记录' };
-    const result = await runRefresh(site.url);
+    // The managed browser is shared with the login flows, so a shield that
+    // re-challenges mid-burst must not open a second window alongside them.
+    const result = await browserLane.run(() => runRefresh(site.url));
     if (result.ok && result.cookieHeader && result.userAgent) {
       await persistClearance(site, result.cookieHeader, result.userAgent);
     }

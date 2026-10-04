@@ -18,6 +18,7 @@
  * that refresh balances keep it off: a check-in run restores the session and
  * the balance that follows is then fine.
  */
+import { browserLane } from '../shared/browserLane.js';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
@@ -589,5 +590,11 @@ export async function tryAutoRelogin(
   // account with no password field at all, can be answered by a browser.
   if (!passwordAttempt.blockedByHumanCheck && getAutoReloginConfig(account.extraConfig)) return null;
   if (options.browserFallbackRequiresHumanCheck && !passwordAttempt.blockedByHumanCheck) return null;
-  return tryBrowserRelogin(account, site);
+
+  // Everything headed goes through one lane. The balance refresh and the
+  // check-in pass both reach this point from an unbounded fan-out, so without
+  // the gate a single scheduled tick could start dozens of Chromium runs at
+  // once - which is what produced the `session_rejected` and "browser would not
+  // start" errors, and the memory spikes that went with them.
+  return browserLane.run(() => tryBrowserRelogin(account, site));
 }

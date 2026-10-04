@@ -12,6 +12,7 @@ import {
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { tryAutoRelogin } from './autoRelogin.js';
+import { createSerialQueue } from '../shared/serialQueue.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
@@ -21,6 +22,17 @@ import {
   isSub2ApiPlatform,
 } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
+
+/**
+ * How many balance reads may be in flight at once.
+ *
+ * Deliberately small: a refresh is a cheap HTTP call right up until a session
+ * has lapsed, at which point it can drive the headed browser instead. A handful
+ * in parallel keeps the hourly pass quick while making it impossible for one
+ * tick to become the stampede that the sites throttle and the browser lane then
+ * has to drain.
+ */
+const BALANCE_REFRESH_CONCURRENCY = 4;
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -480,15 +492,21 @@ export async function refreshAllBalances() {
 
   const results: Array<{ accountId: number; balance: number | null }> = [];
 
+  // Bounded, not `Promise.all`. Each refresh can fall back to the headed browser
+  // when a session has died, so an unbounded fan-out over every account turns
+  // one scheduled tick into a stampede on the login flows; the sites answer that
+  // with 429s and the browser lane with a long queue. A small fixed width keeps
+  // the refresh moving without ever producing that burst.
+  const queue = createSerialQueue(BALANCE_REFRESH_CONCURRENCY);
   await Promise.all(
-    rows.map(async (account) => {
+    rows.map((account: typeof schema.accounts.$inferSelect) => queue.run(async () => {
       try {
         const info = await refreshBalance(account.id);
         results.push({ accountId: account.id, balance: info?.balance ?? null });
       } catch {
         results.push({ accountId: account.id, balance: null });
       }
-    }),
+    })),
   );
 
   return results;

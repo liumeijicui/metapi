@@ -636,7 +636,19 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
     grouped.get(siteId)!.push(row);
   }
 
-  const promises = Array.from(grouped.entries()).map(async ([_, siteRows]) => {
+  // Accounts are visited one after another, and the sites are visited in a
+  // stable order so a run is reproducible.
+  //
+  // This used to fan every site out at once with `Promise.all`. With two dozen
+  // sites that meant a whole wave of sign-ins landing in the same second: the
+  // sites rate-limited the burst, several of them counted the parallel logins
+  // as separate sessions and refused the extra ones, and every account that
+  // needed the headed browser walked into it simultaneously - the browser lane
+  // then spent the next minutes working through a queue that only existed
+  // because the fan-out was unbounded. Nothing here is latency-sensitive (it
+  // runs on an hourly or daily schedule), so serialising costs nothing and
+  // removes all of that at once.
+  for (const [_, siteRows] of Array.from(grouped.entries()).sort((a, b) => a[0] - b[0])) {
     for (const row of siteRows) {
       const r = await checkinAccount(row.accounts.id, {
         skipEvent: true,
@@ -649,8 +661,7 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
         result: r,
       });
     }
-  });
+  }
 
-  await Promise.all(promises);
   return results;
 }

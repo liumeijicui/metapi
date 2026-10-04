@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CheckinResult } from './platforms/base.js';
 import { resolveChromiumExecutable } from './assistedLogin/chromeLocator.js';
+import { browserLane } from '../shared/browserLane.js';
 
 /**
  * Runs a check-in inside a real browser on a virtual X display.
@@ -221,11 +222,13 @@ export function mapCheckinVerdict(verdict: RawCheckinVerdict): CheckinResult {
   return { success: false, message: `浏览器签到未完成：${verdict.detail}` };
 }
 
-let runQueue: Promise<unknown> = Promise.resolve();
 
 /**
- * Serializes browser runs: they share one X display and one Chromium profile
- * per site, and two windows on the same display would fight over input focus.
+ * Runs one browser check-in, through the shared browser lane.
+ *
+ * The local queue that used to live here only serialised check-ins against each
+ * other, which still left them racing the headed relogin flows for the same X
+ * display. Everything that drives Chromium now takes the same lane.
  */
 export async function runBrowserCheckin(input: BrowserCheckinInput): Promise<BrowserCheckinOutcome> {
   const unavailable = browserCheckinUnavailableReason();
@@ -234,9 +237,7 @@ export async function runBrowserCheckin(input: BrowserCheckinInput): Promise<Bro
   const scriptPath = resolveScriptPath();
   if (!scriptPath) return { kind: 'unavailable', reason: 'missing browser check-in script' };
 
-  const run = runQueue.then(() => executeBrowserCheckin(input, scriptPath));
-  runQueue = run.catch(() => undefined);
-  return run;
+  return browserLane.run(() => executeBrowserCheckin(input, scriptPath));
 }
 
 async function executeBrowserCheckin(

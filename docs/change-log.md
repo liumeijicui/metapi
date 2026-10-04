@@ -1,3 +1,27 @@
+### 40. 浏览器工作收成单通道串行，止住每小时整点爆发的「拉不起浏览器」
+
+- **类型**：修复（并发治理）
+- **需求来源**：本会话（用户反馈「项目里好多拉起浏览器的报错，看是不是并发没控制导致的」，并要求「直接 1 个，顺序执行就行，速度不要求」）
+- **现象（DB 取证，非猜测）**：`checkin_logs` 里失败高度聚集在**每小时的 `:08`**（签到 cron `0 8 * * * *` 是 6 段式，即「每小时第 8 分」），且失败量是 `:00~:11` 里最高的：`00:08` 10 次、`01:08` 15 次、`02:08` 14 次……同一分钟里另有两类尾巴错误：
+  - `无法启动受管浏览器：Unable to attach to the managed browser: browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9334`（端口文件的旧值，已在第 39 条修掉，但仍说明同一时刻有多个流程在抢同一个浏览器）；
+  - `浏览器签到未完成：session_rejected`，以及重登重试的 `连续 5 次退出重登仍未到账`。
+  - 另有一条 `站点登录会话数已达上限：在站点上退出其他登录会话…`——并行登录被站点计成了多个会话。
+- **根因**：**调度层面的无界扇出**。`checkinAll` 按站点分好组后直接 `Promise.all`，`refreshAllBalances` 对全部账号直接 `Promise.all`，两处都没有任何宽度限制；而这两条链路在会话失效时**都会回落到 `tryAutoRelogin` 的浏览器分支**。于是一个整点 tick 就能让二三十个账号同时走进浏览器：站点以 429/会话数上限回应，浏览器则以「起不来」和「拿到的 cookie 已被交换掉」回应。
+  - 顺带发现 `session_rejected` 的机理：HTTP 签到那一步会**轮换滚动凭证**，把本次启动时持有的值作废；并发之下浏览器拿到的副本已经被别的流程换过，于是「播种的会话打不开登录后的页面」。
+  - `browserCheckinRunner` 自己**本来就有**一条串行队列，所以它不是元凶；漏的是「它之外的重登路径」和「上层调度」。
+- **改动**：
+  - `src/server/shared/serialQueue.ts`（新）：一个定宽 FIFO 闸门，**可重入**。可重入不是锦上添花：重登分支内部会再调浏览器签到，二者共用同一条宽 1 的通道，若不可重入就会「自己等自己持有的名额」而永久卡死。实现用 `AsyncLocalStorage` 识别「同一条通道内发起的嵌套调用」，命中则内联执行。
+  - `src/server/shared/browserLane.ts`（新）：全项目唯一一条 `browserLane`（宽度 1）。所有要驱动有头浏览器的流程都必须过它。
+  - `browserCheckinRunner.runBrowserCheckin()`：弃用自带的局部队列，改走 `browserLane`——原来它只跟「自己人」互斥，仍会和外部的重登抢同一个 X display。
+  - `autoRelogin.tryAutoRelogin()`：浏览器回落分支包进 `browserLane`，这是挡住整点爆发的关键一处。
+  - `cloudflareClearance.refreshCloudflareClearance()`：过盾也走同一条通道，避免盾在没有预期的时候再开一个窗口。
+  - `checkinService.checkinAll()`：`Promise.all` 改为**顺序执行**，按站点 id 稳定排序，保证每轮可复现。速度本来就不是约束（小时/天级调度）。
+  - `balanceService.refreshAllBalances()`：无界 `Promise.all` 改为定宽 4 的闸门（`BALANCE_REFRESH_CONCURRENCY`），因为每次余额刷新都可能回落浏览器，但纯 HTTP 部分不必要退化成完全串行。
+- **验证**：`serialQueue` 6 例（宽度限制、调用顺序、异常后不卡队列、嵌套重入、站外仍排队）、`browserLane` 3 例（宽度为 1、失败后仍可用、**嵌套不再死锁**）全绿；受影响的既有用例 `autoRelogin` / `checkinService.autoRelogin` / `browserCheckinRunner` / `browserSessionCredential` / `checkinScheduler` / `cloudflareClearance` / `balanceService` / `siteCustomHeaders` 共 80 例全绿；`tsc -p tsconfig.server.json` 通过；服务重启后 `/api/sites` 200。
+- **备注**：`tsc -p tsconfig.json`（含测试文件）在本机有 92 个文件的既有类型报错，与本次改动无关，属环境性既有问题；项目构建门 `tsconfig.server.json` 干净。
+- **主要文件**：`src/server/shared/serialQueue.ts`（新）、`src/server/shared/browserLane.ts`（新）、`src/server/shared/*.test.ts`（新）、`src/server/services/browserCheckinRunner.ts`、`src/server/services/autoRelogin.ts`、`src/server/services/cloudflareClearance.ts`、`src/server/services/checkinService.ts`、`src/server/services/balanceService.ts`
+- **状态**：已完成
+
 ### 39. Cloudflare 盾自动续期：403 时自动重新过盾，并修掉受管浏览器「死活挂不上」
 
 - **类型**：功能 + 修复 + 运维
