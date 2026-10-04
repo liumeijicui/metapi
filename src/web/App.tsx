@@ -148,9 +148,9 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
     },
   ];
   const selfUsePoints = [
-    t('只有本人使用，没有注册、充值、分销，也不对外售卖额度。'),
-    t('不承诺可用性、速度与 SLA，可能随时调整、停服或下线。'),
-    t('请不要把重要数据或生产业务依赖挂在上面。'),
+    t('只有本人使用：没有注册、充值、分销，也不对外售卖额度。'),
+    t('这里只是我自己的私人工具箱，密钥、额度和数据都归我一人使用。'),
+    t('不接待任何访客，请不要尝试登录或使用这里的任何资源。'),
   ];
 
   const handleLogin = async () => {
@@ -237,7 +237,7 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
               <div className="login-selfuse-text">
                 <div className="login-selfuse-title">{t('个人自用声明')}</div>
                 <p className="login-selfuse-lead">
-                  {t('这是一台只给站长自己用的私人网关，不是公开服务。')}
+                  {t('这台网关只服务我一个人：不对外开放，也不接待任何访客。')}
                 </p>
               </div>
             </div>

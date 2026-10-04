@@ -53,10 +53,13 @@ describe('Login surface', () => {
       // 「自用」声明：徽标 + 声明卡片 + 登录面板小提示，三处都要在。
       expect(pageText).toContain('个人自用 · 不对外提供服务');
       expect(pageText).toContain('个人自用声明');
-      expect(pageText).toContain('这是一台只给站长自己用的私人网关，不是公开服务。');
-      expect(pageText).toContain('只有本人使用，没有注册、充值、分销，也不对外售卖额度。');
-      expect(pageText).toContain('不承诺可用性、速度与 SLA，可能随时调整、停服或下线。');
-      expect(pageText).toContain('请不要把重要数据或生产业务依赖挂在上面。');
+      expect(pageText).toContain('这台网关只服务我一个人：不对外开放，也不接待任何访客。');
+      expect(pageText).toContain('只有本人使用：没有注册、充值、分销，也不对外售卖额度。');
+      expect(pageText).toContain('这里只是我自己的私人工具箱，密钥、额度和数据都归我一人使用。');
+      expect(pageText).toContain('不接待任何访客，请不要尝试登录或使用这里的任何资源。');
+      // 这两条听起来像「对外转发服务的免责声明」，已换成纯自用提醒，不要再回来。
+      expect(pageText).not.toContain('不承诺可用性、速度与 SLA');
+      expect(pageText).not.toContain('请不要把重要数据或生产业务依赖挂在上面');
       expect(pageText).toContain('个人自用 · 非公开服务');
       expect(lightBrandPanel).toBeTruthy();
       expect(authStage).toBeTruthy();
