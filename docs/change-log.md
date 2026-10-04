@@ -39,6 +39,14 @@
   - 新增 3 个字段 `pricing_unit` / `input_price` / `output_price`（迁移 `0029_square_hydra`），卡片与表格都显示；表格新增「价格」列，空的显示 `—`。
   - 站点名在卡片、失败列表、不支持列表里都变成**新标签页打开站点首页**的链接；模型名变成按钮，**点一下复制**，复制后按钮内浮出「已复制」提示。
   - 实测：659 个模型里 **540 个拿到价格**（哈基米 295/295、chinahk 69/70、HongShi 47/47、方舟 19/19…）。剩下 5 个站（霸气公益平台、君の公益、SeekAi、澎湃AI网关、JustDoWork）的 `/api/pricing` 需要登录态或站点侧就不开放，属于**站点侧拿不到**，不是没接。
+- **四·补四、（本轮追加）修「表达式计费」站点的价格：原来整站模型都被算成 $75 / $75**
+  - 现象与定位：happycoding 这类站点在 `/api/pricing` 里把 `model_ratio` 留成**废字段**（固定 37.5），真实价格写在 `billing_mode: "tiered_expr"` 的 `billing_expr` 里。旧逻辑照旧读 `model_ratio * 2`，于是整站每个模型都成了 `输入 $75 / 输出 $75`，与站点自己的价目页（`deepseek-v4.1-flash` 是 $0.3、`kimi-k3` $3、`glm-5.3-flash` $0.15……）完全不符。
+  - 做法：新增 `src/server/services/billingExpression.ts` 求值器，按 new-api 的语义（表达式里的系数就是**「美元 / 1M tokens」的挂牌价**，`fixed(x)` 是**每次请求 x 美元**）代入 1M / 2M token 做差分，还原出输入 / 输出单价。`len` 取小值让多档表达式落到**最短上下文**那档，`p`/`c` 取样走大值以自动跳过「探测价」分支；时间档（`hour()` / `weekday()`）按取价当时的 UTC 时间选档。
+  - 分组倍率照旧乘（与站点自己的价目页一致，如 ultrarouter 的 core 组 0.5）；`fixed()` 的模型改成**按次计费**（chinahk 那批 `fixed(0.6)` 原先也是 $75/$75，现在是 `$0.03 / 次`）。
+  - 容错：解析不了的表达式**不落假价**，宁可显示「—」，也不再拿废掉的 `model_ratio` 编数字；非表达式站点（anyrouter / one-hub 那套）走原逻辑，行为不变。
+  - 顺手修掉一个真 bug：三元表达式原先**两个分支都会被求值**，`tier()` / `fixed()` 的副作用互相覆盖，导致「探测价」模型被误判成按次计费。
+  - 实测（生产刷新后）：happycoding 6 个模型里 5 个变成真实价（`deepseek-v4.1-flash $0.3/$1.2`、`kimi-k3 $3/$15`、`minimax-m3 $0.3/$1.2`、`glm-5.3 $1.4/$4.4`、`glm-5.3-flash $0.15/$0.5`）；唯一仍是 $75 的 `deepseek-v4-1-flash` 是因为**站点自己就没给它配 `billing_expr`**，站点价目页同样按 `37.5 × 2` 显示 $75，与我们一致。
+  - 验证：新增单测 8 例（`billingExpression.test.ts`：flat / 多档 / 探测价 / fixed / 时间档 / 零价 / 解析失败）+ 2 例（`modelPricingService.tieredExpr.test.ts`：真实站点形状 + 解析失败不落假价），`modelPricingService` / `modelMonitorService` 既有 20 例回归全绿。
 - **五、实测（生产库 + 真实站点，不是造数据）**
   - 首轮 39 个活跃站点全部跑完：**22 站取到数据、657 个模型**；`unsupported` 11 站（sub2api/agentrouter/xapi/gwrelay 等平台没有这个接口，或 new-api 版本较旧回 404）、`empty` 3 站（`{models:[], show_throughput:false}`）、`error` 3 站。
   - `error` 的都给了上游真实原因：Any Router 是 **HTTP 200 但返回的不是 JSON（被盾拦）**，luckyg 与 蛙蛙 是 **HTTP 401 凭据无效**（与第 44 条结论一致，不再是含糊的「没有凭据」——站点账号全部过期时也会照试一次，好让页面显示上游的原话）。
@@ -46,7 +54,7 @@
   - 新增单测 **20 例**：`modelMonitorService.test.ts`（窗口边界/跨夜、脏数据解析、采集成功写入、上一轮模型被清掉、失败保留旧数据、单飞复用、过期账号也照试、筛选与四种排序）、`newApi.perfMetricsPayload.test.ts`（新旧两种响应形状 + 空数据 + 脏行）、`modelMonitor.test.ts`（路由筛选、非法 sort 兜底、refresh 入队）。
   - 回归：`newApi` / `migrate` / `runtimeSchemaBootstrap` 等相关 **83 例全绿**；`tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`npm run build:server`、`vite build`、`repo:drift-check`（0 violations）均通过；重启服务后实测接口与页面正常。
   - 重新生成并提交了 schema 三件套（drizzle 迁移 + SQLite journal + `schemaContract.json` 与 MySQL/Postgres bootstrap/upgrade），并把 README / `docs/index.md` 的菜单截图说明从「可用性监控」改成「模型监控」（截图已重新采集）。
-- **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/services/modelPricingService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`drizzle/0029_square_hydra.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
+- **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/services/modelPricingService.ts`、`src/server/services/billingExpression.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`drizzle/0029_square_hydra.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
 - **状态**：已完成（`unsupported` 的站点是站点侧没有这个接口、5 个站点的 `/api/pricing` 拿不到价格，都属于站点侧限制，无法通过本站改造解决）
 ### 44. luckyg / 蛙蛙公益站 的恢复排查：两站都卡在站点侧，自动清理机制本身已验证有效
 

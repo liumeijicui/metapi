@@ -4,6 +4,10 @@ import {
   buildNewApiCookieCandidates,
   fetchJsonWithShieldCookieRetry,
 } from './platforms/newApiShield.js';
+import {
+  resolveBillingExpressionPricing,
+  type BillingExpressionPricing,
+} from './billingExpression.js';
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
@@ -22,6 +26,10 @@ export interface PricingModel {
   quotaType: number;
   modelRatio: number;
   completionRatio: number;
+  /** new-api 的计费模式；`tiered_expr` 表示价格写在 billingExpr 里。 */
+  billingMode?: string | null;
+  /** 表达式计费的价格公式，系数单位是「美元 / 1M tokens」。 */
+  billingExpr?: string | null;
   cacheRatio?: number;
   cacheCreationRatio?: number;
   modelPrice: number | { input: number; output: number } | null;
@@ -242,12 +250,18 @@ function normalizePricingModels(rawModels: unknown[]): Map<string, PricingModel>
     const supportedEndpointTypes = normalizeStringArray((raw as any).supported_endpoint_types);
     const ownerByRaw = (raw as any).owner_by;
     const ownerBy = typeof ownerByRaw === 'string' ? (ownerByRaw.trim() || null) : null;
+    const billingModeRaw = (raw as any).billing_mode ?? (raw as any).billingMode;
+    const billingMode = typeof billingModeRaw === 'string' ? (billingModeRaw.trim() || null) : null;
+    const billingExprRaw = (raw as any).billing_expr ?? (raw as any).billingExpr;
+    const billingExpr = typeof billingExprRaw === 'string' ? (billingExprRaw.trim() || null) : null;
 
     models.set(modelName, {
       modelName,
       quotaType,
       modelRatio: modelRatio > 0 ? modelRatio : 1,
       completionRatio: completionRatio > 0 ? completionRatio : 1,
+      billingMode,
+      billingExpr,
       cacheRatio,
       cacheCreationRatio,
       modelPrice: normalizeModelPrice((raw as any).model_price),
@@ -722,6 +736,52 @@ export function calculateModelUsageCost(
   return calculateModelUsageBreakdown(model, usage, groupRatio)?.breakdown.totalCost ?? 0;
 }
 
+/**
+ * 解析表达式计费模型的价格。返回 `null` 表示「不是表达式计费」，调用方继续走
+ * 倍率逻辑；返回结果里价格为 `null` 表示「是表达式计费但没解析出来」，这时
+ * 宁可显示「无价格」也不要用废掉的 model_ratio 编一个假价。
+ */
+function resolveModelExpressionPricing(model: PricingModel): BillingExpressionPricing | null {
+  const expression = model.billingExpr?.trim();
+  if (!expression) return null;
+  const mode = model.billingMode?.trim();
+  if (mode && mode !== 'tiered_expr') return null;
+
+  const resolved = resolveBillingExpressionPricing(expression);
+  if (resolved) return resolved;
+  return {
+    unit: 'token',
+    inputPerMillion: null,
+    outputPerMillion: null,
+    perRequestUsd: null,
+    matchedTier: null,
+  };
+}
+
+function buildExpressionGroupPricing(
+  pricing: BillingExpressionPricing,
+  multiplier: number,
+): ModelGroupPricing {
+  if (pricing.unit === 'request') {
+    return {
+      quotaType: 1,
+      perCallTotal: pricing.perRequestUsd === null
+        ? undefined
+        : roundCost(pricing.perRequestUsd * multiplier),
+    };
+  }
+
+  return {
+    quotaType: 0,
+    inputPerMillion: pricing.inputPerMillion === null
+      ? undefined
+      : roundCost(pricing.inputPerMillion * multiplier),
+    outputPerMillion: pricing.outputPerMillion === null
+      ? undefined
+      : roundCost(pricing.outputPerMillion * multiplier),
+  };
+}
+
 function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricingCatalog {
   const groups = Array.from(new Set([DEFAULT_GROUP, ...Object.keys(pricingData.groupRatio)]));
   const defaultMultiplier = pricingData.groupRatio[DEFAULT_GROUP] || 1;
@@ -731,9 +791,16 @@ function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricin
       const allowedGroups = Array.from(new Set([...(model.enableGroups || []), DEFAULT_GROUP]));
       const modelGroups = groups.filter((group) => allowedGroups.includes(group));
       const effectiveGroups = modelGroups.length > 0 ? modelGroups : [DEFAULT_GROUP];
+      // 表达式计费（tiered_expr）的站点里 model_ratio 是废字段，价格只认
+      // billing_expr。整站共用同一份公式，所以每个模型只解一次。
+      const expressionPricing = resolveModelExpressionPricing(model);
 
       const groupPricing = effectiveGroups.reduce<Record<string, ModelGroupPricing>>((acc, group) => {
         const multiplier = pricingData.groupRatio[group] || defaultMultiplier;
+        if (expressionPricing) {
+          acc[group] = buildExpressionGroupPricing(expressionPricing, multiplier);
+          return acc;
+        }
         if (model.quotaType === 1) {
           const perCall = calculatePerCallPricing(model.modelPrice, multiplier);
           acc[group] = {
@@ -757,7 +824,8 @@ function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricin
 
       return {
         modelName: model.modelName,
-        quotaType: model.quotaType,
+        // 表达式计费可能是「按次」（fixed），这时对外的 quotaType 也要跟着变。
+        quotaType: expressionPricing?.unit === 'request' ? 1 : model.quotaType,
         modelDescription: model.modelDescription || null,
         tags: model.tags || [],
         supportedEndpointTypes: model.supportedEndpointTypes || [],
