@@ -164,6 +164,7 @@ export default function ModelMonitor() {
   const [minSuccessRate, setMinSuccessRate] = useState('');
   const [sortKey, setSortKey] = useState('success');
   const [showFailures, setShowFailures] = useState(false);
+  const [showUnsupported, setShowUnsupported] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async (silent = false) => {
@@ -221,13 +222,17 @@ export default function ModelMonitor() {
 
   const models = overview?.models ?? [];
   const sites = overview?.sites ?? [];
-  const failedSites = sites.filter((site) => site.status !== 'ok');
+  // 站点自己就没有这个接口，属于「已知无法采集」，和真正需要关注的失败
+  // 分开：默认不占版面，只在需要时展开看一眼。
+  const failedSites = sites.filter((site) => site.status !== 'ok' && site.status !== 'unsupported');
+  const unsupportedSites = sites.filter((site) => site.status === 'unsupported');
 
   const stats = useMemo(() => {
     const okSites = sites.filter((site) => site.status === 'ok').length;
+    const unsupported = sites.filter((site) => site.status === 'unsupported').length;
     const rates = models.map((model) => model.successRate).filter((rate): rate is number => rate != null);
     const average = rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : null;
-    return { okSites, totalSites: sites.length, average };
+    return { okSites, totalSites: sites.length - unsupported, unsupported, average };
   }, [models, sites]);
 
   const windowText = overview
@@ -276,7 +281,9 @@ export default function ModelMonitor() {
           </div>
           <div className="stat-card-row">
             <span>{tr('覆盖站点')}</span>
-            <strong>{stats.okSites} / {stats.totalSites}</strong>
+            <strong title={tr('不含站点侧没有模型监控接口的站点')}>
+              {stats.okSites} / {stats.totalSites}
+            </strong>
           </div>
         </div>
         <div className="stat-card">
@@ -305,7 +312,9 @@ export default function ModelMonitor() {
         <select value={siteFilter} onChange={(event) => setSiteFilter(event.target.value)}>
           <option value="">{tr('全部站点')}</option>
           {sites.map((site) => (
-            <option key={site.siteId} value={site.siteId}>{site.siteName}</option>
+            <option key={site.siteId} value={site.siteId}>
+              {site.status === 'unsupported' ? `${site.siteName}${tr('（不支持）')}` : site.siteName}
+            </option>
           ))}
         </select>
         <select value={minSuccessRate} onChange={(event) => setMinSuccessRate(event.target.value)}>
@@ -353,6 +362,28 @@ export default function ModelMonitor() {
                 </li>
               ))}
             </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {unsupportedSites.length ? (
+        <div className="model-monitor-unsupported">
+          <button
+            className="model-monitor-unsupported-head"
+            onClick={() => setShowUnsupported((current) => !current)}
+          >
+            <span className="badge badge-muted">{tr('站点不支持')}</span>
+            <span>
+              {unsupportedSites.length} {tr('个站点没有模型监控接口')}
+            </span>
+            <span>{showUnsupported ? tr('收起') : tr('展开')}</span>
+          </button>
+          {showUnsupported ? (
+            <div className="model-monitor-unsupported-list">
+              {unsupportedSites.map((site) => (
+                <span key={site.siteId} title={site.message || ''}>{site.siteName}</span>
+              ))}
+            </div>
           ) : null}
         </div>
       ) : null}

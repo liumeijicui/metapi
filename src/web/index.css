@@ -5764,6 +5764,50 @@ textarea {
   white-space: nowrap;
 }
 
+/* 站点侧没有这个接口的站点：默认折叠，只留一行低调的说明。 */
+.model-monitor-unsupported {
+  margin-bottom: 12px;
+}
+
+.model-monitor-unsupported-head {
+  width: 100%;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
+.model-monitor-unsupported-head:hover {
+  border-color: var(--color-text-muted);
+}
+
+.model-monitor-unsupported-head > span:nth-child(2) {
+  flex: 1 1 auto;
+}
+
+.model-monitor-unsupported-list {
+  margin-top: 8px;
+  padding: 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-monitor-unsupported-list span {
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
 .model-monitor-legend {
   margin-top: 12px;
   font-size: 12px;

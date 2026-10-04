@@ -923,4 +923,7 @@ export const zhToEnSupplemental: Record<string, string> = {
   '小时前': 'h ago',
   '天前': 'd ago',
   '尚未采集': 'Not collected yet',
+  '个站点没有模型监控接口': 'sites have no model metrics endpoint',
+  '（不支持）': ' (unsupported)',
+  '不含站点侧没有模型监控接口的站点': 'Excludes sites whose build has no model metrics endpoint',
 };

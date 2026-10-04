@@ -23,11 +23,16 @@
   - 卡片：模型名 + 右上角成功率（按 ≥100/≥90/≥70/<70 着色）、站点名、24 格成功率色带、延迟与吞吐。
   - 「未取到数据的站点」可展开，逐站显示状态徽章、**真实原因**（例如 `HTTP 401：站点判定当前凭据无效`）与时间——不写「401」这类只有内行才懂的字样。
   - 顺手**删掉了上一版的 LDOH iframe 代理整条链路**（`/api/monitor/*`、`/monitor-proxy/*` 路由与旧页面），`/monitor` 现在就是新页面；桌面端口令守卫里那条同源放行规则仍保留（对其它同源链接同样适用）。
+- **四·补、（本轮追加）把「站点不支持」从失败列表里摘出去**
+  - 11 个站点是平台/版本层面就没有 `/api/perf-metrics`，属于**已知无法采集**，跟真正需要关注的失败混在一起会让人每次都要展开看一遍。
+  - 现在这类站点单独折叠成一行低调提示（`站点不支持 · 11 个站点没有模型监控接口`，点开是站点名标签），**默认不占版面**；「未取到数据的站点」只剩 6 个真正需要看的。
+  - 「覆盖站点」的分母也跟着扣掉这些站点（现在是 `22 / 28`，悬停有说明），站点下拉里给它们加 `（不支持）` 后缀。
+  - 补 2 例源码级断言（沿用仓库前端测试的写法）钉住这个行为。
 - **五、实测（生产库 + 真实站点，不是造数据）**
   - 首轮 39 个活跃站点全部跑完：**22 站取到数据、657 个模型**；`unsupported` 11 站（sub2api/agentrouter/xapi/gwrelay 等平台没有这个接口，或 new-api 版本较旧回 404）、`empty` 3 站（`{models:[], show_throughput:false}`）、`error` 3 站。
   - `error` 的都给了上游真实原因：Any Router 是 **HTTP 200 但返回的不是 JSON（被盾拦）**，luckyg 与 蛙蛙 是 **HTTP 401 凭据无效**（与第 44 条结论一致，不再是含糊的「没有凭据」——站点账号全部过期时也会照试一次，好让页面显示上游的原话）。
 - **六、验证**
-  - 新增单测 **18 例**：`modelMonitorService.test.ts`（窗口边界/跨夜、脏数据解析、采集成功写入、上一轮模型被清掉、失败保留旧数据、单飞复用、过期账号也照试、筛选与四种排序）、`newApi.perfMetricsPayload.test.ts`（新旧两种响应形状 + 空数据 + 脏行）、`modelMonitor.test.ts`（路由筛选、非法 sort 兜底、refresh 入队）。
+  - 新增单测 **20 例**：`modelMonitorService.test.ts`（窗口边界/跨夜、脏数据解析、采集成功写入、上一轮模型被清掉、失败保留旧数据、单飞复用、过期账号也照试、筛选与四种排序）、`newApi.perfMetricsPayload.test.ts`（新旧两种响应形状 + 空数据 + 脏行）、`modelMonitor.test.ts`（路由筛选、非法 sort 兜底、refresh 入队）。
   - 回归：`newApi` / `migrate` / `runtimeSchemaBootstrap` 等相关 **83 例全绿**；`tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`npm run build:server`、`vite build`、`repo:drift-check`（0 violations）均通过；重启服务后实测接口与页面正常。
   - 重新生成并提交了 schema 三件套（drizzle 迁移 + SQLite journal + `schemaContract.json` 与 MySQL/Postgres bootstrap/upgrade），并把 README / `docs/index.md` 的菜单截图说明从「可用性监控」改成「模型监控」（截图已重新采集）。
 - **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
