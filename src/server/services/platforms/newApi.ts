@@ -15,6 +15,7 @@ import {
 } from '../modelContextLengthCache.js';
 import { normalizeCheckinReward, quotaToUsd } from './quota.js';
 import { runMintWheelCheckin } from './mintWheelCheckin.js';
+import { isCloudflareChallengeResponse, refreshCloudflareClearance } from '../cloudflareClearance.js';
 import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
 
 /**
@@ -1244,6 +1245,22 @@ export class NewApiAdapter extends BasePlatformAdapter {
       // only spend the quota the edge just refused.
       if (isEdgeRateLimitResponse(res.status, res.headers.get('x-tengine-error'), text)) {
         return { data: null, cookieHeader, edgeRateLimited: true };
+      }
+
+      // A Cloudflare-hosted site answers a visitor it has not cleared with its
+      // own interstitial, which no cookie arithmetic can satisfy: the clearance
+      // is earned by a real browser and, crucially, is bound to the exit IP and
+      // the browser's User-Agent. Re-clear it in the managed browser and retry -
+      // the refreshed pair is written onto the site record, so the next attempt
+      // (through `withSiteProxyRequestInit`) picks it up.
+      if (isCloudflareChallengeResponse({
+        contentType: res.headers.get('content-type'),
+        body: text,
+        mitigated: res.headers.get('cf-mitigated'),
+      })) {
+        const refreshed = await refreshCloudflareClearance(url);
+        if (refreshed.ok) continue;
+        return { data: null, cookieHeader, edgeRateLimited: false };
       }
 
       if (!this.isShieldChallenge(res.headers.get('content-type') || '', text)) {

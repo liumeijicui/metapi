@@ -1,3 +1,28 @@
+### 39. Cloudflare 盾自动续期：403 时自动重新过盾，并修掉受管浏览器「死活挂不上」
+
+- **类型**：功能 + 修复 + 运维
+- **需求来源**：本会话（第 38 条登记后，`muyuan.do` 的 `cf_clearance` 被 Cloudflare 作废，账号直接变 `expired`，需要人工重过盾）
+- **问题**：Cloudflare 的 `cf_clearance` 会被主动作废（重新发挑战、出口 IP 变化、UA 变化都会）。作废后余额/模型/代理调用全部 403 `Just a moment...`，只能人工重过盾，账号就那样黑着。要的是「403 时自己重过盾」。
+- **改动**：
+  - `src/server/services/cloudflareClearance.ts`（新）：`isCloudflareChallengeResponse()` 认盾页（`text/html` + `Just a moment` / `challenges.cloudflare.com` / `__cf_chl`，或响应头 `cf-mitigated: challenge`）；`refreshCloudflareClearance(siteUrl)` 用托管浏览器打开站点 origin → `passCloudflareChallenge()` → 取 `navigator.userAgent` 与该 origin 的 `cf_clearance` → **成对写回**站点 `customHeaders`（cookie + user-agent）并置 `customHeadersOverrideRequestHeaders = true`，再 `invalidateSiteProxyCache()`。同 host 并发去重，另有 **60 秒冷却**——盾若反复挑战，不能让每次 API 调用都变成一次浏览器启动。
+  - `src/server/services/platforms/newApi.ts`：`performJsonFetch()` 的 3 次重试循环里，命中盾页就续期一次再 `continue` 重试（判断顺序：先 `isEdgeRateLimitResponse` 限流、再盾、最后 `isShieldChallenge`）。
+  - `src/server/services/siteCustomHeaders.ts`：新增 `mergeCookieHeaders()`，站点自定义 `Cookie` 与请求自带 `Cookie` **按 cookie 名逐对合并**。原来两者是整条互相覆盖的——盾的 `cf_clearance` 和账号的 `new_api_refresh` 都住在同一个 `Cookie` 头里，谁覆盖谁都会挂（403 或 401）。
+  - `src/server/services/assistedLogin/browserManager.ts`：**挂载失效修复** + 内存回收（见下）。
+- **根因（这个坑花了最久）**：托管浏览器的调试端口记在 `data/<profile>/debug-port`。该文件只在「新启动」时写，一旦它记的端口和目标浏览器实际端口不一致（本例文件写着 `9334`，活着的 Chrome 在 `9333`），每次挂载都会连错端口失败，然后一路走到「启动新浏览器」——而 profile 目录被活着的那个 Chrome 锁着，必然再失败。整个过程是**每次 30 秒的空等**，症状表现为「一次 API 调用卡 34 秒然后 403」，看起来像盾的问题，实际浏览器一直在跑，只是没连上。
+  - 修法：端口文件只当**提示**。先在窗口内按「提示端口优先、其余顺序扫」逐个做 TCP 探活 + CDP 挂载 + profile 归属校验（`metapi_profile` cookie），挂上就顺手把正确的端口写回文件；扫不到才真正新启动。
+- **内存事故（同一次排查中发生，用户反馈服务器被压死、SSH 登不上）**：
+  - 实测基线：一个刚起来的受管 Chrome 就是 **12 个进程 / ~500MB**；托管浏览器是**每个访问过的站点一个常驻 renderer**，出事前那个 profile 的 session 里躺着 20 多个站点、18 个 renderer，Chrome 一家就到 1GB 以上。
+  - 叠加因素：3.6GB 内存的机器上跑了一次**全量 `tsc --noEmit`**（实测峰值 RSS ~1.4GB，且这还是加了 1.4GB 上限测出来的），再叠加 metapi / 浏览器 / codex / 容器守护进程 → 内存打满、swap 抖动，于是 SSH 会话都起不来（日志里全是 `systemd-logind: Failed to create session: Connection timed out`）。
+  - 更糟的是：`/swapfile` 存在（2GB）但**没写进 fstab**，重启之后就没了，机器等于零缓冲。
+  - 处置：① `/swapfile` 重建为 **4GB** 并写入 `/etc/fstab`（重启不再丢）；② 受管浏览器加启动参数 `--renderer-process-limit=6`、`--js-flags=--max-old-space-size=256`、`--disable-background-networking` 等，压住 renderer 数量与堆；③ 新增 **6 小时最大寿命回收**（`BROWSER_MAX_AGE_MS`）：周期性会话巡检会让浏览器永不空闲、renderer 只增不减，到点重启一次即可复位，且**有人在看远程登录窗口时（`keepAlive()` 10 分钟内）不回收**，避免登录中途窗被端掉；回收前等端口真正释放，免得新进程撞上未释放的 profile 锁。
+- **验证（真实演练，非单测）**：
+  - 故意把站点 `cf_clearance` 改成 `BROKEN-COOKIE-FOR-DRILL` → `POST /api/accounts/41/balance` → **2.2 秒内**走完「403 盾页 → 托管浏览器重新取盾 → 用新 cookie 重试 → 200」，返回余额 `7271.935414`，站点 `custom_headers` 被自动换成新 `cf_clearance`（`updated_at` 落到该次调用中）。对照：修挂载之前同样的调用是 34 秒 + 稳定 403。
+  - 账号 **`#41`** 随后自动重登（`extra_config.relogin.lastReloginAt = 2026-10-04T01:55:06Z`）并回到 `active`，`runtimeHealth = healthy`，余额 $7271.94；`access_token` 已被重登写成全新的 `cf_clearance=…; session=…`。
+  - 单测：`cloudflareClearance.test.ts` 4 例（盾页识别、非盾页不误判）、`siteCustomHeaders.test.ts` 6 例（含 cookie 逐对合并且同名站点侧优先）；`assistedLogin/*` 共 79 例全绿；`tsc -p tsconfig.server.json` 通过。
+- **主要文件**：`src/server/services/cloudflareClearance.ts`（新）、`cloudflareClearance.test.ts`（新）、`src/server/services/siteCustomHeaders.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/assistedLogin/browserManager.ts`
+- **运维注意**：换出口 IP（换代理节点）或换 UA 会让已存的 `cf_clearance` 立刻失效，此时**必须同时更新 cookie 与 UA**，只换一个没用；本机跑全量 `tsc` 务必带 `NODE_OPTIONS=--max-old-space-size=<上限>`，别在这台 3.6GB 的机器上裸跑。
+- **状态**：已完成
+
 ### 38. 登记「君の公益」（muyuan.do，带 Cloudflare 盾）
 
 - **类型**：配置

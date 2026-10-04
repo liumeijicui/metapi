@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { chromium, type Browser, type BrowserContext } from 'playwright-core';
@@ -46,6 +46,25 @@ const PORT_FILE_NAME = 'debug-port';
 const BROWSER_IDLE_CLOSE_MS = 5 * 60 * 1000;
 
 /**
+ * Hard ceiling on how long one managed Chrome may live.
+ *
+ * Chrome is multi-process and keeps one renderer per visited site, so a browser
+ * that stays up for days - kept alive indefinitely by the periodic session
+ * watch - accumulates a renderer for every site a relogin ever visited. On a
+ * small host that dwarfs everything else metapi runs: a fresh browser measures
+ * ~500 MB, while one that has walked a few dozen sites measures well over a
+ * gigabyte. Recycling on a timer puts a floor under that growth, and costs only
+ * the seconds it takes the next caller to relaunch.
+ */
+const BROWSER_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * A recycle is deferred while someone is looking at the remote-login view, so a
+ * browser never disappears out from under a half-finished sign-in.
+ */
+const INTERACTIVE_GRACE_MS = 10 * 60 * 1000;
+
+/**
  * A cookie that records which profile owns a browser. It lives on a hostname
  * that is never navigated to, so it is invisible to the sites the user visits
  * and cannot be confused with a real login cookie.
@@ -88,6 +107,8 @@ export function createManagedBrowser(input: {
    * simply relaunches through `ensureManagedBrowserContext`.
    */
   let idleTimer: NodeJS.Timeout | null = null;
+  /** Last moment the remote-login view painted, i.e. a human was watching. */
+  let lastInteractiveAt = 0;
 
   function getBrowserProfileDir(): string {
     return resolve(config.dataDir, input.profileDirName);
@@ -176,6 +197,27 @@ export function createManagedBrowser(input: {
   }
 
   /**
+   * Cheap TCP probe: is anything at all listening on this port? Used to keep
+   * the CDP scan below from paying a connect timeout on free ports.
+   */
+  function isPortListening(port: number, timeoutMs = 400): Promise<boolean> {
+    return new Promise((resolveListening) => {
+      const socket = connect({ host: '127.0.0.1', port });
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolveListening(value);
+      };
+      socket.setTimeout(timeoutMs);
+      socket.once('connect', () => finish(true));
+      socket.once('timeout', () => finish(false));
+      socket.once('error', () => finish(false));
+    });
+  }
+
+  /**
    * Searches only inside this profile's own window. Falling outside it would
    * reintroduce the cross-profile mix-up the windows exist to prevent.
    */
@@ -201,8 +243,20 @@ export function createManagedBrowser(input: {
       `--user-data-dir=${profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
-      '--disable-features=TranslateUI',
+      '--disable-features=TranslateUI,MediaRouter,OptimizationHints,CalculateNativeWinOcclusion',
       '--window-size=1280,900',
+      // Cap the renderer count. Without this Chrome spawns one long-lived
+      // renderer per visited site, and on this host that alone was enough to
+      // dwarf the metapi process it exists to serve.
+      '--renderer-process-limit=6',
+      // Keep each renderer's heap small too; the pages walked here are plain
+      // Cloudflare interstitials and login forms, never heavy web apps.
+      '--js-flags=--max-old-space-size=256',
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--no-pings',
+      '--no-service-autorun',
     ];
 
     const proxyUrl = (config.systemProxyUrl || '').trim();
@@ -250,12 +304,38 @@ export function createManagedBrowser(input: {
     return !!runtime.browser?.isConnected() && !!runtime.context;
   }
 
+  /**
+   * Waits for a port to stop answering, so a recycled browser has actually let
+   * go of its profile directory before the replacement tries to lock it.
+   */
+  async function waitForPortRelease(port: number, deadlineMs: number): Promise<void> {
+    while (Date.now() < deadlineMs) {
+      if (!(await isPortListening(port, 300))) return;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  /**
+   * True when this browser has been alive long enough to be worth restarting,
+   * and nobody is currently watching the login window.
+   */
+  function shouldRecycle(): boolean {
+    if (!runtime.launchedAt) return false;
+    if (Date.now() - runtime.launchedAt < BROWSER_MAX_AGE_MS) return false;
+    return Date.now() - lastInteractiveAt > INTERACTIVE_GRACE_MS;
+  }
+
   async function ensureManagedBrowserContext(): Promise<BrowserContext> {
     // Any caller that needs the browser counts as activity, so the idle window is
     // measured from the last real use rather than from launch.
     if (isRuntimeUsable()) {
-      scheduleIdleClose();
-      return runtime.context as BrowserContext;
+      if (!shouldRecycle()) {
+        scheduleIdleClose();
+        return runtime.context as BrowserContext;
+      }
+      const recycledPort = runtime.port;
+      await closeManagedBrowser().catch(() => undefined);
+      if (recycledPort) await waitForPortRelease(recycledPort, Date.now() + 20_000);
     }
     if (launchPromise) return launchPromise;
 
@@ -281,31 +361,53 @@ export function createManagedBrowser(input: {
 
       // Reattach to a browser left running by a previous metapi process before
       // starting a new one; its profile directory is locked, so a second launch
-      // would fail outright. The remembered port is only trusted inside this
-      // profile's window, and the live browser must also prove it is ours.
+      // would fail outright. Adoption is confirmed on the live browser, never
+      // assumed from the port file alone: that file is written at launch time and
+      // goes stale whenever the Chrome it names dies and a later one comes up on
+      // a different port in the window. Trusting it then made every attach miss
+      // the live browser and fall through to a launch that could only fail on the
+      // locked profile directory - a 30s stall per attempt, for a browser that was
+      // running the whole time. So the remembered port is tried first and the rest
+      // of the window is scanned as a fallback.
+      const candidatePorts: number[] = [];
       const rememberedPort = readRememberedPort();
       if (rememberedPort && isWithinWindow(rememberedPort, windowBase)) {
-        const adopted = await tryAttach(rememberedPort, 3_000);
+        candidatePorts.push(rememberedPort);
+      }
+      for (let offset = 0; offset < PORT_WINDOW_SIZE; offset += 1) {
+        const port = windowBase + offset;
+        if (!candidatePorts.includes(port)) candidatePorts.push(port);
+      }
+
+      for (const candidate of candidatePorts) {
+        if (!(await isPortListening(candidate))) continue;
+        const adopted = await tryAttach(candidate, candidate === rememberedPort ? 3_000 : 2_000);
         const adoptedContext = adopted?.contexts()[0];
-        if (adopted && adoptedContext) {
-          const identity = await verifyAdoption(adoptedContext);
-          if (identity !== 'foreign') {
-            await installProfileMarker(adoptedContext);
-            runtime.process = null;
-            runtime.browser = adopted;
-            runtime.context = adoptedContext;
-            runtime.port = rememberedPort;
-            runtime.launchedAt = Date.now();
-            // A browser adopted from a previous process is by definition idle at
-            // this point, so it must be armed for shutdown like a fresh one.
-            scheduleIdleClose();
-            return adoptedContext;
-          }
+        if (!adopted || !adoptedContext) {
+          await adopted?.close().catch(() => undefined);
+          continue;
+        }
+        const identity = await verifyAdoption(adoptedContext);
+        if (identity === 'foreign') {
           // Another metapi profile owns this port. Disconnecting only closes the
           // CDP link (it does not kill that browser), so its real profile and
           // cookies stay untouched.
           await adopted.close().catch(() => undefined);
+          continue;
         }
+        await installProfileMarker(adoptedContext);
+        runtime.process = null;
+        runtime.browser = adopted;
+        runtime.context = adoptedContext;
+        runtime.port = candidate;
+        runtime.launchedAt = Date.now();
+        // Keep the on-disk hint in step with reality so the next start attaches
+        // on the first try even if this process is killed before it can close.
+        rememberPort(candidate);
+        // A browser adopted from a previous process is by definition idle at
+        // this point, so it must be armed for shutdown like a fresh one.
+        scheduleIdleClose();
+        return adoptedContext;
       }
 
       const port = await findFreePort(windowBase);
@@ -368,6 +470,7 @@ export function createManagedBrowser(input: {
    * into it, and the window would vanish mid-login.
    */
   function keepAlive(): void {
+    lastInteractiveAt = Date.now();
     if (isRuntimeUsable()) scheduleIdleClose();
   }
 
