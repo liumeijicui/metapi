@@ -40,6 +40,7 @@ import { asBrowserSessionCredential, runBrowserSessionCheckin } from './browserS
 import { classifyFailureReason } from './failureReasonService.js';
 import { isBotShieldChallenge } from './alertRules.js';
 import { pruneOtherSessions } from './sessionHygiene.js';
+import { isSub2ApiPlatform } from './sub2apiManagedAuth.js';
 
 /**
  * Result of a successful automatic sign-in.
@@ -306,7 +307,16 @@ async function pruneAfterSignIn(params: {
 async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
   const provider = getOauthProviderFromExtraConfig(account.extraConfig)
     ?? getReloginProviderFromExtraConfig(account.extraConfig);
-  if (provider === 'linuxdo') return tryLinuxDoRelogin(account, site);
+  if (provider === 'linuxdo') {
+    // Same provider, two protocols. A Sub2API fork answers no `/api/status` and
+    // has no `/api/oauth/state`, so the new-api driver below cannot even find
+    // its client id there; it starts the flow on
+    // `/api/v1/auth/oauth/linuxdo/start` and returns its tokens in a URL
+    // fragment instead. The platform decides which driver gets to speak.
+    return isSub2ApiPlatform(site.platform)
+      ? trySub2ApiLinuxDoRelogin(account, site)
+      : tryLinuxDoRelogin(account, site);
+  }
   if (provider !== 'github') return null;
 
   // Imported lazily: the site modules pull in the browser/HTTP stacks, and only
@@ -391,14 +401,14 @@ async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginRe
   // Imported lazily: the driver pulls in the browser stack, and only
   // Linux.do-bound accounts ever reach it.
   const { reloginWithLinuxDo } = await import('./assistedLogin/sites/linuxDoOAuthRelogin.js');
-  const relogin = await reloginWithLinuxDo({
+  const relogin = await browserLane.run(() => reloginWithLinuxDo({
     baseUrl: site.url,
     clientId,
     expectedUserId,
     hosts: [host],
     callbackPath: LINUXDO_CALLBACK_PATH,
     siteLabel: host,
-  });
+  }));
   if (!relogin.ok) return null;
 
   const { harvestLinuxDoSiteCredential } = await import('./linuxdoSession/sessionService.js');
@@ -424,6 +434,72 @@ async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginRe
     accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
     extraConfig: await persistExtraFields(account, prune.extraFields),
   };
+}
+
+/**
+ * Signs the account back in through a Sub2API deployment's Linux.do handshake.
+ *
+ * The provider matches the new-api driver above and the account carries the
+ * same marker, but nothing else does: the flow starts on
+ * `/api/v1/auth/oauth/linuxdo/start`, the consent page is behind Cloudflare and
+ * the site's own WAF, and the callback answers with a token pair in the URL
+ * fragment that the SPA then moves into `localStorage`. Only a browser can walk
+ * that, so this is the one driver for it.
+ *
+ * Both halves of the pair are stored: the access token is what the row sends,
+ * and the refresh token is what lets `refreshSub2ApiManagedSession` renew the
+ * session from then on without another browser run — which is what keeps this
+ * from becoming an hourly Chromium job.
+ */
+async function trySub2ApiLinuxDoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+  let host = '';
+  try {
+    host = new URL(site.url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+
+  // A browser run costs minutes, and `connect.linux.do` escalates its challenge
+  // when it is asked in bursts: the first run answers one click, the fifth
+  // answers a hard 403. The cooldown is what keeps the next attempt cheap.
+  if (isBrowserReloginCoolingDown(account.extraConfig)) return null;
+  await recordBrowserReloginAttempt(account);
+
+  const expectedUserId = getPlatformUserIdFromExtraConfig(account.extraConfig);
+
+  // Imported lazily: the driver pulls in the browser stack, and only
+  // Linux.do-bound accounts ever reach it. The lane is the single gate every
+  // headed flow passes through, so a wave of expiries cannot start a wave of
+  // Chromiums.
+  const { captureSub2ApiLinuxDoCredentials } =
+    await import('./assistedLogin/sites/sub2ApiLinuxDoRelogin.js');
+  const captured = await browserLane.run(() => captureSub2ApiLinuxDoCredentials({
+    baseUrl: site.url,
+    expectedUserId,
+    siteLabel: host,
+  }));
+  // A refusal is reported by the driver's own message and the caller keeps the
+  // original verdict; only a captured pair is worth writing down.
+  if (captured.status !== 'captured' || !captured.credentials?.accessToken) return null;
+
+  const refreshToken = captured.credentials.refreshToken;
+  const tokenExpiresAt = captured.credentials.tokenExpiresAt;
+  // No session prune here: a Sub2API credential is a JWT, not a cookie the site
+  // keeps a session list for, and its adapter exposes no session API to retire
+  // entries with. There is nothing a prune could do but record `unsupported`.
+  return persistCredential(account, {
+    accessToken: captured.credentials.accessToken,
+    platformUserId: captured.credentials.platformUserId ?? expectedUserId,
+    extraFields: {
+      // The marker, not `oauth`: routing has to keep using the managed token,
+      // and recording the binding is also what keeps the account retryable.
+      ...buildReloginMarkerPatch(account.extraConfig, 'linuxdo', new Date().toISOString()),
+      ...(refreshToken
+        ? { sub2apiAuth: { refreshToken, ...(tokenExpiresAt ? { tokenExpiresAt } : {}) } }
+        : {}),
+    },
+  });
 }
 
 /**

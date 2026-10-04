@@ -1,3 +1,32 @@
+### 49. 补上 Sub2API 站的 Linux.do 自动重登：Fengwind 这类站现在能自己救活了
+
+- **类型**：功能新增（自动续期驱动）
+- **需求来源**：本会话（用户：「https://api.fengwind.com/profile 这个是linux do快捷登录，为啥登录不上啊」→ 查清原因后用户授权「可以做一下试试吧」）
+- **一、为什么之前登不上（先查现场，全部实测过）**
+  - `#35 Fengwind API`（site `#49`，platform `sub2api`）的 `extra_config` 里**没有任何 `oauth` / `relogin` 标记**，账号行 `oauth_provider` 也是 NULL → `tryOauthRelogin()` 在取 provider 那一步就返回了，系统每小时 401 之后**什么都没做**，`describeRenewalGap()` 只是照实说「没有可续期凭据」。上一轮的第 48 条补上了这句话，这一轮补上真正的能力。
+  - 老的 `linuxDoOAuthRelogin.ts` 是照 new-api 写的：它先读 `GET /api/status` 拿 `linuxdo_client_id`，再走 `/api/oauth/state` + `/api/oauth/linuxdo`。**Sub2API 上 `/api/status` 是 404，也没有 `oauth/state`**，两条都走不通——同一个 provider，两套协议。
+  - 站点和账号本身都没问题：`/api/v1/settings/public` 里 `linux_methods.linuxdo.login_enabled = true`，受管浏览器实测能走到授权页并显示该账号可授权。
+- **二、Sub2API 的真实流程（在真实浏览器里逐跳验证后照抄）**
+  - 入口只有一个：**`GET /api/v1/auth/oauth/linuxdo/start?redirect=%2Fdashboard`** → `302` 到 `connect.linux.do/oauth2/authorize`，授权后 `connect.linux.do/oauth2/approve/<token>` 由页面自己 POST，站点回调把**令牌对放在 URL 片段里**（`#access_token=…&refresh_token=…&expires_in=…`），前端再把 `auth_token` / `refresh_token` 写进 `localStorage`。
+  - 三处让这件事必须是浏览器活：`connect.linux.do` 与站点自己的 WAF 都会对裸 HTTP 客户端弹挑战；批准动作是页面替访客发的 POST，没有请求可以重放。
+  - 新增驱动 `src/server/services/assistedLogin/sites/sub2ApiLinuxDoRelogin.ts`：在受管 profile 里打开 `/start`，轮询 URL/`localStorage` 取令牌，命中 CF 挑战就走 `passCloudflareChallenge()`，在授权页点一次「允许」。**刻意不先退出站点登录**（与 new-api 驱动不同）：`/start` 每次都会新开一条 flow，回调片段里必然是新的令牌对，清站点存储反而有把 profile 留在已登出 SPA 的风险。
+  - 换到别的账号时报 `needs_provider_login` 而**不是**把令牌存下来：静默把账号换成浏览器里那个人是唯一绝对不能发生的结果。JWT 里的 `user_id` 与账号的 `platformUserId` 不一致就直接拒绝。
+  - **低频是硬要求**：`connect.linux.do` 的盾在连续尝试后会从「点一下」升级成硬 403 `Just a moment`，所以沿用既有的 `BROWSER_RELOGIN_COOLDOWN_MS`（15 分钟）且驱动本身不重试。
+- **三、接进续期链路**
+  - `tryOauthRelogin()` 里 `provider === 'linuxdo'` 时按 `site.platform` 分流：`sub2api` 走新驱动，其余仍走 new-api 驱动。
+  - 成功后既写 `relogin` 标记（不是 `oauth`，路由必须继续用受管令牌），也把 `refreshToken` / `tokenExpiresAt` 写进 `extra_config.sub2apiAuth` ——**这是关键**：Sub2API 的 access token 只活几小时，有了这对 refresh 凭据，后续每小时续期走 `refreshSub2ApiManagedSession()` 的 HTTP 刷新，**正常情况下再也不会为这个站拉起浏览器**。
+  - Sub2API 凭据是 JWT，不是站点保留会话列表的 cookie，其 adapter 也没有 session API，所以这条路径不做 prune（prune 只会写一条 `unsupported`）。
+  - 顺手把两个 Linux.do 驱动的浏览器调用都**放进 `browserLane`**：这是唯一的有头队列，否则一次集中失效会同时拉起多个 Chromium（就是之前把机器内存打满的那类问题）。
+- **四、生产验证（真实跑，不是单测）**
+  - 给 `#35` 补上 `relogin: { provider: 'linuxdo' }` 标记后，用真实账号走完整链路：**43 秒**完成，`status: expired → active`，新令牌 `user_id = 2975`（与账号一致），`extra_config.sub2apiAuth` 已换成新的 `rt_…` 与到期时间，`browserRelogin.attemptedAt` 已记；随后 `GET /api/v1/auth/me` 返回 **200**，账号信息正确（`3145215575`）。
+  - 顺带修好 `#11 l0veyou`（同为 sub2api + linux.do 绑定）：它此前也会被误送给 new-api 驱动。
+- **五、测试与门禁**
+  - 新增 `sub2ApiLinuxDoRelogin.test.ts` 15 例：协议判定、JWT 解析、片段/查询串取令牌、`expires_in` 兜底、换账号拒绝、空凭据不算捕获、授权页与论坛 bounce 的识别。
+  - `autoRelogin.test.ts` 补 2 例：sub2api 分支不走 new-api 驱动、不触发浏览器签到、写回 `sub2apiAuth` 且 `oauth` 保持未定义；捕获失败时只写尝试标记、不动凭据。
+  - 回归：`autoRelogin` / `checkinService.autoRelogin` / `balanceService.autoRelogin` / `sub2apiRefreshScheduler` / `sub2apiRefreshSingleflight` / `sessionHygiene` / `platforms/sub2api` 共 **109 例全绿**；`tsc` 两道门通过，服务已重启。
+- **主要文件**：`src/server/services/assistedLogin/sites/sub2ApiLinuxDoRelogin.ts`（新增）、`src/server/services/assistedLogin/sites/sub2ApiLinuxDoRelogin.test.ts`（新增）、`src/server/services/autoRelogin.ts`、`src/server/services/autoRelogin.test.ts`
+- **状态**：已完成（`#35 Fengwind API` 已恢复为 `active`，后续续期走 HTTP 刷新；其他 Sub2API 站只要绑过 Linux.do 也自动获得这条重登路径）
+
 ### 48. 失效提示改成「说真话」：站点挂了就写站点挂了，续不了期就说清为什么
 
 - **类型**：缺陷修复（失败原因分类 + 提示文案）

@@ -16,6 +16,7 @@ const browserSessionMock = vi.fn();
 const captureHyperMock = vi.fn();
 const captureNewApiGithubMock = vi.fn();
 const linuxDoReloginMock = vi.fn();
+const captureSub2ApiLinuxDoMock = vi.fn();
 const harvestLinuxDoMock = vi.fn();
 
 const selectGetMock = vi.fn();
@@ -75,6 +76,12 @@ vi.mock('./assistedLogin/sites/linuxDoOAuthRelogin.js', () => ({
   reloginWithLinuxDo: (...args: unknown[]) => linuxDoReloginMock(...args),
 }));
 
+vi.mock('./assistedLogin/sites/sub2ApiLinuxDoRelogin.js', () => ({
+  supportsSub2ApiLinuxDoRelogin: (platform: string, provider: string) =>
+    platform === 'sub2api' && provider === 'linuxdo',
+  captureSub2ApiLinuxDoCredentials: (...args: unknown[]) => captureSub2ApiLinuxDoMock(...args),
+}));
+
 vi.mock('./linuxdoSession/sessionService.js', () => ({
   harvestLinuxDoSiteCredential: (...args: unknown[]) => harvestLinuxDoMock(...args),
 }));
@@ -119,6 +126,7 @@ describe('autoRelogin', () => {
     browserSessionMock.mockReset();
     captureHyperMock.mockReset();
     linuxDoReloginMock.mockReset();
+    captureSub2ApiLinuxDoMock.mockReset();
     harvestLinuxDoMock.mockReset();
     selectGetMock.mockReset();
     updateSetMock.mockReset();
@@ -497,6 +505,90 @@ describe('autoRelogin', () => {
     expect(extraConfig.relogin).toEqual(expect.objectContaining({ provider: 'linuxdo' }));
     expect(extraConfig.oauth).toBeUndefined();
     expect(browserSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('replays a Sub2API deployment through its own Linux.do flow, refresh token and all', async () => {
+    // Same provider and same marker as the fork above, different protocol: the
+    // deployment has no `/api/status` and no `/api/oauth/state`, so the new-api
+    // driver cannot speak to it at all. The pair it hands back is what keeps the
+    // session alive afterwards — without the refresh half the next expiry would
+    // need the browser again.
+    captureSub2ApiLinuxDoMock.mockResolvedValue({
+      status: 'captured',
+      credentials: {
+        accessToken: 'jwt-access',
+        refreshToken: 'jwt-refresh',
+        tokenExpiresAt: 1_800_000_000_000,
+        platformUserId: 2975,
+        username: null,
+        source: 'localStorage',
+        harvestedKeys: ['auth_token', 'refresh_token'],
+      },
+    });
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        username: '3145215575',
+        accessToken: 'jwt-dead',
+        extraConfig: JSON.stringify({
+          platformUserId: 2975,
+          relogin: { provider: 'linuxdo', boundAt: '2026-10-04T00:00:00.000Z' },
+        }),
+      }),
+      { id: 49, name: 'Fengwind API', url: 'https://api.fengwind.com', platform: 'sub2api' },
+    );
+
+    expect(captureSub2ApiLinuxDoMock).toHaveBeenCalledWith({
+      baseUrl: 'https://api.fengwind.com',
+      expectedUserId: 2975,
+      siteLabel: 'api.fengwind.com',
+    });
+    // The other Linux.do driver is not asked to speak a protocol the site does
+    // not have, and the token is not a cookie, so no browser check-in either.
+    expect(linuxDoReloginMock).not.toHaveBeenCalled();
+    expect(harvestLinuxDoMock).not.toHaveBeenCalled();
+    expect(browserSessionMock).not.toHaveBeenCalled();
+    expect(result?.accessToken).toBe('jwt-access');
+    expect(result?.platformUserId).toBe(2975);
+
+    const written = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((updates) => updates.accessToken === 'jwt-access');
+    expect(written?.status).toBe('active');
+    const extraConfig = JSON.parse(String(written?.extraConfig));
+    expect(extraConfig.relogin).toEqual(expect.objectContaining({ provider: 'linuxdo' }));
+    expect(extraConfig.oauth).toBeUndefined();
+    expect(extraConfig.sub2apiAuth).toEqual({
+      refreshToken: 'jwt-refresh',
+      tokenExpiresAt: 1_800_000_000_000,
+    });
+    // A Sub2API credential is a JWT, not a session the site keeps a list of, so
+    // there is nothing to prune and the adapter is never asked.
+    expect(adapterMock.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Sub2API account as it is when the handshake captured nothing', async () => {
+    captureSub2ApiLinuxDoMock.mockResolvedValue({
+      status: 'needs_provider_login',
+      credentials: null,
+      message: 'Linux.do 需要重新登录',
+    });
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({
+        accessToken: 'jwt-dead',
+        extraConfig: JSON.stringify({ relogin: { provider: 'linuxdo' } }),
+      }),
+      { id: 49, name: 'Fengwind API', url: 'https://api.fengwind.com', platform: 'sub2api' },
+    );
+
+    expect(result).toBeNull();
+    // Only the attempt marker is written, so the cooldown still holds.
+    expect(updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .some((updates) => updates.accessToken === 'jwt-dead')).toBe(false);
   });
 
   it('leaves the account alone while the Linux.do cooldown is running', async () => {
