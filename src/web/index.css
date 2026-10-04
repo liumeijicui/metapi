@@ -3917,6 +3917,138 @@ textarea {
   color: #475569;
 }
 
+/* ===== 个人自用声明（登录页） ===== */
+.login-selfuse-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  width: fit-content;
+  margin-top: 12px;
+  padding: 6px 14px 6px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(254, 243, 199, 0.72), rgba(255, 251, 235, 0.9));
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #92400e;
+  white-space: nowrap;
+}
+
+.login-selfuse-badge-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18);
+}
+
+.login-selfuse-card {
+  display: grid;
+  gap: 14px;
+  max-width: 44rem;
+  padding: 20px 22px;
+  border: 1px solid rgba(251, 191, 36, 0.34);
+  border-left: 3px solid #f59e0b;
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(255, 251, 235, 0.86), rgba(255, 255, 255, 0.72));
+  box-shadow: 0 14px 30px rgba(180, 83, 9, 0.07);
+}
+
+.login-selfuse-head {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.login-selfuse-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.login-selfuse-icon-svg {
+  width: 21px;
+  height: 21px;
+}
+
+.login-selfuse-text {
+  display: grid;
+  gap: 4px;
+}
+
+.login-selfuse-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #78350f;
+}
+
+.login-selfuse-lead {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #7c4a12;
+}
+
+.login-selfuse-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.login-selfuse-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.72;
+  color: #854d0e;
+}
+
+.login-selfuse-item-dot {
+  width: 5px;
+  height: 5px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: rgba(180, 83, 9, 0.55);
+}
+
+.login-auth-selfuse {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 5px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 999px;
+  background: rgba(255, 251, 235, 0.9);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #92400e;
+  white-space: nowrap;
+}
+
+/* 左侧品牌面板在两种主题下都是浅色底，声明卡片与徽标不要跟着暗色反转；
+   只有右侧登录面板会变暗，所以只给那一处补暗色样式。 */
+[data-theme="dark"] .login-auth-selfuse {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(120, 53, 15, 0.32);
+  color: #fcd34d;
+}
+
 .login-capability-list {
   display: grid;
   gap: 0;
@@ -4108,6 +4240,10 @@ textarea {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid rgba(226, 232, 240, 0.86);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
   font-size: 12px;
   color: var(--color-text-muted);
 }

@@ -147,6 +147,11 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
       description: t('按成本、延迟、成功率自动选择最优通道，故障自动转移'),
     },
   ];
+  const selfUsePoints = [
+    t('只有本人使用，没有注册、充值、分销，也不对外售卖额度。'),
+    t('不承诺可用性、速度与 SLA，可能随时调整、停服或下线。'),
+    t('请不要把重要数据或生产业务依赖挂在上面。'),
+  ];
 
   const handleLogin = async () => {
     if (!token) return;
@@ -195,6 +200,10 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
             <div className="login-brand-summary">
               <div className="login-brand-name">Metapi</div>
               <div className="login-brand-kicker">{t('中转站的中转站')}</div>
+              <div className="login-selfuse-badge">
+                <span className="login-selfuse-badge-dot" aria-hidden="true" />
+                {t('个人自用 · 不对外提供服务')}
+              </div>
             </div>
           </div>
           <div className="login-brand-copy-block">
@@ -203,6 +212,44 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
             </p>
           </div>
           <div className="login-compat-line">{t('兼容 New API / One API / OneHub / DoneHub / Veloera / AnyRouter / Sub2API')}</div>
+          <div className="login-selfuse-card">
+            <div className="login-selfuse-head">
+              <span className="login-selfuse-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" className="login-selfuse-icon-svg">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 3 5 6v5.6c0 4.1 3 7.9 7 9.2 4-1.3 7-5.1 7-9.2V6l-7-3Z"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9.2 11.9l2 2 3.6-3.9"
+                  />
+                </svg>
+              </span>
+              <div className="login-selfuse-text">
+                <div className="login-selfuse-title">{t('个人自用声明')}</div>
+                <p className="login-selfuse-lead">
+                  {t('这是一台只给站长自己用的私人网关，不是公开服务。')}
+                </p>
+              </div>
+            </div>
+            <ul className="login-selfuse-list">
+              {selfUsePoints.map((point) => (
+                <li key={point} className="login-selfuse-item">
+                  <span className="login-selfuse-item-dot" aria-hidden="true" />
+                  <span>{point}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
           <div className="login-capability-list">
             {capabilityRows.map((feature, index) => (
               <div key={feature.title} className="login-capability-row">
@@ -273,6 +320,10 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
             </button>
             <div className="login-auth-note">{t('仅校验本地服务访问权限，不会把令牌发送到第三方。')}</div>
             <div className="login-auth-footer">
+              <div className="login-auth-selfuse">
+                <span className="login-selfuse-badge-dot" aria-hidden="true" />
+                {t('个人自用 · 非公开服务')}
+              </div>
               <span>{t('管理员登录后继续。')}</span>
             </div>
           </div>

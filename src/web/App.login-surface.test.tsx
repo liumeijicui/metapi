@@ -50,6 +50,14 @@ describe('Login surface', () => {
       expect(pageText).toContain('智能路由引擎');
       expect(pageText).toContain('自动模型发现');
       expect(pageText).toContain('部署文档');
+      // 「自用」声明：徽标 + 声明卡片 + 登录面板小提示，三处都要在。
+      expect(pageText).toContain('个人自用 · 不对外提供服务');
+      expect(pageText).toContain('个人自用声明');
+      expect(pageText).toContain('这是一台只给站长自己用的私人网关，不是公开服务。');
+      expect(pageText).toContain('只有本人使用，没有注册、充值、分销，也不对外售卖额度。');
+      expect(pageText).toContain('不承诺可用性、速度与 SLA，可能随时调整、停服或下线。');
+      expect(pageText).toContain('请不要把重要数据或生产业务依赖挂在上面。');
+      expect(pageText).toContain('个人自用 · 非公开服务');
       expect(lightBrandPanel).toBeTruthy();
       expect(authStage).toBeTruthy();
       expect(brandMarkCanvas).toBeTruthy();
