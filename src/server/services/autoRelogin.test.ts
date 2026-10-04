@@ -507,6 +507,61 @@ describe('autoRelogin', () => {
     expect(browserSessionMock).not.toHaveBeenCalled();
   });
 
+  it('keeps the refresh half a Sub2API password sign-in hands back', async () => {
+    // Without this the sign-in is a one-off: the access token lives for hours,
+    // and the next expiry would need another sign-in. On a deployment whose
+    // login form is Turnstile-gated there is no second sign-in to have, so the
+    // account would be stuck with no way to renew.
+    adapterMock.login.mockResolvedValue({
+      success: true,
+      accessToken: 'jwt-fresh',
+      platformUserId: 341,
+      refreshToken: 'rt-fresh',
+      tokenExpiresAt: 1_800_000_000_000,
+    });
+    adapterMock.listSessions.mockResolvedValue([]);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(
+      account({ username: '3145215575@qq.com', accessToken: 'jwt-dead' }),
+      { id: 14, name: '虾蹬王', url: 'https://api.kunyou.asia', platform: 'sub2api' },
+    );
+
+    expect(result?.accessToken).toBe('jwt-fresh');
+    const written = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((updates) => updates.accessToken === 'jwt-fresh');
+    const extraConfig = JSON.parse(String(written?.extraConfig));
+    expect(extraConfig.sub2apiAuth).toEqual({
+      refreshToken: 'rt-fresh',
+      tokenExpiresAt: 1_800_000_000_000,
+    });
+  });
+
+  it('does not invent a Sub2API refresh token for another platform', async () => {
+    // `sub2apiAuth` is only read for that platform; writing it elsewhere would
+    // be a value nothing renews and a reviewer would mistake for one that is.
+    adapterMock.login.mockResolvedValue({
+      success: true,
+      accessToken: 'new_api_refresh=fresh',
+      platformUserId: 38,
+      refreshToken: 'not-a-sub2api-token',
+    });
+    adapterMock.listSessions.mockResolvedValue([]);
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE);
+
+    expect(result?.accessToken).toBe('new_api_refresh=fresh');
+    const written = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((updates) => updates.accessToken === 'new_api_refresh=fresh');
+    const extraConfig = JSON.parse(String(written?.extraConfig));
+    expect(extraConfig.sub2apiAuth).toBeUndefined();
+  });
+
   it('replays a Sub2API deployment through its own Linux.do flow, refresh token and all', async () => {
     // Same provider and same marker as the fork above, different protocol: the
     // deployment has no `/api/status` and no `/api/oauth/state`, so the new-api
@@ -576,15 +631,21 @@ describe('autoRelogin', () => {
     });
 
     const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const refusals: Array<{ code: string; reason: string }> = [];
     const result = await tryAutoRelogin(
       account({
         accessToken: 'jwt-dead',
         extraConfig: JSON.stringify({ relogin: { provider: 'linuxdo' } }),
       }),
       { id: 49, name: 'Fengwind API', url: 'https://api.fengwind.com', platform: 'sub2api' },
+      { onRefusal: (refusal) => { refusals.push(refusal); } },
     );
 
     expect(result).toBeNull();
+    // The driver's verdict is the only thing that knows which step refused; a
+    // generic "token expired" would send the operator looking at credentials
+    // when the site is the thing that failed.
+    expect(refusals).toEqual([{ code: 'relogin_refused', reason: 'Linux.do 需要重新登录' }]);
     // Only the attempt marker is written, so the cooldown still holds.
     expect(updateSetMock.mock.calls
       .map((call) => call[0] as Record<string, unknown>)

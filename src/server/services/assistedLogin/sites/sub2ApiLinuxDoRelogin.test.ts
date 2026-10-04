@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   decodeJwtClaims,
+  isFreshSub2ApiCapture,
   isForumSsoUrl,
   isLinuxDoConsentUrl,
   judgeSub2ApiLinuxDoCapture,
@@ -135,6 +136,58 @@ describe('judgeSub2ApiLinuxDoCapture', () => {
     const verdict = judgeSub2ApiLinuxDoCapture(null, { expectedUserId: 2975 });
     expect(verdict.status).toBe('timeout');
     expect(verdict.credentials).toBeNull();
+  });
+
+  it('refuses a token that expired before this sign-in could have minted it', () => {
+    // The managed profile keeps the `auth_token` of whatever manual sign-in last
+    // used it, and swallowing that stale pair replaces a working credential with
+    // a dead one — the account then reads as signed in while every call 401s.
+    const verdict = judgeSub2ApiLinuxDoCapture({
+      accessToken: jwt({ user_id: 2975, exp: Math.floor(Date.now() / 1000) - 60 }),
+      refreshToken: 'stale-refresh',
+      tokenExpiresAt: Date.now() - 60_000,
+    }, { expectedUserId: 2975 });
+    expect(verdict.status).toBe('timeout');
+    expect(verdict.credentials).toBeNull();
+    expect(verdict.message).toContain('旧会话');
+  });
+});
+
+describe('isFreshSub2ApiCapture', () => {
+  const live = jwt({ user_id: 2975, exp: Math.floor(Date.now() / 1000) + 3600 });
+
+  it('accepts a pair that is neither expired nor the one already on file', () => {
+    expect(isFreshSub2ApiCapture(
+      { accessToken: live, refreshToken: 'r', tokenExpiresAt: null },
+      { baselineAccessToken: 'what-the-profile-already-held' },
+    )).toBe(true);
+  });
+
+  it('rejects the pair the profile held before the flow started', () => {
+    expect(isFreshSub2ApiCapture(
+      { accessToken: live, refreshToken: 'r', tokenExpiresAt: null },
+      { baselineAccessToken: live },
+    )).toBe(false);
+  });
+
+  it('rejects an expired pair even when it differs from the baseline', () => {
+    const stale = jwt({ user_id: 2975, exp: Math.floor(Date.now() / 1000) - 1 });
+    expect(isFreshSub2ApiCapture(
+      { accessToken: stale, refreshToken: 'r', tokenExpiresAt: null },
+      { baselineAccessToken: 'something-else' },
+    )).toBe(false);
+  });
+
+  it('accepts an opaque token, which states no expiry to judge it by', () => {
+    expect(isFreshSub2ApiCapture(
+      { accessToken: 'opaque-token', refreshToken: null, tokenExpiresAt: null },
+      { baselineAccessToken: null },
+    )).toBe(true);
+  });
+
+  it('treats an empty capture as nothing to store', () => {
+    expect(isFreshSub2ApiCapture(null)).toBe(false);
+    expect(isFreshSub2ApiCapture({ accessToken: '', refreshToken: null, tokenExpiresAt: null })).toBe(false);
   });
 });
 

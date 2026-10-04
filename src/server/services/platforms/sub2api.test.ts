@@ -201,6 +201,37 @@ describe('Sub2ApiAdapter', () => {
       username: '柳眉积翠',
       platformUserId: 341,
     });
+    // The pair, not just the half: `/api/v1/auth/refresh` is the only way back
+    // in once the access token expires, so a login that dropped this value
+    // would leave the account unable to renew at all.
+    expect(result.refreshToken).toBe('rt-1');
+    expect(result.tokenExpiresAt).toBeGreaterThan(Date.now());
+    expect(result.tokenExpiresAt).toBeLessThanOrEqual(Date.now() + 86_400_000);
+  });
+
+  it('reports no refresh half when a build does not mint one', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            access_token: 'jwt-access',
+            user: { id: 341, username: '柳眉积翠' },
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.login(baseUrl, 'user@example.com', 'secret');
+    expect(result.success).toBe(true);
+    // An expiry with nothing to renew is worse than no expiry: the caller would
+    // schedule a refresh against a token it does not have.
+    expect(result.refreshToken).toBeUndefined();
+    expect(result.tokenExpiresAt).toBeUndefined();
   });
 
   it('surfaces the site message when login is rejected', async () => {

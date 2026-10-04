@@ -810,11 +810,23 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       : typeof user?.email === 'string' && user.email.trim()
         ? user.email.trim()
         : username;
+    // The pair, not just the half. `/api/v1/auth/refresh` is the only way back
+    // in for a deployment whose login form sits behind a Turnstile, and it can
+    // only be called with this value: a sign-in that kept just the access token
+    // would leave the account unrenewable hours later.
+    const refreshToken = typeof data?.refresh_token === 'string' ? data.refresh_token.trim() : '';
+    const expiresInSeconds = typeof data?.expires_in === 'number' && Number.isFinite(data.expires_in)
+      ? data.expires_in
+      : (typeof data?.expires_in === 'string' ? Number.parseInt(data.expires_in.trim(), 10) : Number.NaN);
     return {
       success: true,
       accessToken,
       username: displayName,
       platformUserId: this.parsePositiveInteger(user?.id),
+      ...(refreshToken ? { refreshToken } : {}),
+      ...(refreshToken && Number.isFinite(expiresInSeconds) && expiresInSeconds > 0
+        ? { tokenExpiresAt: Date.now() + Math.trunc(expiresInSeconds) * 1000 }
+        : {}),
     };
   }
 

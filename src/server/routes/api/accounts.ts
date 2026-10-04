@@ -669,6 +669,21 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (guessedPlatformUserId) {
         extraConfigPatch.platformUserId = guessedPlatformUserId;
       }
+      // A Sub2API sign-in hands back a rotating pair whose access half expires
+      // within hours. Binding only the access half leaves the account with no
+      // way to renew, which on a Turnstile-gated deployment means no way back in
+      // at all, so the refresh half is stored while it is still in hand.
+      if (
+        (site.platform || "").toLowerCase() === "sub2api"
+        && loginResult.refreshToken
+      ) {
+        extraConfigPatch.sub2apiAuth = loginResult.tokenExpiresAt
+          ? {
+              refreshToken: loginResult.refreshToken,
+              tokenExpiresAt: loginResult.tokenExpiresAt,
+            }
+          : { refreshToken: loginResult.refreshToken };
+      }
       const extraConfig = mergeAccountExtraConfig(
         existing?.extraConfig,
         extraConfigPatch,

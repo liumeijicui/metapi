@@ -76,6 +76,19 @@ export interface LoginResult {
    * to guess it from the username or re-discover it on every request.
    */
   platformUserId?: number;
+  /**
+   * Long-lived half of the pair a site mints at sign-in, for the platforms
+   * whose session is a rotating token pair rather than a cookie.
+   *
+   * Dropping it is what turns a sign-in into a one-off: on Sub2API the access
+   * token lives for hours, so an account that only ever stores it has to sign
+   * in again on every expiry — and a site that gates that sign-in behind a
+   * Turnstile has no way to do even that. Reporting the pair lets the caller
+   * keep renewing over HTTP from then on.
+   */
+  refreshToken?: string;
+  /** Absolute expiry of `refreshToken`, in ms, when the site states one. */
+  tokenExpiresAt?: number;
 }
 
 export interface UserInfo {

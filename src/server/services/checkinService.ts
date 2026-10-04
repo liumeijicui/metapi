@@ -10,6 +10,7 @@ import {
   getAutoReloginConfig,
   getExternalCheckinSessionFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
+  getSub2ApiAuthFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
   resolveProxyUrlFromExtraConfig,
@@ -33,6 +34,8 @@ import {
 } from './browserSessionCredential.js';
 import { describeRenewalGap, tryAutoRelogin } from './autoRelogin.js';
 import { runDailyLottery } from './lotteryService.js';
+import { isManagedSub2ApiTokenDue, isSub2ApiPlatform } from './sub2apiManagedAuth.js';
+import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
 import { readAuthTokenCookie, upsertAuthTokenCookie } from './platforms/mintWheelCheckin.js';
@@ -410,6 +413,33 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         externalCheckinUrl: site.externalCheckinUrl,
         extraConfig: account.extraConfig,
       })));
+
+  // A Sub2API access token is a JWT that lives for hours, so the daily check-in
+  // regularly finds it already stale. Renewing on the way in keeps the run on
+  // the cheap HTTP path: without it the check-in fails with a 401 and the only
+  // way to recover is a headed browser sign-in for something the refresh token
+  // already on file could do.
+  if (isSub2ApiPlatform(site.platform)) {
+    const managedAuth = getSub2ApiAuthFromExtraConfig(account.extraConfig);
+    if (managedAuth?.refreshToken && isManagedSub2ApiTokenDue(managedAuth.tokenExpiresAt)) {
+      try {
+        const refreshed = await refreshSub2ApiManagedSessionSingleflight({
+          account,
+          site,
+          currentAccessToken: activeAccessToken,
+          currentExtraConfig: account.extraConfig,
+        });
+        activeAccessToken = refreshed.accessToken;
+        // The merges further down start from `account.extraConfig`, so swapping
+        // the snapshot here is what stops them writing the pre-refresh
+        // configuration back over the row this renewal just updated.
+        account.extraConfig = refreshed.extraConfig;
+      } catch {
+        // A refused refresh is not fatal here: the failure below is classified
+        // on its own, and the re-login path still gets its chance.
+      }
+    }
+  }
 
   let result = await runCheckin(activeAccessToken);
 

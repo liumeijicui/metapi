@@ -215,7 +215,23 @@ async function tryPasswordRelogin(
       // captured before it would put the retired secret back.
       accessToken: applyRotatedCredentialIfCarried(login.accessToken, prune.rotated),
       platformUserId: login.platformUserId,
-      extraFields: prune.extraFields,
+      extraFields: {
+        ...prune.extraFields,
+        // A Sub2API sign-in answers with a rotating pair, and the access half
+        // only lives for hours. Keeping the refresh half is what turns this
+        // re-login into the last one: from here on the session renews over
+        // HTTP. Losing it costs another sign-in on every expiry, and on a
+        // deployment whose login form is Turnstile-gated there is no second
+        // sign-in to have.
+        ...(isSub2ApiPlatform(site.platform) && login.refreshToken
+          ? {
+            sub2apiAuth: {
+              refreshToken: login.refreshToken,
+              ...(login.tokenExpiresAt ? { tokenExpiresAt: login.tokenExpiresAt } : {}),
+            },
+          }
+          : {}),
+      },
     }),
     blockedByHumanCheck: false,
   };
@@ -304,7 +320,11 @@ async function pruneAfterSignIn(params: {
  * marker; `getReloginProviderFromExtraConfig` documents why a Linux.do link is
  * recorded in the second slot.
  */
-async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+async function tryOauthRelogin(
+  account: any,
+  site: any,
+  options?: AutoReloginOptions,
+): Promise<AutoReloginResult | null> {
   const provider = getOauthProviderFromExtraConfig(account.extraConfig)
     ?? getReloginProviderFromExtraConfig(account.extraConfig);
   if (provider === 'linuxdo') {
@@ -314,7 +334,7 @@ async function tryOauthRelogin(account: any, site: any): Promise<AutoReloginResu
     // `/api/v1/auth/oauth/linuxdo/start` and returns its tokens in a URL
     // fragment instead. The platform decides which driver gets to speak.
     return isSub2ApiPlatform(site.platform)
-      ? trySub2ApiLinuxDoRelogin(account, site)
+      ? trySub2ApiLinuxDoRelogin(account, site, options)
       : tryLinuxDoRelogin(account, site);
   }
   if (provider !== 'github') return null;
@@ -451,7 +471,11 @@ async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginRe
  * session from then on without another browser run — which is what keeps this
  * from becoming an hourly Chromium job.
  */
-async function trySub2ApiLinuxDoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+async function trySub2ApiLinuxDoRelogin(
+  account: any,
+  site: any,
+  options?: AutoReloginOptions,
+): Promise<AutoReloginResult | null> {
   let host = '';
   try {
     host = new URL(site.url).hostname.toLowerCase();
@@ -481,7 +505,17 @@ async function trySub2ApiLinuxDoRelogin(account: any, site: any): Promise<AutoRe
   }));
   // A refusal is reported by the driver's own message and the caller keeps the
   // original verdict; only a captured pair is worth writing down.
-  if (captured.status !== 'captured' || !captured.credentials?.accessToken) return null;
+  if (captured.status !== 'captured' || !captured.credentials?.accessToken) {
+    // The driver knows exactly which step refused — the consent page never
+    // appeared, the site's callback answered without a token, the captured pair
+    // belonged to somebody else. Reporting it as a generic "token expired" is
+    // what sends the operator looking at credentials when the problem is the
+    // site, so the verdict is handed to the caller to record verbatim.
+    if (captured.message) {
+      options?.onRefusal?.({ code: 'relogin_refused', reason: captured.message });
+    }
+    return null;
+  }
 
   const refreshToken = captured.credentials.refreshToken;
   const tokenExpiresAt = captured.credentials.tokenExpiresAt;
@@ -693,7 +727,7 @@ export async function tryAutoRelogin(
   const passwordAttempt = await tryPasswordRelogin(account, site, options?.onRefusal);
   if (passwordAttempt.result) return passwordAttempt.result;
 
-  const oauth = await tryOauthRelogin(account, site);
+  const oauth = await tryOauthRelogin(account, site, options);
   if (oauth) return oauth;
 
   if (!options?.allowBrowserFallback) return null;

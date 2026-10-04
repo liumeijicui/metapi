@@ -1,3 +1,29 @@
+### 50. Sub2API 会话保活补齐：登录不再丢 refresh token，续期失败会接着走重登
+
+- **类型**：缺陷修复（凭据持久化 + 续期兜底）
+- **需求来源**：本会话（用户：「可以，刷一遍吧」——把 sub2api 站过一遍）
+- **一、刷库发现的两个真问题**
+  - **登录把 refresh token 丢了**：`Sub2ApiAdapter.login()` 只取 `data.access_token`，把同一个响应里的 `refresh_token` / `expires_in` 扔掉了。后果是绑定那一刻起，账号就只能靠一个只活几小时的 JWT 活着——到期后要么每小时重登一次，要么（站点把登录表单挂了 Turnstile 时）**根本回不去**。
+  - **续期失败就到底了**：`balanceService` 在 `sub2apiAuth.refreshToken` 存在时只试 HTTP 刷新，刷新被拒就直接报错——`tryAutoRelogin()` 那条（可重放的 Linux.do 握手）**永远不会被走到**。这正是 `#11 l0veyou` 卡在 `expired` 的样子。签到路径则压根没有 sub2api 续期，每天第一次签到必定撞在过期 JWT 上。
+- **二、修复**
+  - `Sub2ApiAdapter.login()` 现在把 `refreshToken` / `tokenExpiresAt` 一起报出来（`LoginResult` 新增这两个可选字段，注释写明「只有一半的凭据等于没有」），账号绑定与自动重登两条路径都会写进 `extra_config.sub2apiAuth`。
+  - `balanceService`：`sub2apiAuth` 刷新被拒后不再终结，而是把站点这次的原始拒绝留作文案、继续走 `tryAutoRelogin()`。刷新成功则完全不变（绝大多数情况仍然是纯 HTTP，不拉浏览器）。
+  - `checkinService`：签到前若 sub2api 令牌将过期，先用 `refreshSub2ApiManagedSessionSingleflight()` 续一次，让每日签到走 HTTP 而不是撞 401。
+  - `trySub2ApiLinuxDoRelogin()` 现在把驱动的判决（`onRefusal`）原样交给调用方记录：授权页没出现、站点回调没下发令牌、登录到了别的账号——这些都会写进账号健康原因，而不是被压成一句「Token 无效或已过期」。
+- **三、驱动自身的两个问题（这轮实测抓出来的）**
+  - **把浏览器里的旧令牌当成了本次结果**：`#11` 第一次重登「成功」用的其实是 profile 里上一次手工登录留下的、**已经过期一天**的 JWT（`exp` 比当前时间早 24 小时）。现在捕获前先读基线，并做两道校验：令牌自身还没过期、且与基线不同，否则按「读到旧会话」报错而不是存下来——把能用的凭据换成死凭据，比什么都不做更糟。
+  - 授权后停在站点自己的回调页而无令牌时，文案点明是站点侧的问题（`#11` 的站点把授权结果送回了 `/auth/linuxdo/callback`，该地址返回 404）。
+- **四、刷库结果（5 个 sub2api 账号）**
+  - `#2 虾蹬王`（账号密码登录）：补上 `relogin` 兜底标记；`platformUserId` 341 与 JWT 一致；实测重登成功，`sub2apiAuth` 已换成新的 `rt_…`（有效期到 10-05 14:46），`/auth/me` 200。
+  - `#11 l0veyou`：**修正了错了一轮的 `platformUserId`**（原 45215575，JWT 里其实是 9054，正好等于 `user.id`，与站点其它账号命名一致），并补上 `relogin`。驱动能走到授权页、能点「允许」、`connect.linux.do` 也确实下发了 `code`，但**站点把回调送进 404、不下发令牌**——站点侧缺陷，需人工在浏览器里登一次该站。
+  - `#35 Fengwind API`：上一轮已修复，本轮复测 `/auth/me` 200。
+  - `#17 100xlabs`、`#18 林夕(k40)`：**已确认无需改动**——两站的 `/api/v1/settings/public` 里 `turnstile_enabled=true` 且 `linuxdo_oauth_enabled=false`，`/api/v1/auth/oauth/linuxdo/start` 返回 404，即它们根本没有 Linux.do 快捷登录，只能用账号密码（两份密码站点自己回 `turnstile verification failed`，即密码本来就不对）。给它们加 `relogin` 标记只会每次失效白跑一趟浏览器，所以没加。
+- **五、测试与门禁**
+  - 新增/修改：`sub2api.test.ts` 2 例（登录带出 refresh 对 / 站点不给时不编造 token 过期时间）、`accounts.login-browser-session.test.ts` 1 例（绑定写入 `sub2apiAuth`）、`autoRelogin.test.ts` 3 例（sub2api 密码登录保留 refresh 对 / 非 sub2api 平台不写 `sub2apiAuth` / 驱动失败时 `onRefusal` 原样上报）、`sub2ApiLinuxDoRelogin.test.ts` 6 例（过期令牌拒绝、基线比对四例、空捕获）。
+  - 回归：`src/server/services` + `src/server/routes` 共 **1844 例**，2 例失败与本次改动无关（`siteProxy.test.ts`、`factoryResetService.test.ts` 读本机 `HTTP_PROXY` 与 `.env` 的 `PROXY_TOKEN`，属既有环境耦合）；`tsc` 两道门通过，服务已重启。
+- **主要文件**：`src/server/services/platforms/sub2api.ts`、`src/server/services/platforms/base.ts`、`src/server/services/autoRelogin.ts`、`src/server/services/balanceService.ts`、`src/server/services/checkinService.ts`、`src/server/services/assistedLogin/sites/sub2ApiLinuxDoRelogin.ts`、`src/server/routes/api/accounts.ts`
+- **状态**：已完成（`#11` 站点侧回调 404 需人工登一次；其余 sub2api 账号均已核实清楚）
+
 ### 49. 补上 Sub2API 站的 Linux.do 自动重登：Fengwind 这类站现在能自己救活了
 
 - **类型**：功能新增（自动续期驱动）

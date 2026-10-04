@@ -341,6 +341,14 @@ export async function refreshBalance(accountId: number) {
       && !!getSub2ApiAuthFromExtraConfig(activeExtraConfig)?.refreshToken
       && shouldAttemptAutoRelogin(message);
 
+    // A managed refresh that the site refuses is not the end of the road. The
+    // refresh token can be retired while the sign-in that bound the account -
+    // a Linux.do handshake - is still replayable, and treating the refusal as
+    // final is what used to strand such an account as `expired` with the
+    // browser path never even attempted. The refusal is kept as the message to
+    // report if that replay also comes up empty.
+    let failureMessage = message;
+    let recovered = false;
     if (canTryManagedSub2ApiRefresh) {
       try {
         const refreshed = await refreshSub2ApiManagedSessionSingleflight({
@@ -352,10 +360,13 @@ export async function refreshBalance(accountId: number) {
         activeAccessToken = refreshed.accessToken;
         activeExtraConfig = refreshed.extraConfig;
         balanceInfo = await readBalance(activeAccessToken);
+        recovered = true;
       } catch (retryErr: any) {
-        await handleBalanceError(retryErr);
+        failureMessage = retryErr?.message || message;
       }
-    } else if (shouldAttemptAutoRelogin(message)) {
+    }
+
+    if (!recovered && shouldAttemptAutoRelogin(failureMessage)) {
       // A refusal the site stated outright outranks the generic 401 that
       // triggered this retry, so it is captured and written after the error
       // handling below rather than being overwritten by it.
@@ -387,7 +398,7 @@ export async function refreshBalance(accountId: number) {
         // `handleBalanceError` records the generic verdict and then throws, so
         // the more specific refusal has to be written on the way out.
         try {
-          await handleBalanceError(err);
+          await handleBalanceError(new Error(failureMessage));
         } catch (error) {
           if (reloginRefusal) {
             const refusal = reloginRefusal as { code: string; reason: string };
@@ -404,8 +415,11 @@ export async function refreshBalance(accountId: number) {
           throw error;
         }
       }
-    } else {
-      await handleBalanceError(err);
+    } else if (!recovered) {
+      // Report the refusal the site actually gave. When a managed refresh was
+      // tried, that refusal is its own (`invalid refresh token`), which names
+      // the problem where the original 401 only hinted at it.
+      await handleBalanceError(new Error(failureMessage));
     }
   }
 

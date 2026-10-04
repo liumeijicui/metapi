@@ -160,6 +160,17 @@ export function judgeSub2ApiLinuxDoCapture(
     };
   }
   const claims = decodeJwtClaims(tokens.accessToken);
+  // A token that is already past its `exp` cannot be the result of a sign-in
+  // that just happened: it is an earlier session that happened to still be on
+  // file. Storing it would replace a working credential with a dead one, which
+  // is worse than reporting that the handshake produced nothing.
+  if (claims.expiresAtMs && claims.expiresAtMs <= Date.now()) {
+    return {
+      status: 'timeout',
+      credentials: null,
+      message: '捕获到的登录令牌已过期（读到的是浏览器里上一次的旧会话），请重试一次授权',
+    };
+  }
   if (
     options.expectedUserId
     && claims.userId
@@ -186,6 +197,28 @@ export function judgeSub2ApiLinuxDoCapture(
     },
     message: 'Linux.do 重新登录完成',
   };
+}
+
+/**
+ * Whether a captured pair is worth storing, or merely leftovers.
+ *
+ * Two ways a pair on screen can be older than the flow that is supposed to
+ * have produced it: it is already past its own expiry, or it is byte-for-byte
+ * what the profile already held before the flow started. Both happen in
+ * practice - a managed profile keeps the `auth_token` of whatever manual
+ * sign-in last used it - and reading either as a success silently downgrades a
+ * working credential to a dead one.
+ */
+export function isFreshSub2ApiCapture(
+  tokens: Sub2ApiTokenSet | null,
+  options: { baselineAccessToken?: string | null; nowMs?: number } = {},
+): boolean {
+  if (!tokens?.accessToken) return false;
+  const nowMs = options.nowMs ?? Date.now();
+  const claims = decodeJwtClaims(tokens.accessToken);
+  if (claims.expiresAtMs && claims.expiresAtMs <= nowMs) return false;
+  const baseline = (options.baselineAccessToken || '').trim();
+  return !baseline || tokens.accessToken.trim() !== baseline;
 }
 
 /** True for the consent page and its approval endpoint. */
@@ -250,6 +283,7 @@ async function readStoredTokens(page: Page): Promise<Sub2ApiTokenSet | null> {
 async function driveHandshake(
   page: Page,
   request: Sub2ApiLinuxDoReloginRequest,
+  baselineAccessToken: string | null,
 ): Promise<CaptureResult> {
   const origin = new URL(request.baseUrl).origin;
   const deadline = Date.now() + HANDSHAKE_TIMEOUT_MS;
@@ -263,11 +297,18 @@ async function driveHandshake(
 
     // The callback fragment is the answer, whether or not the SPA has consumed
     // it yet; the storage read is the fallback for a build that redirects twice.
+    // Both are filtered against the pair the profile already held: a fragment is
+    // proof of a fresh callback, but a stored value is only evidence once it is
+    // something other than what was there before this run.
     const fromUrl = readSub2ApiTokensFromUrl(lastUrl);
-    if (fromUrl) return judgeSub2ApiLinuxDoCapture(fromUrl, { expectedUserId: request.expectedUserId });
+    if (fromUrl && isFreshSub2ApiCapture(fromUrl, { baselineAccessToken })) {
+      return judgeSub2ApiLinuxDoCapture(fromUrl, { expectedUserId: request.expectedUserId });
+    }
     if (isSiteOrigin(lastUrl, origin)) {
       const stored = await readStoredTokens(page);
-      if (stored) return judgeSub2ApiLinuxDoCapture(stored, { expectedUserId: request.expectedUserId });
+      if (isFreshSub2ApiCapture(stored, { baselineAccessToken })) {
+        return judgeSub2ApiLinuxDoCapture(stored, { expectedUserId: request.expectedUserId });
+      }
     }
 
     if (isForumSsoUrl(lastUrl)) {
@@ -311,8 +352,20 @@ async function driveHandshake(
   }
 
   // A loop that ran out of time on the consent page is a refusal to approve, not
-  // a broken site; saying which is what lets the operator act on it.
+  // a broken site; saying which is what lets the operator act on it. Being sent
+  // back to the site itself without a token is the third possibility, and it is
+  // the site's own defect rather than anything about the credential - one
+  // deployment lands its visitors on its SPA callback route, which answers 404
+  // and never hands the pair over.
   if (sawConsent) {
+    if (clicked && isSiteOrigin(lastUrl, origin)) {
+      return {
+        status: 'timeout',
+        credentials: null,
+        message: `Linux.do 已授权，但站点回调未下发登录令牌（站点把授权结果送回了 ${new URL(lastUrl).pathname}，该地址没有返回令牌，需站点侧修复）`,
+        url: lastUrl,
+      };
+    }
     return {
       status: 'timeout',
       credentials: null,
@@ -368,10 +421,18 @@ export async function captureSub2ApiLinuxDoCredentialsOnce(
 
   const startUrl = `${origin}${START_PATH}?redirect=${encodeURIComponent(LANDING_PATH)}`;
   try {
+    // The profile carries whatever the last manual sign-in left behind, and the
+    // SPA keeps that `auth_token` in storage until the flow replaces it. Reading
+    // the baseline first is what tells the two apart: without it the loop below
+    // would "capture" the stale pair within a second of opening the page.
+    await page
+      .goto(`${origin}/`, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
+      .catch(() => undefined);
+    const baseline = await readStoredTokens(page);
     await page
       .goto(startUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
       .catch(() => undefined);
-    return await driveHandshake(page, request);
+    return await driveHandshake(page, request, baseline?.accessToken ?? null);
   } catch (error) {
     return {
       status: 'timeout',
