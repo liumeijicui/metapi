@@ -1,3 +1,26 @@
+### 42. 运维：清掉孤儿浏览器 profile，并给 metapi 加一道内存保险丝
+
+- **类型**：运维（资源回收 + 防整机拖死）
+- **需求来源**：本会话（第 41 条收尾时提出「清掉 `data/chinahk-browser`，并给 `metapi.service` 加 `MemoryMax` 保险丝」，用户回复「可以」）
+- **一、清理孤儿浏览器 profile `data/chinahk-browser`（50MB）**
+  - **判定它有资格被删的依据（三条都查过）**：① 全仓库 `grep` 只有变更日志里的历史排查文字提到它，**代码零引用**；② 当前浏览器 profile 的命名只有三种——`linuxdo-browser` / `github-browser`（`assistedLogin/profilePorts.ts`）与 `checkin-browser/site-<id>`（`browserSessionCredential.ts`），它不在其中；③ 拥有它的站点 `#30 chinahk` 账号 `#14` 近几日签到**一直成功**，走的正是 `checkin-browser/site-30`，即该目录早已被取代。
+  - **先备份再删**：整包归档为 `/home/app/metapi-backups/chinahk-browser-20261004.tar.gz`（27MB / 831 条目，含其 cookie 库里的 `new_api_has_session`、`new_api_refresh`，后者有效期至 2026-10-30），确认归档可读后才 `rm -r` 原目录。删后 `data/` 只剩 `checkin-browser` / `github-browser` / `linuxdo-browser`。
+  - **删后回归验证**：紧接着的全量签到里 `3145215575@qq.com @ chinahk` **成功**，坐实删除不影响该站签到。
+- **二、`metapi.service` 内存保险丝**
+  - 目的：metapi 与它 spawn 的 Chromium **同属一个 cgroup**，历史上无界并发叠加一次全量 `tsc` 曾把 3.6GB 内存的机器压到 SSH 都登不上。要一道只在服务自己失控时才收紧的兜底。
+  - **踩到的坑**：本机 `systemd 219`（2015 年版）**不认** `MemoryMax` / `MemoryHigh`——写了 drop-in 也静默忽略（`systemctl show` 里 `MemoryLimit=18446744073709551615`，即无限）。219 用的旧指令是 **`MemoryLimit=`**。
+  - 落地为 drop-in `/etc/systemd/system/metapi.service.d/memory.conf`：
+    ```ini
+    [Service]
+    MemoryAccounting=yes
+    MemoryLimit=2560M
+    ```
+    实测生效：`memory.limit_in_bytes = 2684354560`；`memsw` 保持无限（219 不联动写），即只卡物理内存、仍允许少量 swap 缓冲，比「内存+swap 合计封顶」温和。超限时由 systemd 只杀本服务，`Restart=on-failure` 负责拉起，整机不受牵连。
+- **验证（实测数据）**：全量签到 `success 28 / skipped 2 / failed 3`（33 个账号，约 7 分钟）；该轮 **cgroup 峰值 682MB**，对 2560MB 硬限有 **3.7 倍余量**，全程 **无 OOM / 无被 kill 事件**；任务结束后 chromium 归零、cgroup 回落 144MB，系统 706MB、swap 仅 5MB。
+- **备注（非本次引入）**：本轮 3 条失败均为站点侧既有问题——`luckyg`（HTTP 401 未登录，站点会话数上限）、`Fate`（invalid access token）、`Any Router`（授权后站点未回调 Linux.do 登录，偶发）；后者的 `Any Router` 属 linuxdo 授权回调时序问题，重登后一般可恢复。
+- **主要文件**：`docs/change-log.md`；运维侧 `data/chinahk-browser`（已删，备份见上）、`/etc/systemd/system/metapi.service.d/memory.conf`（新，不在仓库内，内容见上）
+- **状态**：已完成
+
 ### 41. 启动时清扫「孤儿托管浏览器」：重启后不再残留几百 MB 的僵尸 Chrome
 
 - **类型**：修复（资源回收）
