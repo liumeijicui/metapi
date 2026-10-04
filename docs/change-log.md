@@ -14,7 +14,7 @@
   - 实测基线：一个刚起来的受管 Chrome 就是 **12 个进程 / ~500MB**；托管浏览器是**每个访问过的站点一个常驻 renderer**，出事前那个 profile 的 session 里躺着 20 多个站点、18 个 renderer，Chrome 一家就到 1GB 以上。
   - 叠加因素：3.6GB 内存的机器上跑了一次**全量 `tsc --noEmit`**（实测峰值 RSS ~1.4GB，且这还是加了 1.4GB 上限测出来的），再叠加 metapi / 浏览器 / codex / 容器守护进程 → 内存打满、swap 抖动，于是 SSH 会话都起不来（日志里全是 `systemd-logind: Failed to create session: Connection timed out`）。
   - 更糟的是：`/swapfile` 存在（2GB）但**没写进 fstab**，重启之后就没了，机器等于零缓冲。
-  - 处置：① `/swapfile` 重建为 **4GB** 并写入 `/etc/fstab`（重启不再丢）；② 受管浏览器加启动参数 `--renderer-process-limit=6`、`--js-flags=--max-old-space-size=256`、`--disable-background-networking` 等，压住 renderer 数量与堆；③ 新增 **6 小时最大寿命回收**（`BROWSER_MAX_AGE_MS`）：周期性会话巡检会让浏览器永不空闲、renderer 只增不减，到点重启一次即可复位，且**有人在看远程登录窗口时（`keepAlive()` 10 分钟内）不回收**，避免登录中途窗被端掉；回收前等端口真正释放，免得新进程撞上未释放的 profile 锁。
+  - 处置：① `/swapfile` 重建为 **4GB** 并写入 `/etc/fstab`（重启不再丢）；② 受管浏览器加启动参数 `--renderer-process-limit=6`、`--js-flags=--max-old-space-size=256`、`--disable-background-networking` 等，压住 renderer 数量与堆；③ 新增 **6 小时最大寿命回收**（`BROWSER_MAX_AGE_MS`）：周期性会话巡检会让浏览器永不空闲、renderer 只增不减，到点重启一次即可复位，且**有人在看远程登录窗口时（`keepAlive()` 10 分钟内）不回收**；另外 `ensureManagedBrowserContext` 是每个流程的入口，所以「最近 10 分钟没有任何调用」才允许回收，正在跑的重登流程不会被中途端掉（会话巡检本身 30~60 分钟一轮，正好落在这个空档里）。回收前还要等端口真正释放，免得新进程撞上未释放的 profile 锁。
 - **验证（真实演练，非单测）**：
   - 故意把站点 `cf_clearance` 改成 `BROKEN-COOKIE-FOR-DRILL` → `POST /api/accounts/41/balance` → **2.2 秒内**走完「403 盾页 → 托管浏览器重新取盾 → 用新 cookie 重试 → 200」，返回余额 `7271.935414`，站点 `custom_headers` 被自动换成新 `cf_clearance`（`updated_at` 落到该次调用中）。对照：修挂载之前同样的调用是 34 秒 + 稳定 403。
   - 账号 **`#41`** 随后自动重登（`extra_config.relogin.lastReloginAt = 2026-10-04T01:55:06Z`）并回到 `active`，`runtimeHealth = healthy`，余额 $7271.94；`access_token` 已被重登写成全新的 `cf_clearance=…; session=…`。

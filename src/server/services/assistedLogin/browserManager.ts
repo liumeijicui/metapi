@@ -109,6 +109,8 @@ export function createManagedBrowser(input: {
   let idleTimer: NodeJS.Timeout | null = null;
   /** Last moment the remote-login view painted, i.e. a human was watching. */
   let lastInteractiveAt = 0;
+  /** Last moment any caller asked for this browser, i.e. work may be in flight. */
+  let lastUsedAt = 0;
 
   function getBrowserProfileDir(): string {
     return resolve(config.dataDir, input.profileDirName);
@@ -322,7 +324,13 @@ export function createManagedBrowser(input: {
   function shouldRecycle(): boolean {
     if (!runtime.launchedAt) return false;
     if (Date.now() - runtime.launchedAt < BROWSER_MAX_AGE_MS) return false;
-    return Date.now() - lastInteractiveAt > INTERACTIVE_GRACE_MS;
+    // Never yank the browser out from under a half-finished sign-in.
+    if (Date.now() - lastInteractiveAt <= INTERACTIVE_GRACE_MS) return false;
+    // `ensureManagedBrowserContext` is called at the start of every flow, so a
+    // recent call means some flow is still running against these tabs. Recycling
+    // only when nothing has asked for the browser for a while keeps the restart
+    // from landing in the middle of somebody's login.
+    return Date.now() - lastUsedAt > INTERACTIVE_GRACE_MS;
   }
 
   async function ensureManagedBrowserContext(): Promise<BrowserContext> {
@@ -330,6 +338,7 @@ export function createManagedBrowser(input: {
     // measured from the last real use rather than from launch.
     if (isRuntimeUsable()) {
       if (!shouldRecycle()) {
+        lastUsedAt = Date.now();
         scheduleIdleClose();
         return runtime.context as BrowserContext;
       }
@@ -404,6 +413,7 @@ export function createManagedBrowser(input: {
         // Keep the on-disk hint in step with reality so the next start attaches
         // on the first try even if this process is killed before it can close.
         rememberPort(candidate);
+        lastUsedAt = Date.now();
         // A browser adopted from a previous process is by definition idle at
         // this point, so it must be armed for shutdown like a fresh one.
         scheduleIdleClose();
@@ -439,6 +449,7 @@ export function createManagedBrowser(input: {
       runtime.context = context;
       runtime.port = port;
       runtime.launchedAt = Date.now();
+      lastUsedAt = Date.now();
       scheduleIdleClose();
       return context;
     })();
