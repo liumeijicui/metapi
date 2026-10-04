@@ -16,6 +16,7 @@ type FailureReasonCode =
   | 'invalid_credentials'
   | 'cloudflare_tunnel_unavailable'
   | 'cloudflare_challenge'
+  | 'site_unreachable'
   | 'token_expired'
   | 'already_checked_in'
   | 'network_timeout'
@@ -161,6 +162,51 @@ export function classifyFailureReason(
     };
   }
 
+  // A site that cannot be reached at all is not a credential problem, and
+  // saying "token expired" for it sends the operator to rotate a token that was
+  // never the issue. `fetch failed` is what Node's fetch throws for a DNS
+  // failure, a refused connection, and a dropped TLS handshake alike, so the
+  // whole family is named here for what it is: the site is down or unreachable.
+  if (
+    includesAny(text, [
+      'fetch failed',
+      'econnrefused',
+      'econnreset',
+      'econnaborted',
+      'epipe',
+      'enotfound',
+      'eai_again',
+      'getaddrinfo',
+      'socket hang up',
+      'other side closed',
+      'network error',
+      'net::err',
+      'connection refused',
+      'connection reset',
+      'connect timeout',
+      'und_err_',
+      'error 520',
+      'error 521',
+      'error 522',
+      'error 525',
+      'error 526',
+      'http 520',
+      'http 521',
+      'http 522',
+      'http 525',
+      'http 526',
+    ])
+  ) {
+    return {
+      code: 'site_unreachable',
+      category: 'network',
+      title: '站点无法访问（网站可能挂了）',
+      actionHint: '无需改动凭据，等站点恢复后会自动重试',
+      detailHint: '本机连不上该站点：域名解析、连接或 TLS 握手在到达站点之前就失败了。'
+        + '这属于站点侧或网络侧问题，与账号令牌无关，站点恢复后会自动恢复。',
+    };
+  }
+
   if (isTokenExpiredError({ status: httpStatus > 0 ? httpStatus : undefined, message: rawMessage })) {
     return {
       code: 'token_expired',
@@ -209,9 +255,10 @@ export function classifyFailureReason(
     return {
       code: 'upstream_error',
       category: 'site',
-      title: '上游站点错误',
-      actionHint: '稍后重试',
-      detailHint: '站点返回服务端错误，通常需要站点恢复后才可成功。',
+      title: '站点服务异常（网站可能挂了）',
+      actionHint: '无需改动凭据，等站点恢复后会自动重试',
+      detailHint: '站点自己返回了 5xx，说明请求已经到达站点、失败在它那一侧，'
+        + '与账号令牌无关；站点恢复后会自动恢复。',
     };
   }
 

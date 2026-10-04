@@ -242,6 +242,51 @@ describe('checkinService auto relogin', () => {
     );
   });
 
+  it('says the site may be down when the host is unreachable, not that the token died', async () => {
+    // A relay that is down answers nothing at all: the request never leaves the
+    // box, and Node's fetch reports it as a bare `fetch failed`. Reporting that
+    // as an expired token sends the operator to rotate a credential the site
+    // never saw.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 1,
+          username: '3145215575',
+          accessToken: 'still-good-token',
+          status: 'active',
+          extraConfig: JSON.stringify({ credentialMode: 'session' }),
+        },
+        sites: {
+          id: 33,
+          name: '100xlabs',
+          url: 'https://sub.100xlabs.space',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'fetch failed' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    await checkinAccount(1);
+
+    const loggedRows = insertValuesMock.mock.calls
+      .map((call) => call[0])
+      .filter((row: any) => row?.accountId === 1 && row?.message);
+    const checkinLogRow = loggedRows.find((row: any) => row?.status === 'failed');
+    expect(checkinLogRow?.message).toContain('网站可能挂了');
+    expect(checkinLogRow?.message).toContain('fetch failed');
+
+    const lastHealthCall = setHealthMock.mock.calls.at(-1) as any[];
+    expect(lastHealthCall[1]).toEqual(expect.objectContaining({
+      reason: expect.stringContaining('网站可能挂了'),
+    }));
+
+    // No re-login is attempted for a site that cannot be reached, and nothing
+    // says "no credential on file" — that would blame the account for the site
+    // being down.
+    expect(reportTokenExpiredMock).not.toHaveBeenCalled();
+  });
+
   it('revives an expired account once a sign-in hands it a live credential', async () => {
     selectAllMock.mockReturnValue([
       {

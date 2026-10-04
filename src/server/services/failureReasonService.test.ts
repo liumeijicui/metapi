@@ -82,6 +82,37 @@ describe('failureReasonService', () => {
     expect(result.category).toBe('auth');
   });
 
+  it('names an unreachable site instead of blaming the token', () => {
+    // Node's fetch throws a bare `fetch failed` for DNS, refused connections and
+    // dropped TLS alike. Reading that as an expired token is what sends the
+    // operator to rotate a credential the site never even saw.
+    for (const message of [
+      'fetch failed',
+      'connect ECONNREFUSED 1.2.3.4:443',
+      'getaddrinfo ENOTFOUND api.example.com',
+      'socket hang up',
+      'other side closed',
+      'HTTP 522',
+    ]) {
+      const result = classifyFailureReason({ message, status: 'failed' });
+      expect(result.code, message).toBe('site_unreachable');
+      expect(result.category, message).toBe('network');
+      expect(result.title, message).toContain('站点无法访问');
+    }
+  });
+
+  it('says the site may be down when it answers 5xx', () => {
+    const result = classifyFailureReason({ message: 'HTTP 502: 878.indevs.in', status: 'failed' });
+    expect(result.code).toBe('upstream_error');
+    expect(result.title).toContain('网站可能挂了');
+    expect(result.actionHint).toContain('无需改动凭据');
+  });
+
+  it('keeps a plain timeout a timeout, not an unreachable host', () => {
+    const result = classifyFailureReason({ message: '请求超时 (ETIMEDOUT)', status: 'failed' });
+    expect(result.code).toBe('network_timeout');
+  });
+
   it('classifies already checked in as state info', () => {
     const result = classifyFailureReason({
       message: '今天已经签到过啦',

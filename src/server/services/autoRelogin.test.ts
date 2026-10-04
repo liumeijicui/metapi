@@ -520,4 +520,38 @@ describe('autoRelogin', () => {
     expect(linuxDoReloginMock).not.toHaveBeenCalled();
     expect(updateSetMock).not.toHaveBeenCalled();
   });
+
+  describe('describeRenewalGap', () => {
+    it('says there is nothing to replay when the account stored no credential', async () => {
+      // This is the Fengwind-style account: bound through a single sign-on, no
+      // password on file, no OAuth binding recorded. It fails every hour, and
+      // without this sentence nothing says a human sign-in is the only way out.
+      const { describeRenewalGap } = await import('./autoRelogin.js');
+      const note = describeRenewalGap({ extraConfig: JSON.stringify({ credentialMode: 'session' }) });
+      expect(note).toContain('没有保存可自动续期的登录凭据');
+      expect(note).toContain('人工');
+    });
+
+    it('stays quiet when a re-login was possible', async () => {
+      const { describeRenewalGap } = await import('./autoRelogin.js');
+      expect(describeRenewalGap({
+        extraConfig: JSON.stringify({ autoRelogin: { username: 'u', passwordCipher: 'cipher' } }),
+      })).toBeUndefined();
+      expect(describeRenewalGap({
+        extraConfig: JSON.stringify({ oauth: { provider: 'github' } }),
+      })).toBeUndefined();
+      expect(describeRenewalGap({
+        extraConfig: JSON.stringify({ relogin: { provider: 'linuxdo' } }),
+      })).toBeUndefined();
+      // The provider is also recorded on the account row itself.
+      expect(describeRenewalGap({ extraConfig: '{}', oauthProvider: 'linuxdo' })).toBeUndefined();
+    });
+
+    it('blames the site, not the missing credential, when the site is down', async () => {
+      const { describeRenewalGap } = await import('./autoRelogin.js');
+      const account = { extraConfig: JSON.stringify({ credentialMode: 'session' }) };
+      expect(describeRenewalGap(account, 'fetch failed')).toBeUndefined();
+      expect(describeRenewalGap(account, 'HTTP 522')).toBeUndefined();
+    });
+  });
 });

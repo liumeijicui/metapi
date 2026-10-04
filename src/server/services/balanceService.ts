@@ -14,6 +14,7 @@ import {
 import { tryAutoRelogin } from './autoRelogin.js';
 import { createSerialQueue } from '../shared/serialQueue.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
+import { classifyFailureReason } from './failureReasonService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
 import { withAccountCredentialContext, withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
@@ -304,7 +305,14 @@ export async function refreshBalance(accountId: number) {
     () => withAccountCredentialContext({ accountId: account.id, siteId: site.id },
       () => adapter.getBalance(site.url, token, platformUserId)));
   const handleBalanceError = async (err: any) => {
-    const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
+    const raw = appendSessionTokenRebindHint(err?.message || 'unknown error');
+    // The same courtesy the check-in path gives: a site that cannot be reached
+    // is named as such, so a plain `fetch failed` on the account does not read
+    // like a credential that needs rotating.
+    const reason = classifyFailureReason({ message: raw });
+    const message = reason.code === 'site_unreachable' || reason.code === 'upstream_error'
+      ? `${reason.title}：${raw}`
+      : raw;
     // Awaited: this handler is called from paths that record a more specific
     // verdict right after it, and an un-awaited write here would land last and
     // silently overwrite that verdict with the generic one.

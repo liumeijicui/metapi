@@ -1,3 +1,32 @@
+### 48. 失效提示改成「说真话」：站点挂了就写站点挂了，续不了期就说清为什么
+
+- **类型**：缺陷修复（失败原因分类 + 提示文案）
+- **需求来源**：本会话（用户：「再看看签到那里，是不是又有一些网站提示token过期了，看看为啥不能续期，尽量提示成真实原因，比如网站挂了就提示网站挂了」）
+- **一、先查现场：现在到底有谁在报失效，为什么续不上**
+  - 生产库里挂着的就 3 个账号，而且**三个的真实原因互不相同**，全部已用真实凭据复测：
+    - `#4 luckyg`：密码是对的，站点回 **409 `AUTH_SESSION_LIMIT`**（并发会话数上限）。要等旧会话过期或由人在站点上「退出其他会话」，任何重试都无效 → 系统每小时自动重试，一有空位就会自己登进去。
+    - `#10 蛙蛙公益站`：站点回 **`Username or password is incorrect, or user has been banned`**，即密码被改或账号被封，属于要人去核对凭据，自动续期不可能成功。
+    - `#35 Fengwind API`：**账号上没有可续期的凭据**（`autoRelogin` 没存密码、`oauth`/`relogin` 也没绑），主站会话失效后 HTTP 侧无路可走 → 只能人工登录一次，登录后系统会自动记下续期标记，之后就能自动续期。
+  - 站点本身都是活的（`/api/status` 200），所以这三个都不是「网站挂了」。
+- **二、改掉「一律说 Token 过期」这个误导**
+  - 原来 `reportTokenExpired()` 无论什么原因都写「**Token 无效或已过期**」，即使里面括号里的详情已经写着「会话数已达上限」「账号密码无效」。详情对了、标题错了，用户第一眼看到的还是「令牌过期」，于是去换令牌——方向就是错的。
+  - 现在标题与正文都从 `classifyFailureReason()` 的原因产出：会话数上限 → 「账号密码有效，但站点登录会话数已达上限，无法自动续期」；密码被拒 → 「站点拒绝了保存的账号密码（密码已改或被封禁）」；人机验证 → 「自动续期被人机验证拦下」；站点不可达 → 「站点无法访问（网站可能挂了），令牌未续期」；真正的令牌过期才保留「Token 无效或已过期」。
+  - 并且**站点侧失败不再把账号标成 `expired`**：网站挂了并没有作废任何凭据，把它标成过期会让一个本来健康的账号退出轮换。
+- **三、新识别一类「网站挂了」**
+  - 新增 `site_unreachable`（`fetch failed` / `ECONNREFUSED` / `ENOTFOUND` / `EAI_AGAIN` / `socket hang up` / `other side closed` / `network error` / Cloudflare `520/521/522/525/526` 等）→ 标题「站点无法访问（网站可能挂了）」，明确写「无需改动凭据，等站点恢复后会自动重试」。
+  - `upstream_error`（5xx）从「上游站点错误」改成「**站点服务异常（网站可能挂了）**」，并说明请求已到达站点、失败在它那一侧。
+  - 纯超时仍归 `network_timeout`（「请求超时」），没有被并进不可达，避免把两件事说成一件。
+  - 签到路径与余额刷新路径都套了这层改写：账号上再也看不到光秃秃的 `fetch failed`，而是「站点无法访问（网站可能挂了）：fetch failed」，原文保留在末尾便于排查。
+- **四、补上「为什么续不了期」这句话**
+  - 新增 `describeRenewalGap()`（放在 `autoRelogin.ts`，因为只有它知道有哪几条续期路径）：当一个账号**没有任何可重放的凭据**（没存密码、没绑 `oauth`、没绑 `relogin`、账号行也没有 `oauth_provider`）时，失效记录会明确写上「该账号没有保存可自动续期的登录凭据（未存账号密码、也未绑定 OAuth），需要人工在站点上重新登录一次」。
+  - 站点挂了/限流/5xx 时这句话**不写**——那时问题在站点侧，写「你没存密码」会把人引到错的方向。这正是 Fengwind 这种情况从「莫名其妙一直 401」变成「知道要人工登一次」的原因。
+- **五、验证**
+  - 新增单测：`failureReasonService` 补 3 例（不可达站点 / 5xx 网站可能挂了 / 纯超时仍是超时）；`alertService.credentialFailure.test.ts` 4 例（会话上限、密码被拒、站点不可达且不标过期、真正的令牌过期）；`autoRelogin` 补 3 例（无可续期凭据、三种有凭据的情形保持沉默、站点挂了不甩锅给凭据）；`checkinService` 补 1 例（`fetch failed` 的签到记录里写「网站可能挂了」且不触发失效上报）。
+  - 生产实跑（`checkinAccount(4)` / `checkinAccount(10)`）：事件标题已变成「站点登录会话数已达上限」/「账号密码无效或账号被封禁」，账号健康原因分别落在对应的真实原因上。
+  - 回归：`src/server/services` + `src/server/routes` 共 **1817 例**，其中 2 例失败与本次改动无关（`siteProxy.test.ts`、`factoryResetService.test.ts` 读的是本机 `HTTP_PROXY` 与 `.env` 里的 `PROXY_TOKEN`，属于环境耦合，改动前就已如此）；`tsc` 两道门、`npm run build:server` 通过，服务已重启。
+- **主要文件**：`src/server/services/failureReasonService.ts`、`src/server/services/alertService.ts`、`src/server/services/autoRelogin.ts`、`src/server/services/checkinService.ts`、`src/server/services/balanceService.ts`、`src/server/services/alertService.credentialFailure.test.ts`
+- **状态**：已完成（三个失效账号本身仍无法由服务端自动救活，原因如上；Fengwind 需要在站点上人工登录一次，登录后系统会自动记住续期方式）
+
 ### 47. 修「百倍 / 林夕」抽奖漏抽：原来把最后 1-2 次当成短批次发给站点，被拒后整轮中断
 
 - **类型**：缺陷修复（抽奖批次拆分 + 适配器路由回退）

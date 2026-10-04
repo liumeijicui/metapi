@@ -31,7 +31,7 @@ import {
   asBrowserSessionCredential,
   runBrowserSessionCheckin,
 } from './browserSessionCredential.js';
-import { tryAutoRelogin } from './autoRelogin.js';
+import { describeRenewalGap, tryAutoRelogin } from './autoRelogin.js';
 import { runDailyLottery } from './lotteryService.js';
 import { config } from '../config.js';
 import type { CheckinResult } from './platforms/base.js';
@@ -318,6 +318,28 @@ async function renewExternalCheckinSession(account: any, site: any): Promise<boo
   return true;
 }
 
+/**
+ * Restates a site-side transport failure as the operator would describe it.
+ *
+ * The raw text is kept at the end: it is what a search or a bug report needs,
+ * and it is still what the failure classifier reads.
+ */
+function describeFailureForLog(
+  message: string,
+  reason: ReturnType<typeof classifyFailureReason>,
+): string {
+  switch (reason.code) {
+    case 'site_unreachable':
+      return `站点无法访问（网站可能挂了）：${message}`;
+    case 'upstream_error':
+      return `站点服务异常（网站可能挂了）：${message}`;
+    case 'cloudflare_tunnel_unavailable':
+      return `站点隧道不可用（网站侧问题）：${message}`;
+    default:
+      return message;
+  }
+}
+
 export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
   const rows = await db
     .select()
@@ -451,9 +473,16 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const reloginRefusalReason = reloginRefusal
     ? (reloginRefusal as { code: string; reason: string }).reason
     : null;
-  const logMessage = manualVerificationRequired
+  const visibleFailureMessage = manualVerificationRequired
     ? manualVerificationMessage
     : (!effectiveSuccess && reloginRefusalReason ? reloginRefusalReason : result.message);
+  // A transport error reaches this point as the browser's own words — `fetch
+  // failed`, a bare `HTTP 502` — which tell the operator nothing about where the
+  // problem is. The site-side ones are restated as what they mean; the site's own
+  // refusals (a 401, a session cap) already name themselves and are left alone.
+  const logMessage = effectiveSuccess
+    ? visibleFailureMessage
+    : describeFailureForLog(visibleFailureMessage, classifyFailureReason({ message: visibleFailureMessage }));
   const shouldRefreshBalance = result.success || alreadyCheckedIn;
   const directCheckinSuccess = result.success && !alreadyCheckedIn && !unsupportedCheckin;
   const shouldAdvanceLastCheckinAt = directCheckinSuccess || (alreadyCheckedIn && options?.scheduleMode !== 'interval');
@@ -562,15 +591,16 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   }
 
   if (!effectiveSuccess) {
-    // Reported first: it records the generic "token expired" health reason and
-    // flips the account to `expired`, and the more specific write below has to
-    // land after it or it would be buried under that verdict.
+    // Reported first: it records the credential verdict and flips the account to
+    // `expired`, and the more specific write below has to land after it or it
+    // would be buried under that verdict.
     if (isTokenExpiredError({ message: result.message })) {
       await reportTokenExpired({
         accountId: account.id,
         username: account.username,
         siteName: site.name,
         detail: logMessage,
+        renewalNote: describeRenewalGap(account, result.message),
       });
     }
 

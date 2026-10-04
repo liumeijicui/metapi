@@ -571,6 +571,41 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
 }
 
 /**
+ * Says why a dead credential could not be renewed automatically.
+ *
+ * This module is the only thing that knows which replays exist, so it is also
+ * the thing that can say when there is nothing to replay. An account with no
+ * stored password and no OAuth binding fails identically every hour with no hint
+ * that a human sign-in is the only way out, which reads like the system is
+ * broken rather than missing an input. Returns undefined when a re-login was
+ * possible — the failure is then about the site, not about the missing input.
+ *
+ * A site-side failure (the host is down, the site answers 5xx) is reported as
+ * such elsewhere; saying "no credential on file" there would point the operator
+ * at the wrong thing, so this only speaks when the site answered and refused.
+ */
+export function describeRenewalGap(
+  account: { extraConfig?: string | null; oauthProvider?: string | null },
+  message?: string | null,
+): string | undefined {
+  const reason = classifyFailureReason({ message });
+  if (
+    reason.code === 'site_unreachable'
+    || reason.code === 'cloudflare_tunnel_unavailable'
+    || reason.code === 'upstream_error'
+    || reason.code === 'rate_limited'
+  ) {
+    return undefined;
+  }
+  const { extraConfig } = account;
+  if (getAutoReloginConfig(extraConfig)) return undefined;
+  if (getOauthProviderFromExtraConfig(extraConfig) || account.oauthProvider) return undefined;
+  if (getReloginProviderFromExtraConfig(extraConfig)) return undefined;
+  return '该账号没有保存可自动续期的登录凭据（未存账号密码、也未绑定 OAuth），'
+    + '需要人工在站点上重新登录一次';
+}
+
+/**
  * Replaces the account's dead credential, or returns null when the sign-in was
  * refused (in which case the caller keeps its original failure verdict).
  */
