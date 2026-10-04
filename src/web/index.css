@@ -5607,6 +5607,16 @@ textarea {
   flex-wrap: wrap;
 }
 
+/* 模型 / 站点改成可搜索下拉：宽度跟着工具栏伸缩，别把后面的筛选项挤走。 */
+.model-monitor-filter {
+  flex: 1 1 240px;
+  min-width: 190px;
+}
+
+.model-monitor-filter-site {
+  flex: 0 1 230px;
+}
+
 .model-monitor-toolbar select {
   padding: 7px 10px;
   border: 1px solid var(--color-border);
@@ -5643,7 +5653,18 @@ textarea {
   gap: 8px;
 }
 
+/* 模型名是个「点一下复制」的按钮，所以要把浏览器按钮的默认样式清掉。 */
 .model-monitor-model-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
@@ -5652,11 +5673,49 @@ textarea {
   white-space: nowrap;
 }
 
+.model-monitor-model-name .model-monitor-copy-hint {
+  flex: 0 0 auto;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.model-monitor-model-name:hover .model-monitor-copy-hint,
+.model-monitor-model-name:focus-visible .model-monitor-copy-hint {
+  opacity: 1;
+}
+
 .model-monitor-card-site {
+  align-self: flex-start;
   font-size: 12px;
   color: var(--color-text-muted);
+  text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+a.model-monitor-card-site:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+
+.model-monitor-card-price {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.model-monitor-price {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
@@ -5750,6 +5809,13 @@ textarea {
 .model-monitor-site-name {
   font-weight: 600;
   min-width: 96px;
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+a.model-monitor-site-name:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
 }
 
 .model-monitor-failure-message {
@@ -5800,12 +5866,19 @@ textarea {
   gap: 6px;
 }
 
-.model-monitor-unsupported-list span {
+.model-monitor-unsupported-list span,
+.model-monitor-unsupported-list a {
   padding: 3px 8px;
   border-radius: var(--radius-sm);
   background: rgba(148, 163, 184, 0.12);
   color: var(--color-text-secondary);
   font-size: 12px;
+  text-decoration: none;
+}
+
+.model-monitor-unsupported-list a:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
 }
 
 .model-monitor-legend {
@@ -5834,6 +5907,11 @@ textarea {
   .model-monitor-toolbar select {
     max-width: none;
     flex: 1 1 140px;
+  }
+
+  .model-monitor-filter,
+  .model-monitor-filter-site {
+    flex: 1 1 100%;
   }
 }
 

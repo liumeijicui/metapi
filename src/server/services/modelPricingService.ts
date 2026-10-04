@@ -774,14 +774,23 @@ function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricin
   };
 }
 
-export async function fetchModelPricingCatalog(input: EstimateProxyCostInput): Promise<ModelPricingCatalog | null> {
-  const pricingData = await getPricingDataCached(input);
+/**
+ * 读整个站点的价目表只需要「哪一站 + 用哪份凭据 + 什么平台」；模型名只有
+ * 在估算某一次调用的成本时才用得上，所以这里不强制要求。
+ */
+export type ModelPricingCatalogInput = Omit<EstimateProxyCostInput, 'modelName'> & {
+  /** 只有估算单次调用成本时才用得上；读整站价目表时可以不给。 */
+  modelName?: string;
+};
+
+export async function fetchModelPricingCatalog(input: ModelPricingCatalogInput): Promise<ModelPricingCatalog | null> {
+  const pricingData = await getPricingDataCached({ ...input, modelName: '' });
   if (!pricingData) return null;
   return buildModelPricingCatalogFromData(pricingData);
 }
 
-export async function refreshModelPricingCatalog(input: EstimateProxyCostInput): Promise<ModelPricingCatalog | null> {
-  const pricingData = await refreshPricingDataCache(input);
+export async function refreshModelPricingCatalog(input: ModelPricingCatalogInput): Promise<ModelPricingCatalog | null> {
+  const pricingData = await refreshPricingDataCache({ ...input, modelName: '' });
   if (!pricingData) return null;
   return buildModelPricingCatalogFromData(pricingData);
 }

@@ -45,6 +45,8 @@ describe('modelMonitorService', () => {
   beforeEach(async () => {
     getAdapterMock.mockReset();
     service.__resetModelMonitorStateForTests();
+    // 价格走的是真实 HTTP，单测里换成桩：不关心价格的用例一律「读不到」。
+    service.__setModelMonitorPricingLoaderForTests(async () => null);
     await db.delete(schema.siteModelMonitorModels).run();
     await db.delete(schema.siteModelMonitorSites).run();
     await db.delete(schema.accountTokens).run();
@@ -208,6 +210,97 @@ describe('modelMonitorService', () => {
       expect(rows.map((row) => row.modelName)).toEqual(['b']);
     });
 
+    it('把站点价目表里的输入 / 输出单价一起写进模型行', async () => {
+      const site = await seedSite();
+      await seedAccount(site.id);
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: true,
+          data: {
+            summary: null,
+            windowStart: null,
+            windowEnd: null,
+            showThroughput: null,
+            models: [model('gpt-5.5'), model('按次计费模型')],
+          },
+        })),
+      }));
+      service.__setModelMonitorPricingLoaderForTests(async () => ({
+        models: [
+          {
+            modelName: 'gpt-5.5',
+            quotaType: 0,
+            modelDescription: null,
+            tags: [],
+            supportedEndpointTypes: [],
+            ownerBy: null,
+            enableGroups: ['default'],
+            groupPricing: {
+              default: { quotaType: 0, inputPerMillion: 75, outputPerMillion: 150 },
+            },
+          },
+          {
+            modelName: '按次计费模型',
+            quotaType: 1,
+            modelDescription: null,
+            tags: [],
+            supportedEndpointTypes: [],
+            ownerBy: null,
+            enableGroups: ['default'],
+            // new-api 的按次计费只给总价。
+            groupPricing: {
+              default: { quotaType: 1, perCallTotal: 0.03 },
+            },
+          },
+        ],
+        groupRatio: { default: 1 },
+      }));
+
+      await service.runModelMonitorFetch();
+
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      const byName = new Map(rows.map((row) => [row.modelName, row]));
+      expect(byName.get('gpt-5.5')).toMatchObject({
+        pricingUnit: 'token',
+        inputPrice: 75,
+        outputPrice: 150,
+      });
+      expect(byName.get('按次计费模型')).toMatchObject({
+        pricingUnit: 'call',
+        inputPrice: 0.03,
+        outputPrice: null,
+      });
+    });
+
+    it('价目表读不到时不影响采集：只是没有价格', async () => {
+      const site = await seedSite();
+      await seedAccount(site.id);
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: true,
+          data: {
+            summary: null,
+            windowStart: null,
+            windowEnd: null,
+            showThroughput: null,
+            models: [model('a')],
+          },
+        })),
+      }));
+      service.__setModelMonitorPricingLoaderForTests(async () => {
+        throw new Error('pricing down');
+      });
+
+      const summary = await service.runModelMonitorFetch();
+
+      expect(summary.status.ok).toBe(1);
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(rows[0].pricingUnit).toBeNull();
+      expect(rows[0].inputPrice).toBeNull();
+    });
+
     it('采集失败时保留上一轮数据，并把原因写到站点行', async () => {
       const site = await seedSite();
       await seedAccount(site.id);
@@ -289,7 +382,7 @@ describe('modelMonitorService', () => {
         status: 'active',
       }).returning().get();
       await db.insert(schema.siteModelMonitorModels).values([
-        { siteId: site.id, modelName: 'gpt-5.5', successRate: 50, avgLatencyMs: 3000, avgTps: 10, fetchedAt: '2026-10-04T01:00:00.000Z' },
+        { siteId: site.id, modelName: 'gpt-5.5', successRate: 50, avgLatencyMs: 3000, avgTps: 10, pricingUnit: 'token', inputPrice: 75, outputPrice: 150, fetchedAt: '2026-10-04T01:00:00.000Z' },
         { siteId: site.id, modelName: 'claude-opus-5', successRate: 99, avgLatencyMs: 800, avgTps: 90, fetchedAt: '2026-10-04T01:00:00.000Z' },
         { siteId: other.id, modelName: 'gpt-5.5-mini', successRate: 95, avgLatencyMs: 500, avgTps: 200, fetchedAt: '2026-10-04T02:00:00.000Z' },
       ]).run();
@@ -301,8 +394,18 @@ describe('modelMonitorService', () => {
 
     it('按模型名 / 站点 / 最低成功率筛选，并回传最近更新时间', async () => {
       const filtered = await service.loadModelMonitorOverview({ model: 'gpt-5.5' });
-      expect(filtered.models.map((row) => row.modelName).sort()).toEqual(['gpt-5.5', 'gpt-5.5-mini']);
+      expect(filtered.models.map((row) => row.modelName).sort()).toEqual(['gpt-5.5']);
+      expect(filtered.models[0].siteUrl).toBe('https://alpha.example.com');
+      expect(filtered.sites[0].url).toBeTruthy();
       expect(filtered.updatedAt).toBe('2026-10-04T02:00:00.000Z');
+
+      const priced = filtered.models.find((row) => row.modelName === 'gpt-5.5');
+      expect(priced).toMatchObject({
+        pricingUnit: 'token',
+        inputPrice: 75,
+        outputPrice: 150,
+        siteUrl: 'https://alpha.example.com',
+      });
 
       const byRate = await service.loadModelMonitorOverview({ minSuccessRate: 96 });
       expect(byRate.models.map((row) => row.modelName)).toEqual(['claude-opus-5']);

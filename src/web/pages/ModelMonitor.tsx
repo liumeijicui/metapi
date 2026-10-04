@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
+import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
 
@@ -8,6 +9,7 @@ type Sample = { ts: number | null; rate: number };
 type ModelRow = {
   siteId: number;
   siteName: string;
+  siteUrl: string;
   platform: string;
   modelName: string;
   avgLatencyMs: number | null;
@@ -17,12 +19,17 @@ type ModelRow = {
   windowStart: number | null;
   windowEnd: number | null;
   showThroughput: boolean | null;
+  /** 'token' = 每 100 万 token 的美元价，'call' = 每次调用的美元价。 */
+  pricingUnit: 'token' | 'call' | null;
+  inputPrice: number | null;
+  outputPrice: number | null;
   fetchedAt: string | null;
 };
 
 type SiteRow = {
   siteId: number;
   siteName: string;
+  url: string;
   platform: string;
   status: string;
   message: string | null;
@@ -36,6 +43,7 @@ type Overview = {
   windowStartHour: number;
   windowEndHour: number;
   intervalMs: number;
+  modelOptions: Array<{ modelName: string; siteCount: number }>;
   sites: SiteRow[];
   models: ModelRow[];
 };
@@ -72,6 +80,36 @@ function formatThroughput(value: number | null | undefined): string {
 function formatPercent(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '—';
   return `${value.toFixed(2)}%`;
+}
+
+/** 价格按数量级留小数：$75 不写「75.00」，$0.0125 也别被抹成 0.01。 */
+function formatUnitPrice(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  if (value === 0) return '$0';
+  const digits = Math.abs(value) >= 1 ? 2 : 4;
+  return `$${value.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '')}`;
+}
+
+function priceSuffix(unit: 'token' | 'call'): string {
+  return unit === 'call' ? tr('/ 次') : tr('/ 1M');
+}
+
+function formatModelPrice(model: ModelRow): string {
+  if (!model.pricingUnit) return '';
+  const suffix = priceSuffix(model.pricingUnit);
+  const parts: string[] = [];
+  if (model.inputPrice != null) {
+    // 按次计费只给一个总价时（new-api 的数字 model_price），不再硬写「输入」。
+    const singleTotal = model.pricingUnit === 'call' && model.outputPrice == null;
+    parts.push(singleTotal
+      ? `${formatUnitPrice(model.inputPrice)} ${suffix}`
+      : `${tr('输入')} ${formatUnitPrice(model.inputPrice)} ${suffix}`);
+  }
+  if (model.outputPrice != null) {
+    parts.push(`${tr('输出')} ${formatUnitPrice(model.outputPrice)} ${suffix}`);
+  }
+  if (!parts.length) return '';
+  return `${model.pricingUnit === 'call' ? tr('按次计费') : tr('按量计费')} ${parts.join(' ')}`;
 }
 
 function resolveRateLevel(rate: number | null): 'excellent' | 'good' | 'warning' | 'critical' | 'unknown' {
@@ -159,19 +197,29 @@ export default function ModelMonitor() {
   const [refreshing, setRefreshing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [view, setView] = useState<'cards' | 'table'>('cards');
-  const [modelQuery, setModelQuery] = useState('');
+  const [modelFilter, setModelFilter] = useState('');
   const [siteFilter, setSiteFilter] = useState('');
   const [minSuccessRate, setMinSuccessRate] = useState('');
   const [sortKey, setSortKey] = useState('success');
   const [showFailures, setShowFailures] = useState(false);
   const [showUnsupported, setShowUnsupported] = useState(false);
+  const [copiedModel, setCopiedModel] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 模型名是复制按钮：手打一长串模型名太费劲，点一下就拿走。
+  const copyModelName = useCallback((name: string) => {
+    navigator.clipboard?.writeText?.(name).catch(() => {});
+    setCopiedModel(name);
+    setTimeout(() => {
+      setCopiedModel((current) => (current === name ? null : current));
+    }, 1500);
+  }, []);
 
   const load = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
     try {
       const data = await api.getModelMonitorOverview({
-        model: modelQuery.trim() || null,
+        model: modelFilter || null,
         siteId: siteFilter ? Number(siteFilter) : null,
         minSuccessRate: minSuccessRate ? Number(minSuccessRate) : null,
         sort: sortKey,
@@ -183,7 +231,7 @@ export default function ModelMonitor() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [modelQuery, siteFilter, minSuccessRate, sortKey, toast]);
+  }, [modelFilter, siteFilter, minSuccessRate, sortKey, toast]);
 
   useEffect(() => {
     void load();
@@ -222,6 +270,7 @@ export default function ModelMonitor() {
 
   const models = overview?.models ?? [];
   const sites = overview?.sites ?? [];
+  const modelOptions = overview?.modelOptions ?? [];
   // 站点自己就没有这个接口，属于「已知无法采集」，和真正需要关注的失败
   // 分开：默认不占版面，只在需要时展开看一眼。
   const failedSites = sites.filter((site) => site.status !== 'ok' && site.status !== 'unsupported');
@@ -299,24 +348,49 @@ export default function ModelMonitor() {
       </div>
 
       <div className="card model-monitor-toolbar">
-        <div className="toolbar-search" style={{ flex: '1 1 220px' }}>
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
-          </svg>
-          <input
-            value={modelQuery}
-            onChange={(event) => setModelQuery(event.target.value)}
-            placeholder={tr('搜索模型名')}
+        <div className="model-monitor-filter model-monitor-filter-model">
+          <ModernSelect
+            value={modelFilter}
+            onChange={setModelFilter}
+            options={[
+              { value: '', label: tr('全部模型') },
+              ...modelOptions.map((option) => ({
+                value: option.modelName,
+                label: option.modelName,
+                description: `${option.siteCount} ${tr('个站点')}`,
+              })),
+            ]}
+            size="sm"
+            searchable
+            placeholder={tr('全部模型')}
+            searchPlaceholder={tr('搜索模型名')}
+            emptyLabel={tr('没有匹配的模型')}
+            menuMaxHeight={320}
+            data-testid="model-monitor-model-select"
           />
         </div>
-        <select value={siteFilter} onChange={(event) => setSiteFilter(event.target.value)}>
-          <option value="">{tr('全部站点')}</option>
-          {sites.map((site) => (
-            <option key={site.siteId} value={site.siteId}>
-              {site.status === 'unsupported' ? `${site.siteName}${tr('（不支持）')}` : site.siteName}
-            </option>
-          ))}
-        </select>
+        <div className="model-monitor-filter model-monitor-filter-site">
+          <ModernSelect
+            value={siteFilter}
+            onChange={setSiteFilter}
+            options={[
+              { value: '', label: tr('全部站点') },
+              ...sites.map((site) => ({
+                value: String(site.siteId),
+                label: site.status === 'unsupported'
+                  ? `${site.siteName}${tr('（不支持）')}`
+                  : site.siteName,
+              })),
+            ]}
+            size="sm"
+            searchable
+            placeholder={tr('全部站点')}
+            searchPlaceholder={tr('搜索站点名')}
+            emptyLabel={tr('没有匹配的站点')}
+            menuMaxHeight={320}
+            data-testid="model-monitor-site-select"
+          />
+        </div>
         <select value={minSuccessRate} onChange={(event) => setMinSuccessRate(event.target.value)}>
           {SUCCESS_FILTERS.map((option) => (
             <option key={option.value} value={option.value}>{tr(option.label)}</option>
@@ -353,7 +427,13 @@ export default function ModelMonitor() {
             <ul className="model-monitor-failures-list">
               {failedSites.map((site) => (
                 <li key={site.siteId}>
-                  <span className="model-monitor-site-name">{site.siteName}</span>
+                  {site.url ? (
+                    <a className="model-monitor-site-name" href={site.url} target="_blank" rel="noreferrer" title={site.url}>
+                      {site.siteName}
+                    </a>
+                  ) : (
+                    <span className="model-monitor-site-name">{site.siteName}</span>
+                  )}
                   <span className={siteStatusClass(site.status)}>{tr(siteStatusLabel(site.status))}</span>
                   <span className="model-monitor-failure-message">{site.message || '—'}</span>
                   <span className="model-monitor-failure-time" title={formatTimestamp(site.fetchedAt)}>
@@ -381,7 +461,13 @@ export default function ModelMonitor() {
           {showUnsupported ? (
             <div className="model-monitor-unsupported-list">
               {unsupportedSites.map((site) => (
-                <span key={site.siteId} title={site.message || ''}>{site.siteName}</span>
+                site.url ? (
+                  <a key={site.siteId} href={site.url} target="_blank" rel="noreferrer" title={site.message || site.url}>
+                    {site.siteName}
+                  </a>
+                ) : (
+                  <span key={site.siteId} title={site.message || ''}>{site.siteName}</span>
+                )
               ))}
             </div>
           ) : null}
@@ -404,12 +490,34 @@ export default function ModelMonitor() {
           {models.map((model) => (
             <div className="card model-monitor-card" key={`${model.siteId}:${model.modelName}`}>
               <div className="model-monitor-card-head">
-                <span className="model-monitor-model-name" title={model.modelName}>{model.modelName}</span>
+                <button
+                  type="button"
+                  className="model-monitor-model-name"
+                  title={copiedModel === model.modelName ? tr('已复制') : tr('点击复制模型名')}
+                  onClick={() => copyModelName(model.modelName)}
+                >
+                  {model.modelName}
+                  <span className="model-monitor-copy-hint">
+                    {copiedModel === model.modelName ? tr('已复制') : tr('复制')}
+                  </span>
+                </button>
                 <span className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
                   {formatPercent(model.successRate)}
                 </span>
               </div>
-              <div className="model-monitor-card-site">{model.siteName}</div>
+              {model.siteUrl ? (
+                <a
+                  className="model-monitor-card-site"
+                  href={model.siteUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={model.siteUrl}
+                >
+                  {model.siteName}
+                </a>
+              ) : (
+                <div className="model-monitor-card-site">{model.siteName}</div>
+              )}
               <SuccessBars samples={model.recentSuccess} windowStart={model.windowStart} />
               <div className="model-monitor-card-metrics">
                 <span title={tr('平均延迟')}>
@@ -423,6 +531,9 @@ export default function ModelMonitor() {
                   </span>
                 ) : null}
               </div>
+              {formatModelPrice(model) ? (
+                <div className="model-monitor-card-price">{formatModelPrice(model)}</div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -436,19 +547,39 @@ export default function ModelMonitor() {
                 <th>{tr('成功率')}</th>
                 <th>{tr('延迟')}</th>
                 <th>{tr('吞吐')}</th>
+                <th>{tr('价格')}</th>
                 <th>{tr('最近更新')}</th>
               </tr>
             </thead>
             <tbody>
               {models.map((model) => (
                 <tr key={`${model.siteId}:${model.modelName}`}>
-                  <td>{model.modelName}</td>
-                  <td>{model.siteName}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="model-monitor-model-name"
+                      title={copiedModel === model.modelName ? tr('已复制') : tr('点击复制模型名')}
+                      onClick={() => copyModelName(model.modelName)}
+                    >
+                      {model.modelName}
+                      <span className="model-monitor-copy-hint">
+                        {copiedModel === model.modelName ? tr('已复制') : tr('复制')}
+                      </span>
+                    </button>
+                  </td>
+                  <td>
+                    {model.siteUrl ? (
+                      <a href={model.siteUrl} target="_blank" rel="noreferrer" title={model.siteUrl}>
+                        {model.siteName}
+                      </a>
+                    ) : model.siteName}
+                  </td>
                   <td className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
                     {formatPercent(model.successRate)}
                   </td>
                   <td>{formatLatency(model.avgLatencyMs)}</td>
                   <td>{formatThroughput(model.avgTps)}</td>
+                  <td className="model-monitor-price">{formatModelPrice(model) || '—'}</td>
                   <td title={formatTimestamp(model.fetchedAt)}>{formatRelative(model.fetchedAt)}</td>
                 </tr>
               ))}

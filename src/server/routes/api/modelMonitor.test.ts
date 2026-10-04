@@ -19,6 +19,9 @@ describe('model monitor routes', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./modelMonitor.js');
+    const serviceModule = await import('../../services/modelMonitorService.js');
+    // refresh 会真的跑一轮采集，价格那步换成桩，别让测试去打网络。
+    serviceModule.__setModelMonitorPricingLoaderForTests(async () => null);
     db = dbModule.db;
     schema = dbModule.schema;
 
@@ -67,12 +70,14 @@ describe('model monitor routes', () => {
 
     const filtered = await app.inject({
       method: 'GET',
-      url: '/api/model-monitor/overview?model=grok&minSuccessRate=90',
+      url: '/api/model-monitor/overview?model=grok-4.5&minSuccessRate=90',
     });
     expect(filtered.json().models).toHaveLength(0);
 
-    const matched = await app.inject({ method: 'GET', url: '/api/model-monitor/overview?model=grok' });
+    const matched = await app.inject({ method: 'GET', url: '/api/model-monitor/overview?model=grok-4.5' });
     expect(matched.json().models.map((row: any) => row.modelName)).toEqual(['grok-4.5']);
+    // 选中某个模型后，下拉清单里仍然列着其它模型，方便直接换。
+    expect(matched.json().modelOptions.map((row: any) => row.modelName)).toEqual(['gpt-5.5', 'grok-4.5']);
   });
 
   it('rejects unknown sort keys by falling back to success rate', async () => {

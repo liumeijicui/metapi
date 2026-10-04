@@ -94,6 +94,12 @@ export const siteModelMonitorModels = sqliteTable('site_model_monitor_models', {
   windowStart: integer('window_start'),
   windowEnd: integer('window_end'),
   showThroughput: integer('show_throughput', { mode: 'boolean' }),
+  // 站点自己的价目表（/api/pricing）里这个模型的价格。`pricingUnit` 为
+  // 'token' 时两个价格是「每 100 万 token 的美元价」，为 'call' 时是「每次
+  // 调用」的美元价；站点没给价目表时为 null，页面不显示价格行。
+  pricingUnit: text('pricing_unit'),
+  inputPrice: real('input_price'),
+  outputPrice: real('output_price'),
   fetchedAt: text('fetched_at').notNull(),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),

@@ -1,7 +1,3 @@
-CREATE TABLE IF NOT EXISTS `site_model_monitor_models` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `site_id` INT NOT NULL, `model_name` TEXT NOT NULL, `avg_latency_ms` DOUBLE, `success_rate` DOUBLE, `avg_tps` DOUBLE, `recent_success` TEXT, `window_start` INT, `window_end` INT, `show_throughput` INT, `fetched_at` VARCHAR(191) NOT NULL, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS `site_model_monitor_sites` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `site_id` INT NOT NULL, `status` VARCHAR(191) NOT NULL DEFAULT 'pending', `message` TEXT, `models_count` INT NOT NULL DEFAULT 0, `credential_kind` TEXT, `credential_id` INT, `show_throughput` INT, `summary_avg_latency_ms` DOUBLE, `summary_success_rate` DOUBLE, `summary_avg_tps` DOUBLE, `window_start` INT, `window_end` INT, `fetched_at` VARCHAR(191), `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE);
-CREATE UNIQUE INDEX `site_model_monitor_models_site_model_unique` ON `site_model_monitor_models` (`site_id`, `model_name`(191));
-CREATE UNIQUE INDEX `site_model_monitor_sites_site_unique` ON `site_model_monitor_sites` (`site_id`);
-CREATE INDEX `site_model_monitor_models_model_name_idx` ON `site_model_monitor_models` (`model_name`(191));
-CREATE INDEX `site_model_monitor_models_site_id_idx` ON `site_model_monitor_models` (`site_id`);
-CREATE INDEX `site_model_monitor_sites_status_idx` ON `site_model_monitor_sites` (`status`(191));
+ALTER TABLE `site_model_monitor_models` ADD COLUMN `pricing_unit` TEXT;
+ALTER TABLE `site_model_monitor_models` ADD COLUMN `input_price` DOUBLE;
+ALTER TABLE `site_model_monitor_models` ADD COLUMN `output_price` DOUBLE;

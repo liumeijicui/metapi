@@ -204,6 +204,13 @@
       "when": 1791094985206,
       "tag": "0028_site_model_monitor",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1791103349500,
+      "tag": "0029_square_hydra",
+      "breakpoints": true
     }
   ]
 }

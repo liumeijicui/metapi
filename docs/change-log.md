@@ -28,6 +28,17 @@
   - 现在这类站点单独折叠成一行低调提示（`站点不支持 · 11 个站点没有模型监控接口`，点开是站点名标签），**默认不占版面**；「未取到数据的站点」只剩 6 个真正需要看的。
   - 「覆盖站点」的分母也跟着扣掉这些站点（现在是 `22 / 28`，悬停有说明），站点下拉里给它们加 `（不支持）` 后缀。
   - 补 2 例源码级断言（沿用仓库前端测试的写法）钉住这个行为。
+- **四·补二、（本轮追加）模型名 / 站点名改成可搜索下拉**
+  - 上游站点多的站一次列出 659 个模型，原来的输入框只能「盲输 + 精确等值」，站点又是原生 `<select>`，找一站要滚很久。
+  - 模型名与站点名都换成仓库既有的 `ModernSelect`（`searchable`，带 `searchPlaceholder` / 空结果文案），宽度跟着工具栏伸缩、窄屏自动换行；最低成功率与排序仍是原生下拉（这轮只动这两个）。
+  - 随之把**模型筛选从 `like(%kw%)` 改成完整模型名精确匹配**：下拉选项都是完整名，选 `gpt-5.5` 就不该把 `gpt-5.5-mini` 也带出来（单测已按新语义改）。
+  - 新增 `overview.modelOptions`：下拉清单（模型名 + 覆盖站点数）只跟着**站点 / 最低成功率**筛，**不跟着模型名本身筛**——否则选中一个模型之后，下拉里就只剩它自己，没法直接换别的。
+- **四·补三、（本轮追加）卡片补「按量计费的输入 / 输出单价」、站点名可点开原站、模型名点击即复制**
+  - 价格取自站点自己的 **`GET /api/pricing`**，走的是 proxy 计费同一套 `fetchModelPricingCatalog`（带 10 分钟缓存），不额外发明一套抓取。
+  - 每站只在采集成功后读**一次**价目表，摊平成「模型名 → 价格」；`quota_type` 是 0 就按**每 100 万 token 的美元价**存（`输入 $75 / 1M`、`输出 $75 / 1M`），是 1 呢按**每次调用的美元价**存（`$140 / 次`，new-api 只给总价时不硬写「输入」）。价目表读不到就只当没有价格，**不影响成功率 / 延迟 / 吞吐的采集**。
+  - 新增 3 个字段 `pricing_unit` / `input_price` / `output_price`（迁移 `0029_square_hydra`），卡片与表格都显示；表格新增「价格」列，空的显示 `—`。
+  - 站点名在卡片、失败列表、不支持列表里都变成**新标签页打开站点首页**的链接；模型名变成按钮，**点一下复制**，复制后按钮内浮出「已复制」提示。
+  - 实测：659 个模型里 **540 个拿到价格**（哈基米 295/295、chinahk 69/70、HongShi 47/47、方舟 19/19…）。剩下 5 个站（霸气公益平台、君の公益、SeekAi、澎湃AI网关、JustDoWork）的 `/api/pricing` 需要登录态或站点侧就不开放，属于**站点侧拿不到**，不是没接。
 - **五、实测（生产库 + 真实站点，不是造数据）**
   - 首轮 39 个活跃站点全部跑完：**22 站取到数据、657 个模型**；`unsupported` 11 站（sub2api/agentrouter/xapi/gwrelay 等平台没有这个接口，或 new-api 版本较旧回 404）、`empty` 3 站（`{models:[], show_throughput:false}`）、`error` 3 站。
   - `error` 的都给了上游真实原因：Any Router 是 **HTTP 200 但返回的不是 JSON（被盾拦）**，luckyg 与 蛙蛙 是 **HTTP 401 凭据无效**（与第 44 条结论一致，不再是含糊的「没有凭据」——站点账号全部过期时也会照试一次，好让页面显示上游的原话）。
@@ -35,8 +46,8 @@
   - 新增单测 **20 例**：`modelMonitorService.test.ts`（窗口边界/跨夜、脏数据解析、采集成功写入、上一轮模型被清掉、失败保留旧数据、单飞复用、过期账号也照试、筛选与四种排序）、`newApi.perfMetricsPayload.test.ts`（新旧两种响应形状 + 空数据 + 脏行）、`modelMonitor.test.ts`（路由筛选、非法 sort 兜底、refresh 入队）。
   - 回归：`newApi` / `migrate` / `runtimeSchemaBootstrap` 等相关 **83 例全绿**；`tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`npm run build:server`、`vite build`、`repo:drift-check`（0 violations）均通过；重启服务后实测接口与页面正常。
   - 重新生成并提交了 schema 三件套（drizzle 迁移 + SQLite journal + `schemaContract.json` 与 MySQL/Postgres bootstrap/upgrade），并把 README / `docs/index.md` 的菜单截图说明从「可用性监控」改成「模型监控」（截图已重新采集）。
-- **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
-- **状态**：已完成（`unsupported` 的 8 个站点是站点侧没有这个接口，无法通过本站改造解决）
+- **主要文件**：`src/server/services/modelMonitorService.ts`、`src/server/services/modelPricingService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/platforms/base.ts`、`src/server/db/schema.ts`、`drizzle/0028_site_model_monitor.sql`、`drizzle/0029_square_hydra.sql`、`src/web/pages/ModelMonitor.tsx`、`src/web/index.css`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/i18n*.ts*`、`src/server/index.ts`、`src/server/config.ts`
+- **状态**：已完成（`unsupported` 的站点是站点侧没有这个接口、5 个站点的 `/api/pricing` 拿不到价格，都属于站点侧限制，无法通过本站改造解决）
 ### 44. luckyg / 蛙蛙公益站 的恢复排查：两站都卡在站点侧，自动清理机制本身已验证有效
 
 - **类型**：事故排查 + 验证（无代码改动）

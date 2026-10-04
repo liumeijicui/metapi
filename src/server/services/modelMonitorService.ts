@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, gte, inArray, like, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
 import { isReadyAccountToken } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
+import { fetchModelPricingCatalog, type ModelPricingCatalogInput } from './modelPricingService.js';
 import type { PerfMetricsSummary } from './platforms/base.js';
 
 export type ModelMonitorSiteStatus = 'ok' | 'empty' | 'unsupported' | 'error';
@@ -39,9 +40,20 @@ export type ModelMonitorFilter = {
   sort?: string | null;
 };
 
+/**
+ * 站点价目表里的一个模型价格。`unit` 为 'token' 时价格是每 100 万 token 的
+ * 美元价，为 'call' 时是每次调用的美元价（按次计费的模型没有 token 单价）。
+ */
+export type ModelMonitorModelPricing = {
+  unit: 'token' | 'call';
+  inputPrice: number | null;
+  outputPrice: number | null;
+};
+
 export type ModelMonitorModelView = {
   siteId: number;
   siteName: string;
+  siteUrl: string;
   platform: string;
   modelName: string;
   avgLatencyMs: number | null;
@@ -51,6 +63,9 @@ export type ModelMonitorModelView = {
   windowStart: number | null;
   windowEnd: number | null;
   showThroughput: boolean | null;
+  pricingUnit: 'token' | 'call' | null;
+  inputPrice: number | null;
+  outputPrice: number | null;
   fetchedAt: string | null;
 };
 
@@ -60,9 +75,16 @@ export type ModelMonitorOverview = {
   windowStartHour: number;
   windowEndHour: number;
   intervalMs: number;
+  /**
+   * 下拉筛选用的模型名清单（含每个模型覆盖几个站点）。跟着站点与最低成功率
+   * 筛，但不跟着模型名本身筛，否则选中之后就没法在下拉里换其它模型。
+   */
+  modelOptions: Array<{ modelName: string; siteCount: number }>;
   sites: Array<{
     siteId: number;
     siteName: string;
+    /** 站点主页，页面用来把站点名做成可点击的链接。 */
+    url: string;
     platform: string;
     status: string;
     message: string | null;
@@ -81,6 +103,78 @@ let monitorSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 let monitorLastRunStartedAtMs = 0;
 
 const MONITOR_TICK_MS = 60_000;
+
+type ModelMonitorPricingCatalog = Awaited<ReturnType<typeof fetchModelPricingCatalog>>;
+type ModelMonitorPricingLoader = (input: ModelPricingCatalogInput) => Promise<ModelMonitorPricingCatalog>;
+
+/**
+ * 价格来自站点自己的 `/api/pricing`，走的是和 proxy 计费同一套带缓存的读取。
+ * 抽成一层是为了让采集测试不必真的去打网络请求。
+ */
+let modelMonitorPricingLoader: ModelMonitorPricingLoader = fetchModelPricingCatalog;
+
+export function __setModelMonitorPricingLoaderForTests(loader: ModelMonitorPricingLoader | null): void {
+  modelMonitorPricingLoader = loader ?? fetchModelPricingCatalog;
+}
+
+function normalizePricingKey(modelName: string): string {
+  return modelName.trim().toLowerCase();
+}
+
+/**
+ * 读站点价目表并摊平成「模型名 -> 价格」。任何失败都只当「没有价格」，
+ * 不能因为价目表挂了就把已经拿到的成功率/延迟丢掉。
+ */
+async function loadSiteModelPricing(
+  site: SiteRow,
+  credential: MonitorCredential,
+): Promise<Map<string, ModelMonitorModelPricing>> {
+  const apiToken = credential.kind === 'api_token' ? credential.value : null;
+  const pricing: Map<string, ModelMonitorModelPricing> = new Map();
+  try {
+    const catalog = await withTimeout(
+      modelMonitorPricingLoader({
+        site: {
+          id: site.id,
+          url: site.url,
+          platform: String(site.platform || ''),
+          apiKey: apiToken,
+        },
+        account: {
+          id: credential.id,
+          accessToken: credential.kind === 'account' ? credential.value : null,
+          apiToken,
+        },
+      }),
+      config.modelMonitorTimeoutMs,
+      `读取 ${site.name} 的模型价格`,
+    );
+    if (!catalog) return pricing;
+    for (const entry of catalog.models) {
+      const groupPricing = entry.groupPricing.default
+        ?? Object.values(entry.groupPricing)[0]
+        ?? null;
+      if (!groupPricing) continue;
+      if (groupPricing.quotaType === 1) {
+        // new-api 的按次计费只给一个总价，one-hub/done-hub 才拆输入/输出。
+        pricing.set(normalizePricingKey(entry.modelName), {
+          unit: 'call',
+          inputPrice: groupPricing.perCallInput ?? groupPricing.perCallTotal ?? null,
+          outputPrice: groupPricing.perCallOutput ?? null,
+        });
+        continue;
+      }
+      pricing.set(normalizePricingKey(entry.modelName), {
+        unit: 'token',
+        inputPrice: groupPricing.inputPerMillion ?? null,
+        outputPrice: groupPricing.outputPerMillion ?? null,
+      });
+    }
+  } catch {
+    return pricing;
+  }
+  return pricing;
+}
 
 type MonitorCredential = {
   kind: 'account' | 'api_token';
@@ -245,19 +339,29 @@ async function listSiteCredentials(siteId: number, preferredKind: string | null,
   return unique;
 }
 
+type SiteMetricsFetchResult = {
+  status: ModelMonitorSiteStatus;
+  message: string | null;
+  credential: MonitorCredential | null;
+  data: PerfMetricsSummary | null;
+  /** 模型名（小写）-> 站点自己的价格；读不到时是空表而不是 null。 */
+  pricing: Map<string, ModelMonitorModelPricing>;
+};
+
 async function fetchSiteMetrics(
   site: SiteRow,
   preferredKind: string | null,
   preferredId: number | null,
-): Promise<{ status: ModelMonitorSiteStatus; message: string | null; credential: MonitorCredential | null; data: PerfMetricsSummary | null }> {
+): Promise<SiteMetricsFetchResult> {
+  const emptyPricing = new Map<string, ModelMonitorModelPricing>();
   const adapter = getAdapter(String(site.platform || ''));
   if (!adapter || typeof adapter.getPerfMetricsSummary !== 'function') {
-    return { status: 'unsupported', message: '该平台没有模型监控接口', credential: null, data: null };
+    return { status: 'unsupported', message: '该平台没有模型监控接口', credential: null, data: null, pricing: emptyPricing };
   }
 
   const credentials = await listSiteCredentials(site.id, preferredKind, preferredId);
   if (!credentials.length) {
-    return { status: 'error', message: '站点下没有可用凭据（缺少账号或密钥）', credential: null, data: null };
+    return { status: 'error', message: '站点下没有可用凭据（缺少账号或密钥）', credential: null, data: null, pricing: emptyPricing };
   }
 
   let lastMessage = '';
@@ -273,25 +377,28 @@ async function fetchSiteMetrics(
     }));
 
     if (outcome.ok) {
+      // 价目表是可选的附带信息：拿不到就只显示成功率/延迟，不影响这一轮采集。
+      const pricing = await loadSiteModelPricing(site, credential);
       return {
         status: outcome.data.models.length ? 'ok' : 'empty',
         message: null,
         credential,
         data: outcome.data,
+        pricing,
       };
     }
     lastMessage = outcome.message;
     if (outcome.unsupported) {
-      return { status: 'unsupported', message: outcome.message, credential: null, data: null };
+      return { status: 'unsupported', message: outcome.message, credential: null, data: null, pricing: emptyPricing };
     }
   }
 
-  return { status: 'error', message: lastMessage || '读取上游模型监控失败', credential: null, data: null };
+  return { status: 'error', message: lastMessage || '读取上游模型监控失败', credential: null, data: null, pricing: emptyPricing };
 }
 
 async function persistSiteResult(
   site: SiteRow,
-  result: { status: ModelMonitorSiteStatus; message: string | null; credential: MonitorCredential | null; data: PerfMetricsSummary | null },
+  result: SiteMetricsFetchResult,
   rememberedCredential: { kind: string | null; id: number | null },
 ): Promise<void> {
   const fetchedAt = new Date().toISOString();
@@ -318,6 +425,7 @@ async function persistSiteResult(
       }
 
       for (const model of data.models) {
+        const price = result.pricing.get(normalizePricingKey(model.modelName)) ?? null;
         const values = {
           siteId: site.id,
           modelName: model.modelName,
@@ -328,6 +436,9 @@ async function persistSiteResult(
           windowStart: data.windowStart,
           windowEnd: data.windowEnd,
           showThroughput: data.showThroughput,
+          pricingUnit: price?.unit ?? null,
+          inputPrice: price?.inputPrice ?? null,
+          outputPrice: price?.outputPrice ?? null,
           fetchedAt,
         };
         await tx.insert(schema.siteModelMonitorModels)
@@ -342,6 +453,9 @@ async function persistSiteResult(
               windowStart: values.windowStart,
               windowEnd: values.windowEnd,
               showThroughput: values.showThroughput,
+              pricingUnit: values.pricingUnit,
+              inputPrice: values.inputPrice,
+              outputPrice: values.outputPrice,
               fetchedAt: values.fetchedAt,
               updatedAt: sql`(datetime('now'))`,
             },
@@ -430,6 +544,7 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
         message: (error as Error)?.message || 'unknown error',
         credential: null,
         data: null,
+        pricing: new Map<string, ModelMonitorModelPricing>(),
       };
     }
 
@@ -444,6 +559,7 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
         message: `写入监控数据失败：${(error as Error)?.message || 'unknown error'}`,
         credential: null,
         data: null,
+        pricing: new Map<string, ModelMonitorModelPricing>(),
       };
     }
 
@@ -518,35 +634,67 @@ export function __resetModelMonitorStateForTests(): void {
   stopModelMonitorScheduler();
   monitorRunInFlight = null;
   monitorLastRunStartedAtMs = 0;
+  modelMonitorPricingLoader = fetchModelPricingCatalog;
 }
 
 export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}): Promise<ModelMonitorOverview> {
-  const conditions: SQL[] = [];
+  // 站点的模型清单要「跟着站点/成功率筛，但不跟着模型名筛」：选中某个模型后
+  // 如果清单只剩它自己，下拉里就没法换别的模型了。
+  const facetConditions: SQL[] = [];
   const siteId = toNullableNumber(filter.siteId);
   if (siteId !== null && siteId > 0) {
-    conditions.push(eq(schema.siteModelMonitorModels.siteId, Math.trunc(siteId)));
-  }
-  const model = String(filter.model || '').trim();
-  if (model) {
-    conditions.push(like(schema.siteModelMonitorModels.modelName, `%${model}%`));
+    facetConditions.push(eq(schema.siteModelMonitorModels.siteId, Math.trunc(siteId)));
   }
   const minSuccessRate = toNullableNumber(filter.minSuccessRate);
   if (minSuccessRate !== null) {
-    conditions.push(gte(schema.siteModelMonitorModels.successRate, minSuccessRate));
+    facetConditions.push(gte(schema.siteModelMonitorModels.successRate, minSuccessRate));
+  }
+
+  const conditions: SQL[] = [...facetConditions];
+  const model = String(filter.model || '').trim();
+  if (model) {
+    // 页面上的模型是下拉选出来的完整模型名，按精确匹配算，免得选
+    // `gpt-5.5` 时把 `gpt-5.5-mini` 也一起带出来。
+    conditions.push(eq(schema.siteModelMonitorModels.modelName, model));
   }
 
   const siteRows: Array<typeof schema.siteModelMonitorSites.$inferSelect> = await db
     .select()
     .from(schema.siteModelMonitorSites)
     .all();
-  const siteNameById = new Map<number, { name: string; platform: string }>();
-  const allSites: Array<{ id: number; name: string; platform: string }> = await db.select({
+
+  const modelOptionQuery = db.select({
+    modelName: schema.siteModelMonitorModels.modelName,
+    siteCount: sql<number>`count(*)`,
+  }).from(schema.siteModelMonitorModels);
+  const modelOptionRows: Array<{ modelName: string; siteCount: number | string }> = facetConditions.length
+    ? await modelOptionQuery
+      .where(and(...facetConditions))
+      .groupBy(schema.siteModelMonitorModels.modelName)
+      .orderBy(asc(schema.siteModelMonitorModels.modelName))
+      .all()
+    : await modelOptionQuery
+      .groupBy(schema.siteModelMonitorModels.modelName)
+      .orderBy(asc(schema.siteModelMonitorModels.modelName))
+      .all();
+  const modelOptions = modelOptionRows.map((row) => ({
+    modelName: row.modelName,
+    siteCount: Math.trunc(Number(row.siteCount) || 0),
+  }));
+
+  const siteNameById = new Map<number, { name: string; url: string; platform: string }>();
+  const allSites: Array<{ id: number; name: string; url: string; platform: string }> = await db.select({
     id: schema.sites.id,
     name: schema.sites.name,
+    url: schema.sites.url,
     platform: schema.sites.platform,
   }).from(schema.sites).all();
   for (const site of allSites) {
-    siteNameById.set(site.id, { name: site.name, platform: String(site.platform || '') });
+    siteNameById.set(site.id, {
+      name: site.name,
+      url: String(site.url || ''),
+      platform: String(site.platform || ''),
+    });
   }
 
   const modelQuery = db.select().from(schema.siteModelMonitorModels);
@@ -557,6 +705,7 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
   const models: ModelMonitorModelView[] = modelRows.map((row) => ({
     siteId: row.siteId,
     siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
+    siteUrl: siteNameById.get(row.siteId)?.url || '',
     platform: siteNameById.get(row.siteId)?.platform || '',
     modelName: row.modelName,
     avgLatencyMs: row.avgLatencyMs,
@@ -566,6 +715,9 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     windowStart: row.windowStart,
     windowEnd: row.windowEnd,
     showThroughput: row.showThroughput,
+    pricingUnit: row.pricingUnit === 'token' || row.pricingUnit === 'call' ? row.pricingUnit : null,
+    inputPrice: row.inputPrice,
+    outputPrice: row.outputPrice,
     fetchedAt: row.fetchedAt,
   }));
 
@@ -595,10 +747,12 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     windowStartHour: config.modelMonitorWindowStartHour,
     windowEndHour: config.modelMonitorWindowEndHour,
     intervalMs: config.modelMonitorIntervalMs,
+    modelOptions,
     sites: siteRows
       .map((row) => ({
         siteId: row.siteId,
         siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
+        url: siteNameById.get(row.siteId)?.url || '',
         platform: siteNameById.get(row.siteId)?.platform || '',
         status: row.status,
         message: row.message,
