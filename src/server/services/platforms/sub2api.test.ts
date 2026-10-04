@@ -1441,4 +1441,85 @@ describe('Sub2ApiAdapter', () => {
       status: 'win',
     });
   });
+
+  it('takes a single draw straight to the single-draw route', async () => {
+    // The last draw of an uneven day has to be asked for on its own: these
+    // sites refuse a batch shorter than their batch size, so a `count: 1` call
+    // to the batch route only ever comes back with LOTTERY_BATCH_COUNT_INVALID.
+    const paths: string[] = [];
+    await startServer((req, res) => {
+      paths.push(req.url || '');
+      if (req.url === '/api/v1/lottery') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            draw: { cost_type: 'free', prize_type: 'free', prize_amount_actual: 30, status: 'win' },
+            today_draws: 10,
+          },
+        }));
+        return;
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        code: 400,
+        message: 'invalid batch draw count',
+        reason: 'LOTTERY_BATCH_COUNT_INVALID',
+      }));
+    });
+
+    const outcome = await adapter.drawLottery(baseUrl, 'jwt', {
+      costType: 'free',
+      count: 1,
+      idempotencyKey: 'key-3',
+    });
+
+    expect(paths).toEqual(['/api/v1/lottery']);
+    expect(outcome.todayDraws).toBe(10);
+    expect(outcome.draws).toHaveLength(1);
+  });
+
+  it('falls back to single draws when the site refuses a short batch', async () => {
+    const paths: string[] = [];
+    await startServer((req, res) => {
+      paths.push(req.url || '');
+      if (req.url === '/api/v1/lottery/draw-batch') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 400,
+          message: 'invalid batch draw count',
+          reason: 'LOTTERY_BATCH_COUNT_INVALID',
+        }));
+        return;
+      }
+      if (req.url === '/api/v1/lottery') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            draw: { cost_type: 'free', prize_type: 'none', prize_amount_actual: 0, status: 'miss' },
+            today_draws: 9,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end('page not found');
+    });
+
+    const outcome = await adapter.drawLottery(baseUrl, 'jwt', {
+      costType: 'free',
+      count: 2,
+      idempotencyKey: 'key-4',
+    });
+
+    expect(paths).toEqual([
+      '/api/v1/lottery/draw-batch',
+      '/api/v1/lottery',
+      '/api/v1/lottery',
+    ]);
+    expect(outcome.todayDraws).toBe(9);
+    expect(outcome.draws).toHaveLength(2);
+  });
 });

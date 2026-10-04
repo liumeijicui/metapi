@@ -1208,10 +1208,13 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Draws a batch and reports each prize.
+   * Draws one or more times and reports each prize.
    *
-   * The batch route is the one the site's own UI uses, so it is tried first;
-   * the single-draw route is the fallback for a build that predates it. Both
+   * The batch route is the one the site's own UI uses for its full-size batch,
+   * so a real batch goes there first; everything else takes the single-draw
+   * route, which every build has. Two refusals send a batch there as well: a
+   * build that predates the batch route answers 404, and a site that only sells
+   * full batches answers `LOTTERY_BATCH_COUNT_INVALID` for a short one. Both
    * carry the same envelope, and the batch shape differs between builds
    * (`draws`, `items`, or a lone `draw`), so all three are read.
    */
@@ -1222,27 +1225,28 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   ): Promise<LotteryDrawOutcome> {
     const normalizedBase = normalizeBaseUrl(baseUrl);
     const headers = this.buildAuthHeader(accessToken);
-    const body = JSON.stringify({
-      cost_type: request.costType,
-      count: request.count,
-      idempotency_key: request.idempotencyKey,
-    });
 
-    const batchEndpoint = '/api/v1/lottery/draw-batch';
-    try {
-      const res = await this.fetchJson<any>(`${normalizedBase}${batchEndpoint}`, {
-        method: 'POST',
-        headers,
-        body,
-      });
-      const data = this.parseSub2ApiEnvelope<any>(res, batchEndpoint);
-      return {
-        draws: this.readLotteryDraws(data),
-        todayDraws: this.parseNonNegativeInteger(data?.today_draws),
-      };
-    } catch (error) {
-      const message = String(error instanceof Error ? error.message : error);
-      if (!message.includes('HTTP 404')) throw error;
+    if (request.count > 1) {
+      const batchEndpoint = '/api/v1/lottery/draw-batch';
+      try {
+        const res = await this.fetchJson<any>(`${normalizedBase}${batchEndpoint}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            cost_type: request.costType,
+            count: request.count,
+            idempotency_key: request.idempotencyKey,
+          }),
+        });
+        const data = this.parseSub2ApiEnvelope<any>(res, batchEndpoint);
+        return {
+          draws: this.readLotteryDraws(data),
+          todayDraws: this.parseNonNegativeInteger(data?.today_draws),
+        };
+      } catch (error) {
+        const message = String(error instanceof Error ? error.message : error);
+        if (!isBatchRouteUnusable(message)) throw error;
+      }
     }
 
     const singleEndpoint = '/api/v1/lottery';
@@ -1511,4 +1515,14 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
     return false;
   }
+}
+
+/**
+ * Tells a batch route this build cannot use apart from a draw that really
+ * failed. A build without the route answers 404; a site that only sells its
+ * draws in full batches answers `LOTTERY_BATCH_COUNT_INVALID` for a shorter
+ * one. Either way the single-draw route still works, so the draws are not lost.
+ */
+function isBatchRouteUnusable(message: string): boolean {
+  return message.includes('HTTP 404') || message.includes('LOTTERY_BATCH_COUNT_INVALID');
 }

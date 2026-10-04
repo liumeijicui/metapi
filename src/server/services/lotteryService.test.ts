@@ -42,12 +42,12 @@ describe('planLotteryDraws', () => {
     const plan = planLotteryDraws(status({ bonusDraws: 2 }), null);
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
-    expect(plan.batches).toEqual([
-      { costType: 'bonus', count: 2 },
-      { costType: 'free', count: 3 },
-      { costType: 'free', count: 3 },
-      { costType: 'free', count: 2 },
-    ]);
+    const bonusCount = plan.batches
+      .filter((batch) => batch.costType === 'bonus')
+      .reduce((sum, batch) => sum + batch.count, 0);
+    expect(bonusCount).toBe(2);
+    expect(plan.batches.findIndex((batch) => batch.costType === 'free')).toBeGreaterThanOrEqual(bonusCount);
+    expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(10);
   });
 
   it('splits the work into batches the site accepts', () => {
@@ -55,6 +55,26 @@ describe('planLotteryDraws', () => {
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     expect(plan.batches.map((batch) => batch.count)).toEqual([3, 3, 3, 1]);
+  });
+
+  it('draws the leftover of an uneven day one at a time', () => {
+    // Ten draws at three per batch is 3 + 3 + 3 + 1. The site refuses a short
+    // batch, so the tenth draw has to be asked for as a single draw; sending it
+    // as `count: 1` to the batch route is what used to lose the day's last draw.
+    const plan = planLotteryDraws(status({ todayDraws: 9, todayRemaining: 1 }), null);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.batches).toEqual([{ costType: 'free', count: 1 }]);
+  });
+
+  it('never asks for a batch smaller than the site sells', () => {
+    for (const remaining of [1, 2, 4, 5, 7, 8]) {
+      const plan = planLotteryDraws(status({ todayDraws: 10 - remaining, todayRemaining: remaining }), null);
+      expect(plan.ok).toBe(true);
+      if (!plan.ok) continue;
+      expect(plan.batches.reduce((sum, batch) => sum + batch.count, 0)).toBe(remaining);
+      expect(plan.batches.every((batch) => batch.count === 1 || batch.count === 3)).toBe(true);
+    }
   });
 
   it('draws only what the day has left', () => {

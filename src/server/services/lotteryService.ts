@@ -105,13 +105,29 @@ export function planLotteryDraws(status: LotteryStatus, dailyDraws: number | nul
   const batches: LotteryBatch[] = [];
   const batchMax = status.batchMax > 0 ? status.batchMax : 1;
 
+  /**
+   * Splits a number of draws into calls the site will take.
+   *
+   * A site that sells draws in fixed-size batches charges for the whole batch
+   * at once and refuses anything shorter, so the part of a day's allowance that
+   * does not divide by the batch size is drawn one at a time instead. Ten draws
+   * at three per batch is 3 + 3 + 3 + 1: sending that last draw as a batch of
+   * one is what the site answers with `LOTTERY_BATCH_COUNT_INVALID`, which used
+   * to abort the run and leave the day's last draw unclaimed.
+   */
+  const addBatches = (costType: LotteryBatch['costType'], total: number): void => {
+    let left = total;
+    while (left >= batchMax) {
+      batches.push({ costType, count: batchMax });
+      left -= batchMax;
+    }
+    for (; left > 0; left -= 1) batches.push({ costType, count: 1 });
+  };
+
   // Bonus draws first: they are the site's own gift for checking in and the
   // only thing they can be spent on.
   const bonus = Math.min(status.bonusDraws, remaining);
-  for (let left = bonus; left > 0; left -= batchMax) {
-    const count = Math.min(batchMax, left);
-    batches.push({ costType: 'bonus', count });
-  }
+  addBatches('bonus', bonus);
   remaining -= bonus;
 
   if (remaining > 0) {
@@ -123,10 +139,7 @@ export function planLotteryDraws(status: LotteryStatus, dailyDraws: number | nul
     }
     const affordable = Math.floor((status.freeBalance + 1e-9) / price);
     const payable = Math.min(remaining, affordable);
-    for (let left = payable; left > 0; left -= batchMax) {
-      const count = Math.min(batchMax, left);
-      batches.push({ costType: 'free', count });
-    }
+    addBatches('free', payable);
     if (batches.length === 0) {
       return { ok: false, reason: `免费额度不足（$${status.freeBalance.toFixed(2)}，每次需 $${price}）` };
     }

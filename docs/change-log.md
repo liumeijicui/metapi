@@ -1,3 +1,23 @@
+### 47. 修「百倍 / 林夕」抽奖漏抽：原来把最后 1-2 次当成短批次发给站点，被拒后整轮中断
+
+- **类型**：缺陷修复（抽奖批次拆分 + 适配器路由回退）
+- **需求来源**：本会话（用户：「百倍和林夕站的抽奖好像又有问题了，他是 3 次一抽，总共抽 10 次，你好像总是会漏掉一次，你再检查检查看看吧」）
+- **结论先说**：不是漏抽，是**最后那一次根本发不出去**。这两个站只按固定批量卖抽奖（`batch_draw.max_count = 3`），`count` 必须正好是 3：发 1 或 2 都会被回 `HTTP 400 LOTTERY_BATCH_COUNT_INVALID`（已用生产 token 实测，`count=1`、`count=2` 均被拒）。而一天 10 次除不尽 3，代码把余数 `10 - 3*3 = 1` 当成一个 `count: 1` 的批次继续发 batch 路由 → 400 → 循环「首个失败即中断」把整轮打断，于是账号上只剩一条 `drawn: 0` 的「抽奖中断」。
+- **一、生产证据（先看现场再改）**
+  - `events` 里 2026-10-03 与 10-04 两条记录其实是**成功抽到 9 次后卡在第 10 次**：`3145215575@qq.com @ 100xlabs: 抽奖 9 次，中奖 9 次，免费额度 +$490`；之后每小时一条 `抽奖 0 次`。
+  - 账号 `#17`（100xlabs）/ `#18`（林夕 k40）的 `extra_config.lottery.reason` 都是同一句：`抽奖中断：HTTP 400: {"message":"invalid batch draw count","reason":"LOTTERY_BATCH_COUNT_INVALID"}`，且 `drawn: 0` —— 因为此时当天只剩 1 次，第一批就是那个短批次。
+  - 站点 `GET /api/v1/lottery/status` 明确给了 `batch_draw: {enabled: true, max_count: 3}`；把该站前端 `LotteryView` 反混淆后确认，它的「三连抽」按钮在自己的 `today_remaining < max_count` 时是**禁用**的，站点 UI 从不下发短批次。
+  - 顺带实测出站点契约：单抽走 `POST /api/v1/lottery`（body 为 `cost_type` + `idempotency_key`，无 `count`），批量走 `POST /api/v1/lottery/draw-batch`。批量要**一次性付满整批**（`free_balance` 112.30 时请求 `count=3`、单价 $88 会回 `LOTTERY_INSUFFICIENT`），单抽不受此限。
+- **二、改法（两处，尽量少动）**
+  - `planLotteryDraws`：批次拆分新增 `addBatches()`，先按 `batchMax` 整批切，**余数一律拆成 `count: 1` 的一个个批次**。于是 10 次 / 每批 3 次 = `3 + 3 + 3 + 1`，那个 1 是独立批次，走单抽；不再产生「小于站点批量」的批次。
+  - `Sub2ApiAdapter.drawLottery`：**只有 `count > 1` 才先打 batch 路由**；`count === 1` 直接走单抽路由。batch 被 `HTTP 404`（没有该路由的旧版）或 `LOTTERY_BATCH_COUNT_INVALID`（站点只收整批）拒绝时，回退到单抽逐次完成，而不是把这一批丢掉。新增模块级判断函数 `isBatchRouteUnusable()` 集中这两条。
+  - 副作用是**账目更准**：余数拆成独立批次后，某一批次失败不会连带抹掉已完成的批次，`drawn` / `wins` / `reward` 与真实发生次数一致，不会再出现「明明抽到了却记成 0」。
+- **三、验证**
+  - 新增 / 调整单测：`lotteryService.test.ts` 补「余数逐次单抽」「1/2/4/5/7/8 次都不产出小于 batchMax 的批次」；`sub2api.test.ts` 补「`count: 1` 只打单抽路由」「batch 被 `LOTTERY_BATCH_COUNT_INVALID` 拒绝后回退单抽并保留结果」。
+  - 回归：`lotteryService.test.ts` + `sub2api.test.ts` 共 **71 例全绿**；`tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`npm run build:server` 均通过。
+- **主要文件**：`src/server/services/lotteryService.ts`、`src/server/services/platforms/sub2api.ts`、`src/server/services/lotteryService.test.ts`、`src/server/services/platforms/sub2api.test.ts`
+- **状态**：已完成（站点侧仍会在「免费额度不够整批」时只允许单抽，属于站点规则，现在会如实走单抽并在余额真的不够时报「免费额度不足」）
+
 ### 45. 菜单「可用性监控」改成「模型监控」：按站点拉取上游模型广场数据，卡片式展示 + 7-12 点每 15 分钟采集
 
 - **类型**：功能（菜单改造 + 后端采集 + 前端新页面）
