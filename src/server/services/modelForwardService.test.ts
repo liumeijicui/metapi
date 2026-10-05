@@ -128,6 +128,98 @@ describe('modelForwardService', () => {
     })).rejects.toThrow(/已经有转发规则/);
   });
 
+  it('对外模型名按大小写不敏感查重，新建与编辑都挡得住', async () => {
+    await service.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
+    });
+
+    await expect(service.createModelForwardRule({
+      modelName: 'GPT-6-ASTRA',
+      targets: [{ siteId, accountId, upstreamModel: 'kimi-k3' }],
+    })).rejects.toThrow(/已经有转发规则/);
+
+    await expect(service.createModelForwardRule({
+      modelName: '  gpt-6-astra  ',
+      targets: [{ siteId, accountId, upstreamModel: 'kimi-k3' }],
+    })).rejects.toThrow(/已经有转发规则/);
+
+    const other = await service.createModelForwardRule({
+      modelName: 'claude-test-9',
+      targets: [{ siteId, accountId, upstreamModel: 'glm-5.3-flash' }],
+    });
+    await expect(service.updateModelForwardRule(other.id, {
+      modelName: 'Gpt-6-Astra',
+      targets: [{ siteId, accountId, upstreamModel: 'glm-5.3-flash' }],
+    })).rejects.toThrow(/已经有转发规则/);
+  });
+
+  it('转发目标支持上移 / 下移 / 置顶，顺序会同步到通道 priority', async () => {
+    const rule = await service.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [
+        { siteId, accountId, upstreamModel: 'model-a' },
+        { siteId, accountId, upstreamModel: 'model-b' },
+        { siteId, accountId, upstreamModel: 'model-c' },
+      ],
+    });
+    const readOrder = (row: typeof rule) => row.targets.map((target) => target.upstreamModel);
+    const targetsByModel = new Map(rule.targets.map((target) => [target.upstreamModel, target]));
+
+    expect(readOrder(rule)).toEqual(['model-a', 'model-b', 'model-c']);
+
+    const topC = await service.moveModelForwardTarget(rule.id, targetsByModel.get('model-c')!.id, 'top');
+    expect(readOrder(topC)).toEqual(['model-c', 'model-a', 'model-b']);
+
+    const upB = await service.moveModelForwardTarget(rule.id, targetsByModel.get('model-b')!.id, 'up');
+    expect(readOrder(upB)).toEqual(['model-c', 'model-b', 'model-a']);
+
+    const downC = await service.moveModelForwardTarget(rule.id, targetsByModel.get('model-c')!.id, 'down');
+    expect(readOrder(downC)).toEqual(['model-b', 'model-c', 'model-a']);
+
+    // 越界的上移 / 下移是空操作，不会报错也不会打乱顺序。
+    const topB = await service.moveModelForwardTarget(rule.id, targetsByModel.get('model-b')!.id, 'up');
+    expect(readOrder(topB)).toEqual(['model-b', 'model-c', 'model-a']);
+
+    const priorities = new Map(downC.targets.map((target) => [target.upstreamModel, target.sortOrder]));
+    const channels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, rule.routeId as number))
+      .all();
+    const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+    for (const target of downC.targets) {
+      const channel = channelById.get(target.channelId as number);
+      expect(channel?.priority).toBe(target.sortOrder);
+    }
+    expect(priorities.get('model-b')).toBe(0);
+  });
+
+  it('转发目标可以单独启用 / 停用，不影响同规则下其它目标', async () => {
+    const rule = await service.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [
+        { siteId, accountId, upstreamModel: 'model-a' },
+        { siteId, accountId, upstreamModel: 'model-b' },
+      ],
+    });
+    const [first, second] = rule.targets;
+
+    const disabled = await service.setModelForwardTargetEnabled(rule.id, second.id, false);
+    const disabledSecond = disabled.targets.find((target) => target.id === second.id);
+    const disabledFirst = disabled.targets.find((target) => target.id === first.id);
+    expect(disabledSecond?.enabled).toBe(false);
+    expect(disabledSecond?.channelEnabled).toBe(false);
+    expect(disabledFirst?.enabled).toBe(true);
+    expect(disabledFirst?.channelEnabled).toBe(true);
+
+    const enabled = await service.setModelForwardTargetEnabled(rule.id, second.id, true);
+    expect(enabled.targets.find((target) => target.id === second.id)?.channelEnabled).toBe(true);
+
+    await expect(service.setModelForwardTargetEnabled(rule.id, 999_999, true))
+      .rejects.toThrow(/转发目标不存在/);
+    await expect(service.moveModelForwardTarget(rule.id, 999_999, 'top'))
+      .rejects.toThrow(/转发目标不存在/);
+  });
+
   it('缺少账号或模型名会被拒绝', async () => {
     await expect(service.createModelForwardRule({ modelName: 'x', targets: [] }))
       .rejects.toThrow(/至少需要一个转发目标/);
@@ -184,4 +276,3 @@ describe('modelForwardService', () => {
       .where(eq(schema.routeChannels.id, removedChannelId as number)).get()).toBeUndefined();
   });
 });
-

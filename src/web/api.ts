@@ -971,6 +971,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  moveModelForwardTarget: (ruleId: number, targetId: number, action: "up" | "down" | "top") =>
+    request(`/api/model-forward-rules/${ruleId}/targets/${targetId}/move`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
+  setModelForwardTargetEnabled: (ruleId: number, targetId: number, enabled: boolean) =>
+    request(`/api/model-forward-rules/${ruleId}/targets/${targetId}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   deleteModelForwardRule: (id: number) =>
     request(`/api/model-forward-rules/${id}`, { method: "DELETE" }),
   addRoute: (data: any) =>

@@ -5,6 +5,8 @@ import {
   deleteModelForwardRule,
   listModelForwardOptions,
   listModelForwardRules,
+  moveModelForwardTarget,
+  setModelForwardTargetEnabled,
   setModelForwardRuleEnabled,
   updateModelForwardRule,
 } from '../../services/modelForwardService.js';
@@ -64,6 +66,43 @@ export async function modelForwardRoutes(app: FastifyInstance) {
       if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
       try {
         return { success: true, rule: await setModelForwardRuleEnabled(id, !!request.body?.enabled) };
+      } catch (error) {
+        return sendModelForwardError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string; targetId: string }; Body: { action?: string } }>(
+    '/api/model-forward-rules/:id/targets/:targetId/move',
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      const targetId = parseId(request.params.targetId);
+      if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+      if (targetId === null) return reply.code(400).send({ success: false, message: '目标 id 不合法' });
+      const action = String(request.body?.action ?? '').trim().toLowerCase();
+      if (action !== 'up' && action !== 'down' && action !== 'top') {
+        return reply.code(400).send({ success: false, message: 'action 只支持 up / down / top' });
+      }
+      try {
+        return { success: true, rule: await moveModelForwardTarget(id, targetId, action) };
+      } catch (error) {
+        return sendModelForwardError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string; targetId: string }; Body: { enabled?: boolean } }>(
+    '/api/model-forward-rules/:id/targets/:targetId/enabled',
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      const targetId = parseId(request.params.targetId);
+      if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+      if (targetId === null) return reply.code(400).send({ success: false, message: '目标 id 不合法' });
+      try {
+        return {
+          success: true,
+          rule: await setModelForwardTargetEnabled(id, targetId, !!request.body?.enabled),
+        };
       } catch (error) {
         return sendModelForwardError(reply, error);
       }

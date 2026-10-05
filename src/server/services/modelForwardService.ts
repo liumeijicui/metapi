@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY, isUsableAccountToken } from './accountTokenService.js';
@@ -76,6 +76,20 @@ export type ModelForwardRuleRow = {
 
 function normalizeModelName(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * 对外模型名按大小写不敏感查重：`gpt-6-astra` 与 `GPT-6-Astra` 视为同一个对外模型，
+ * 避免出现两条规则抢同一个模型名（数据库唯一索引只按原始大小写比较，挡不住这种情况）。
+ */
+async function findRuleByModelName(modelName: string): Promise<{ id: number; modelName: string } | null> {
+  const normalized = modelName.trim().toLowerCase();
+  if (!normalized) return null;
+  const row = await db.select({ id: schema.modelForwardRules.id, modelName: schema.modelForwardRules.modelName })
+    .from(schema.modelForwardRules)
+    .where(sql`lower(${schema.modelForwardRules.modelName}) = ${normalized}`)
+    .get();
+  return row ?? null;
 }
 
 function normalizePositiveInt(value: unknown): number | null {
@@ -240,6 +254,8 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
   for (const [index, target] of targetRows.entries()) {
     const tokenId = target.tokenId ?? await resolveAccountTokenId(target.accountId, target.upstreamModel);
     const enabled = !!target.enabled && !!rule.enabled;
+    // 排序即优先级：列表越靠前的目标越先被选中，靠前目标不可用（停用/冷却/失败）时才落到下一个。
+    const priority = index;
     if (target.channelId && channelById.has(target.channelId)) {
       const channelId = target.channelId;
       keptChannelIds.add(channelId);
@@ -247,7 +263,7 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
         accountId: target.accountId,
         tokenId,
         sourceModel: target.upstreamModel,
-        priority: 0,
+        priority,
         weight: target.weight ?? 10,
         enabled,
         manualOverride: true,
@@ -263,7 +279,7 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
       accountId: target.accountId,
       tokenId,
       sourceModel: target.upstreamModel,
-      priority: 0,
+      priority,
       weight: target.weight ?? 10,
       enabled,
       manualOverride: true,
@@ -344,10 +360,10 @@ export async function listModelForwardRules(): Promise<ModelForwardRuleRow[]> {
 
 export async function createModelForwardRule(raw: unknown): Promise<ModelForwardRuleRow> {
   const input = normalizeModelForwardRuleInput(raw);
-  const existing = await db.select().from(schema.modelForwardRules)
-    .where(eq(schema.modelForwardRules.modelName, input.modelName))
-    .get();
-  if (existing) throw new ModelForwardError(`对外模型 ${input.modelName} 已经有转发规则`);
+  const existing = await findRuleByModelName(input.modelName);
+  if (existing) {
+    throw new ModelForwardError(`对外模型 ${existing.modelName} 已经有转发规则，模型名不能重复`);
+  }
 
   const inserted = await db.insert(schema.modelForwardRules).values({
     modelName: input.modelName,
@@ -379,11 +395,9 @@ export async function updateModelForwardRule(id: number, raw: unknown): Promise<
     .get();
   if (!existing) throw new ModelForwardError('转发规则不存在');
   const input = normalizeModelForwardRuleInput(raw);
-  const duplicated = await db.select().from(schema.modelForwardRules)
-    .where(eq(schema.modelForwardRules.modelName, input.modelName))
-    .get();
+  const duplicated = await findRuleByModelName(input.modelName);
   if (duplicated && duplicated.id !== id) {
-    throw new ModelForwardError(`对外模型 ${input.modelName} 已经有转发规则`);
+    throw new ModelForwardError(`对外模型 ${duplicated.modelName} 已经有转发规则，模型名不能重复`);
   }
 
   await db.update(schema.modelForwardRules).set({
@@ -442,6 +456,93 @@ export async function updateModelForwardRule(id: number, raw: unknown): Promise<
   await syncModelForwardRule(id);
   const updated = (await listModelForwardRules()).find((rule) => rule.id === id);
   if (!updated) throw new ModelForwardError('更新转发规则失败');
+  return updated;
+}
+
+export type ModelForwardTargetMoveAction = 'up' | 'down' | 'top';
+
+/** 按当前顺序重排 sortOrder，保证是 0..n-1 的连续整数。 */
+async function renumberTargetSortOrders(ruleId: number): Promise<void> {
+  const rows = await db.select({ id: schema.modelForwardTargets.id })
+    .from(schema.modelForwardTargets)
+    .where(eq(schema.modelForwardTargets.ruleId, ruleId))
+    .orderBy(asc(schema.modelForwardTargets.sortOrder), asc(schema.modelForwardTargets.id))
+    .all();
+  const nowIso = new Date().toISOString();
+  for (const [index, row] of rows.entries()) {
+    await db.update(schema.modelForwardTargets)
+      .set({ sortOrder: index, updatedAt: nowIso })
+      .where(eq(schema.modelForwardTargets.id, row.id))
+      .run();
+  }
+}
+
+/**
+ * 调整某个转发目标的位置：上移 / 下移 / 置顶。
+ * 顺序会同步到通道的 priority，列表越靠前越先被选中。
+ */
+export async function moveModelForwardTarget(
+  ruleId: number,
+  targetId: number,
+  action: ModelForwardTargetMoveAction,
+): Promise<ModelForwardRuleRow> {
+  const rule = await db.select().from(schema.modelForwardRules)
+    .where(eq(schema.modelForwardRules.id, ruleId))
+    .get();
+  if (!rule) throw new ModelForwardError('转发规则不存在');
+
+  const targets = await db.select().from(schema.modelForwardTargets)
+    .where(eq(schema.modelForwardTargets.ruleId, ruleId))
+    .orderBy(asc(schema.modelForwardTargets.sortOrder), asc(schema.modelForwardTargets.id))
+    .all();
+  const index = targets.findIndex((target) => target.id === targetId);
+  if (index < 0) throw new ModelForwardError('转发目标不存在');
+
+  const nextIndex = action === 'top' ? 0 : action === 'up' ? Math.max(0, index - 1) : Math.min(targets.length - 1, index + 1);
+  if (nextIndex !== index) {
+    const reordered = [...targets];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(nextIndex, 0, moved);
+    const nowIso = new Date().toISOString();
+    for (const [order, target] of reordered.entries()) {
+      await db.update(schema.modelForwardTargets)
+        .set({ sortOrder: order, updatedAt: nowIso })
+        .where(eq(schema.modelForwardTargets.id, target.id))
+        .run();
+    }
+  }
+
+  await renumberTargetSortOrders(ruleId);
+  await syncModelForwardRule(ruleId);
+  const updated = (await listModelForwardRules()).find((item) => item.id === ruleId);
+  if (!updated) throw new ModelForwardError('更新转发目标失败');
+  return updated;
+}
+
+/** 单独启用 / 停用某个转发目标（不影响同规则下的其它目标）。 */
+export async function setModelForwardTargetEnabled(
+  ruleId: number,
+  targetId: number,
+  enabled: boolean,
+): Promise<ModelForwardRuleRow> {
+  const rule = await db.select().from(schema.modelForwardRules)
+    .where(eq(schema.modelForwardRules.id, ruleId))
+    .get();
+  if (!rule) throw new ModelForwardError('转发规则不存在');
+  const target = await db.select().from(schema.modelForwardTargets)
+    .where(and(
+      eq(schema.modelForwardTargets.id, targetId),
+      eq(schema.modelForwardTargets.ruleId, ruleId),
+    ))
+    .get();
+  if (!target) throw new ModelForwardError('转发目标不存在');
+  await db.update(schema.modelForwardTargets).set({
+    enabled,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(schema.modelForwardTargets.id, targetId)).run();
+  await syncModelForwardRule(ruleId);
+  const updated = (await listModelForwardRules()).find((item) => item.id === ruleId);
+  if (!updated) throw new ModelForwardError('更新转发目标失败');
   return updated;
 }
 

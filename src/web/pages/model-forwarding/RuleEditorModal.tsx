@@ -15,6 +15,8 @@ type RuleEditorModalProps = {
   options: ModelForwardOptions;
   siteModels: Record<number, string[]>;
   knownModels: string[];
+  /** 已被其它转发规则占用的对外模型名（小写），用于前端即时查重。 */
+  existingRuleNames: string[];
   saving: boolean;
   onLoadSiteModels: (siteId: number) => void;
   onClose: () => void;
@@ -61,6 +63,7 @@ export default function RuleEditorModal({
   options,
   siteModels,
   knownModels,
+  existingRuleNames,
   saving,
   onLoadSiteModels,
   onClose,
@@ -107,7 +110,13 @@ export default function RuleEditorModal({
   const incomplete = targets.some((target) => (
     !target.siteId || !target.upstreamModel.trim() || target.accountIds.length === 0
   ));
-  const canSave = !saving && !!modelName.trim() && !incomplete;
+  // 对外模型名不能重复（后端按大小写不敏感判定，前端先提示一次，少一次白跑接口）。
+  const duplicatedModelName = useMemo(() => {
+    const normalized = modelName.trim().toLowerCase();
+    if (!normalized) return false;
+    return existingRuleNames.some((name) => name.trim().toLowerCase() === normalized);
+  }, [modelName, existingRuleNames]);
+  const canSave = !saving && !!modelName.trim() && !incomplete && !duplicatedModelName;
 
   const handleSave = () => {
     if (!canSave) return;
@@ -155,6 +164,11 @@ export default function RuleEditorModal({
           <datalist id="model-forward-known-models">
             {knownModels.slice(0, 500).map((name) => <option key={name} value={name} />)}
           </datalist>
+          {duplicatedModelName ? (
+            <div style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 8 }}>
+              {tr('该对外模型名已经有转发规则了，模型名不能重复。')}
+            </div>
+          ) : null}
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer' }}>
             <input
               type="checkbox"

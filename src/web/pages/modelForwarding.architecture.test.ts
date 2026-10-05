@@ -45,4 +45,34 @@ describe('ModelForwarding 模型转发页', () => {
     expect(api).toContain('`/api/model-forward-rules/${id}/enabled`');
     expect(api).toContain('/api/model-forward-options');
   });
+
+  it('页面按顺序展示转发目标，并提供置顶 / 上移 / 下移 / 启停操作', () => {
+    expect(page).toContain("tr('置顶')");
+    expect(page).toContain("tr('上移')");
+    expect(page).toContain("tr('下移')");
+    expect(page).toContain("tr('目标')");
+    expect(page).toContain('handleMoveTarget');
+    expect(page).toContain('handleToggleTarget');
+    expect(page).toContain('api.moveModelForwardTarget');
+    expect(page).toContain('api.setModelForwardTargetEnabled');
+    expect(api).toContain('/targets/${targetId}/move');
+    expect(api).toContain('/targets/${targetId}/enabled');
+  });
+
+  it('对外模型名大小写不敏感查重，顺序同步为通道优先级', () => {
+    const service = read('src/server/services/modelForwardService.ts');
+    expect(service).toContain('findRuleByModelName');
+    expect(service).toContain('lower(${schema.modelForwardRules.modelName})');
+    expect(service).toContain('moveModelForwardTarget');
+    expect(service).toContain('setModelForwardTargetEnabled');
+    expect(service).toContain('const priority = index;');
+  });
+
+  it('弹窗会即时提示对外模型名重复，并把它接进保存校验', () => {
+    expect(editor).toContain('existingRuleNames');
+    expect(editor).toContain('duplicatedModelName');
+    expect(editor).toContain('模型名不能重复');
+    expect(page).toContain('existingRuleNames={rules');
+    expect(page).toContain('rule.id !== editingRule?.id');
+  });
 });

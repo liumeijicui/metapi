@@ -1,3 +1,23 @@
+### 55. 模型转发：对外模型名查重（大小写不敏感）+ 转发目标排序与单独启停
+
+- **类型**：功能补全（模型转发页）
+- **需求来源**：本会话（用户：「1.对外的模型名不能重复 2.模型下的转发目标1 目标2之类的，支持上移，下移，置顶，启用，禁用等操作」）
+- **对外模型名查重**：`model_forward_rules.model_name` 上只有普通唯一索引，只按原始大小写比较，所以此前 `gpt-6-astra` 与 `GPT-6-Astra` 能各建一条规则、抢同一个对外模型名（已实测复现）。现在统一按**大小写不敏感 + trim** 查重：
+  - 新增 `findRuleByModelName()`，用 `lower(model_name) = ?` 查询，创建与编辑都走它；
+  - 报错文案带上已存在的那个名字（`对外模型 gpt-6-astra 已经有转发规则，模型名不能重复`），避免用户看不出撞了哪条；
+  - 前端弹窗同步做即时校验：把**其它规则**占用的模型名（排除当前正在编辑的这条）传给 `RuleEditorModal`，输入撞名时直接禁用「保存」并红字提示，少跑一次注定失败的接口。
+- **转发目标排序**：复用已有的 `model_forward_targets.sort_order`，新增 `moveModelForwardTarget(ruleId, targetId, 'up' | 'down' | 'top')`：
+  - 先按当前顺序取出目标，把目标挪到目标位置，再 `renumberTargetSortOrders()` 重排成 `0..n-1`；
+  - 越界操作（第一个再上移 / 最后一个再下移）是空操作，不报错；
+  - **顺序即优先级**：同步阶段把 `index` 写进 `route_channels.priority`（此前一律写 0，等于所有目标同层按权重随机）。这样「目标1」会优先被选中，失败 / 冷却 / 停用后才落到「目标2」，与列表顺序一致。同一规则下目标的 `weight` 仍保留，仅在优先级相同时才起作用。
+- **转发目标单独启停**：新增 `setModelForwardTargetEnabled(ruleId, targetId, enabled)`，只改这一条 `model_forward_targets.enabled` 并同步到它自己的通道，同规则下其它目标不受影响；规则级的启用 / 停用仍由原来那个按钮控制（通道 enabled = 目标 enabled && 规则 enabled）。
+- **接口**：新增 `POST /api/model-forward-rules/:id/targets/:targetId/move`（body `{ action: 'up' | 'down' | 'top' }`）与 `POST /api/model-forward-rules/:id/targets/:targetId/enabled`（body `{ enabled }`），都返回更新后的完整规则；非法 action / 非法 id 返回 400。
+- **前端**：转发目标从一排徽标改成有序列表，每行显示「目标N + 站点 + 账号 + 上游模型 + 状态」，右侧是「置顶 / ↑ 上移 / ↓ 下移 / 停用(启用)」，第一个禁用上移与置顶、最后一个禁用下移，停用的目标整行半透明，操作中禁用按钮防重复点击。
+- **测试**：`modelForwardService.test.ts` 加 3 例（大小写不敏感查重建/改都拦、上移/下移/置顶顺序与通道 priority 一致且越界空操作、目标单独启停不影响其它目标）、`routes/api/modelForward.test.ts` 加 2 例（大小写重复 400、目标排序与启停 + 非法入参 400）、`modelForwarding.architecture.test.ts` 加 3 例（UI 操作接线、查重与优先级实现、弹窗即时查重）；相关回归 186 例通过；server/web 两道 `tsc` 通过。
+- **端到端验证**：生产环境实测 `GPT-6-ASTRa` 创建被 400 拦下并提示已存在 `gpt-6-astra`；临时规则三目标实测置顶 / 上移 / 下移 / 停用后 `sort_order` 与 `route_channels.priority` 完全一致、停用只影响该目标，验完已删除（临时路由与通道已清理）；原规则 `gpt-6-astra` 走 SK 调用仍 200 正常，通道 `1128` priority=0。
+- **主要文件**：`src/server/services/modelForwardService.ts`、`src/server/routes/api/modelForward.ts`、`src/web/api.ts`、`src/web/pages/ModelForwarding.tsx`、`src/web/pages/model-forwarding/RuleEditorModal.tsx`
+- **状态**：已完成（已构建、重启并端到端校验）
+
 ### 54. 使用日志新增「新路由 / 老路由」标记与秒级耗时，并核对路由缓存性能
 
 - **类型**：体验优化 + 性能核查

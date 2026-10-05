@@ -128,6 +128,96 @@ describe('model forward routes', () => {
     expect(badId.statusCode).toBe(400);
   });
 
+  it('对外模型名大小写不敏感，重复会被拒绝', async () => {
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-rules',
+      payload: {
+        modelName: 'gpt-6-astra',
+        targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
+      },
+    });
+    expect(first.statusCode).toBe(201);
+
+    const duplicated = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-rules',
+      payload: {
+        modelName: 'GPT-6-Astra',
+        targets: [{ siteId, accountId, upstreamModel: 'kimi-k3' }],
+      },
+    });
+    expect(duplicated.statusCode).toBe(400);
+    expect(duplicated.json().message).toContain('已经有转发规则');
+  });
+
+  it('转发目标支持置顶 / 上移 / 下移与单独启停', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-rules',
+      payload: {
+        modelName: 'gpt-6-astra',
+        targets: [
+          { siteId, accountId, upstreamModel: 'model-a' },
+          { siteId, accountId, upstreamModel: 'model-b' },
+          { siteId, accountId, upstreamModel: 'model-c' },
+        ],
+      },
+    });
+    const rule = created.json().rule;
+    const targetId = (model: string) =>
+      rule.targets.find((target: { upstreamModel: string }) => target.upstreamModel === model).id;
+    const order = (body: { rule: { targets: Array<{ upstreamModel: string }> } }) =>
+      body.rule.targets.map((target) => target.upstreamModel);
+
+    const movedToTop = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-c')}/move`,
+      payload: { action: 'top' },
+    });
+    expect(movedToTop.statusCode).toBe(200);
+    expect(order(movedToTop.json())).toEqual(['model-c', 'model-a', 'model-b']);
+
+    const movedUp = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-b')}/move`,
+      payload: { action: 'up' },
+    });
+    expect(order(movedUp.json())).toEqual(['model-c', 'model-b', 'model-a']);
+
+    const movedDown = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-c')}/move`,
+      payload: { action: 'down' },
+    });
+    expect(order(movedDown.json())).toEqual(['model-b', 'model-c', 'model-a']);
+
+    const disabled = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-a')}/enabled`,
+      payload: { enabled: false },
+    });
+    expect(disabled.statusCode).toBe(200);
+    const disabledTarget = disabled.json().rule.targets
+      .find((target: { upstreamModel: string }) => target.upstreamModel === 'model-a');
+    expect(disabledTarget.enabled).toBe(false);
+    expect(disabledTarget.channelEnabled).toBe(false);
+
+    const badAction = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-a')}/move`,
+      payload: { action: 'sideways' },
+    });
+    expect(badAction.statusCode).toBe(400);
+
+    const badTarget = await app.inject({
+      method: 'POST',
+      url: `/api/model-forward-rules/${rule.id}/targets/abc/enabled`,
+      payload: { enabled: true },
+    });
+    expect(badTarget.statusCode).toBe(400);
+  });
+
   it('选项中包含站点、账号与站点模型列表', async () => {
     const options = await app.inject({ method: 'GET', url: `/api/model-forward-options?siteId=${siteId}` });
     expect(options.statusCode).toBe(200);

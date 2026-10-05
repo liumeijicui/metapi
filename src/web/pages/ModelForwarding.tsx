@@ -7,6 +7,7 @@ import type {
   ModelForwardDraftTarget,
   ModelForwardOptions,
   ModelForwardRuleRow,
+  ModelForwardTargetRow,
 } from './model-forwarding/types.js';
 
 const EMPTY_OPTIONS: ModelForwardOptions = { sites: [], accounts: [], models: [] };
@@ -37,6 +38,7 @@ export default function ModelForwarding() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingRule, setEditingRule] = useState<ModelForwardRuleRow | null>(null);
   const [busyRuleId, setBusyRuleId] = useState<number | null>(null);
+  const [busyTargetKey, setBusyTargetKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -150,6 +152,35 @@ export default function ModelForwarding() {
     }
   };
 
+  const handleMoveTarget = async (
+    rule: ModelForwardRuleRow,
+    target: ModelForwardTargetRow,
+    action: 'up' | 'down' | 'top',
+  ) => {
+    setBusyTargetKey(`${rule.id}:${target.id}`);
+    try {
+      await api.moveModelForwardTarget(rule.id, target.id, action);
+      await load();
+    } catch (error: any) {
+      toast.error(error?.message || tr('调整转发目标顺序失败'));
+    } finally {
+      setBusyTargetKey(null);
+    }
+  };
+
+  const handleToggleTarget = async (rule: ModelForwardRuleRow, target: ModelForwardTargetRow) => {
+    setBusyTargetKey(`${rule.id}:${target.id}`);
+    try {
+      await api.setModelForwardTargetEnabled(rule.id, target.id, !target.enabled);
+      toast.success(!target.enabled ? tr('转发目标已启用') : tr('转发目标已停用'));
+      await load();
+    } catch (error: any) {
+      toast.error(error?.message || tr('更新转发目标失败'));
+    } finally {
+      setBusyTargetKey(null);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -227,8 +258,8 @@ export default function ModelForwarding() {
                 ))}
               </div>
 
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {rule.targets.map((target) => {
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {rule.targets.map((target, index) => {
                   const cooling = target.cooldownUntil && Date.parse(target.cooldownUntil) > Date.now();
                   const state = !target.enabled
                     ? tr('已停用')
@@ -238,15 +269,83 @@ export default function ModelForwarding() {
                         ? tr('正常')
                         : tr('待命');
                   const stateClass = !target.enabled || cooling ? 'badge-warning' : 'badge-success';
+                  const targetBusy = busyTargetKey === `${rule.id}:${target.id}`;
+                  const isFirst = index === 0;
+                  const isLast = index === rule.targets.length - 1;
                   return (
-                    <span
+                    <div
                       key={target.id}
-                      className={`badge ${stateClass}`}
-                      style={{ fontSize: 10.5 }}
-                      data-tooltip={`${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        padding: '6px 8px',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 6,
+                        opacity: target.enabled ? 1 : 0.6,
+                      }}
                     >
-                      {target.siteName || `#${target.siteId}`} · {target.accountUsername || `#${target.accountId}`} · {state}
-                    </span>
+                      <span className="badge badge-muted" style={{ fontSize: 10.5, minWidth: 34, justifyContent: 'center' }}>
+                        {tr('目标')}{index + 1}
+                      </span>
+                      <span style={{ fontSize: 12.5, fontWeight: 500 }}>
+                        {target.siteName || `#${target.siteId}`}
+                      </span>
+                      <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {target.accountUsername || `#${target.accountId}`}
+                      </span>
+                      <code style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
+                        {target.upstreamModel}
+                      </code>
+                      <span
+                        className={`badge ${stateClass}`}
+                        style={{ fontSize: 10.5 }}
+                        data-tooltip={`${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`}
+                      >
+                        {state}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        style={{ fontSize: 11.5, padding: '0 4px' }}
+                        title={tr('置顶')}
+                        disabled={targetBusy || isFirst}
+                        onClick={() => void handleMoveTarget(rule, target, 'top')}
+                      >
+                        {tr('置顶')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        style={{ fontSize: 11.5, padding: '0 4px' }}
+                        title={tr('上移')}
+                        disabled={targetBusy || isFirst}
+                        onClick={() => void handleMoveTarget(rule, target, 'up')}
+                      >
+                        ↑ {tr('上移')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        style={{ fontSize: 11.5, padding: '0 4px' }}
+                        title={tr('下移')}
+                        disabled={targetBusy || isLast}
+                        onClick={() => void handleMoveTarget(rule, target, 'down')}
+                      >
+                        ↓ {tr('下移')}
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn-link${target.enabled ? ' btn-link-danger' : ''}`}
+                        style={{ fontSize: 11.5, padding: '0 4px' }}
+                        disabled={targetBusy}
+                        onClick={() => void handleToggleTarget(rule, target)}
+                      >
+                        {target.enabled ? tr('停用') : tr('启用')}
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -265,6 +364,9 @@ export default function ModelForwarding() {
         options={options}
         siteModels={siteModels}
         knownModels={knownModels}
+        existingRuleNames={rules
+          .filter((rule) => rule.id !== editingRule?.id)
+          .map((rule) => rule.modelName)}
         saving={saving}
         onLoadSiteModels={(siteId) => { void loadSiteModels(siteId); }}
         onClose={() => { setEditorOpen(false); setEditingRule(null); }}
