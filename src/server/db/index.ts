@@ -46,6 +46,8 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'events',
   'prompt_suites',
   'prompt_cases',
+  'model_forward_rules',
+  'model_forward_targets',
 ]);
 
 export let runtimeDbDialect: RuntimeDbDialect = config.dbType;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetSt
 import { BrandGlyph, InlineBrandIcon, hashColor, type BrandInfo } from '../../components/BrandIcon.js';
 import CenteredModal from '../../components/CenteredModal.js';
 import ModernSelect from '../../components/ModernSelect.js';
+import ModelMappingEditor from './ModelMappingEditor.js';
 import { tr } from '../../i18n.js';
 import type { RouteIconOption, RouteMode, RouteSummaryRow } from './types.js';
 import {
@@ -22,6 +23,7 @@ type RouteEditorForm = {
   displayName: string;
   displayIcon: string;
   modelPattern: string;
+  modelMapping: string;
   sourceRouteIds: number[];
   advancedOpen: boolean;
 };
@@ -738,6 +740,20 @@ export default function ManualRoutePanel({
               )}
             </div>
           )}
+
+          <div
+            style={{
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '12px 14px',
+              background: 'var(--color-bg-card)',
+            }}
+          >
+            <ModelMappingEditor
+              value={form.modelMapping}
+              onChange={(nextValue) => setForm((current) => ({ ...current, modelMapping: nextValue ?? '' }))}
+            />
+          </div>
         </div>
       </CenteredModal>
 

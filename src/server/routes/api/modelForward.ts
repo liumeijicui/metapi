@@ -1,0 +1,83 @@
+import { FastifyInstance, FastifyReply } from 'fastify';
+import {
+  ModelForwardError,
+  createModelForwardRule,
+  deleteModelForwardRule,
+  listModelForwardOptions,
+  listModelForwardRules,
+  setModelForwardRuleEnabled,
+  updateModelForwardRule,
+} from '../../services/modelForwardService.js';
+
+function sendModelForwardError(reply: FastifyReply, error: unknown) {
+  if (error instanceof ModelForwardError) {
+    return reply.code(400).send({ success: false, message: error.message });
+  }
+  throw error;
+}
+
+function parseId(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
+}
+
+export async function modelForwardRoutes(app: FastifyInstance) {
+  app.get('/api/model-forward-rules', async () => {
+    return { success: true, rules: await listModelForwardRules() };
+  });
+
+  app.get<{ Querystring: { siteId?: string } }>('/api/model-forward-options', async (request, reply) => {
+    try {
+      const siteId = parseId(request.query.siteId);
+      if (request.query.siteId !== undefined && siteId === null) {
+        return reply.code(400).send({ success: false, message: '站点 id 不合法' });
+      }
+      return { success: true, ...(await listModelForwardOptions(siteId)) };
+    } catch (error) {
+      return sendModelForwardError(reply, error);
+    }
+  });
+
+  app.post('/api/model-forward-rules', async (request, reply) => {
+    try {
+      const rule = await createModelForwardRule(request.body ?? {});
+      return reply.code(201).send({ success: true, rule });
+    } catch (error) {
+      return sendModelForwardError(reply, error);
+    }
+  });
+
+  app.put<{ Params: { id: string } }>('/api/model-forward-rules/:id', async (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+    try {
+      return { success: true, rule: await updateModelForwardRule(id, request.body ?? {}) };
+    } catch (error) {
+      return sendModelForwardError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>(
+    '/api/model-forward-rules/:id/enabled',
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+      try {
+        return { success: true, rule: await setModelForwardRuleEnabled(id, !!request.body?.enabled) };
+      } catch (error) {
+        return sendModelForwardError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/model-forward-rules/:id', async (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+    try {
+      await deleteModelForwardRule(id);
+      return { success: true };
+    } catch (error) {
+      return sendModelForwardError(reply, error);
+    }
+  });
+}

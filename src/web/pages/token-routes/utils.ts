@@ -293,3 +293,58 @@ export function getChannelDecisionState(
     reasonColor: 'var(--color-text-muted)',
   };
 }
+
+export type ModelMappingEntry = { from: string; to: string };
+
+export function parseModelMappingEntries(raw: string | null | undefined): ModelMappingEntry[] {
+  if (!raw) return [];
+  const trimmed = String(raw).trim();
+  if (!trimmed) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  return Object.entries(parsed as Record<string, unknown>)
+    .filter(([key, value]) => key.trim().length > 0 && typeof value === 'string' && value.trim().length > 0)
+    .map(([key, value]) => ({ from: key.trim(), to: String(value).trim() }));
+}
+
+export function serializeModelMappingEntries(entries: ModelMappingEntry[]): string | null {
+  const record: Record<string, string> = {};
+  for (const entry of entries || []) {
+    const from = (entry?.from || '').trim();
+    const to = (entry?.to || '').trim();
+    if (!from || !to) continue;
+    record[from] = to;
+  }
+  return Object.keys(record).length > 0 ? JSON.stringify(record) : null;
+}
+
+export function hasIncompleteModelMappingEntries(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  return Object.entries(parsed as Record<string, unknown>).some(
+    ([key, value]) => !key.trim() || typeof value !== 'string' || !value.trim(),
+  );
+}
+
+export function normalizeModelMappingValue(raw: string | null | undefined): string | null {
+  return serializeModelMappingEntries(parseModelMappingEntries(raw));
+}
+
+export function resolveModelMappingSummary(
+  raw: string | null | undefined,
+): ModelMappingEntry[] {
+  return parseModelMappingEntries(raw);
+}

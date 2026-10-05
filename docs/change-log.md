@@ -1,3 +1,56 @@
+### 54. 使用日志新增「新路由 / 老路由」标记与秒级耗时，并核对路由缓存性能
+
+- **类型**：体验优化 + 性能核查
+- **需求来源**：本会话（用户：「日志里能加上老路由和新路由的字段吗？然后时间能改成秒为单位吗？比如 0.8s。再看看原先的这些路由是不是都存在内存里的，不是的话看看耗时影响大不大」）
+- **新老路由标记**：`proxy_logs` 只存 `route_id`，是否属于「模型转发」需要回查 `token_routes.model_pattern`。因此在 `GET /api/stats/proxy-logs`（列表）与 `GET /api/stats/proxy-logs/:id`（详情）两处查询里 `leftJoin token_routes`，用 `isForwardRoutePattern(model_pattern)` 判定并输出 `routeKind: 'forward' | 'legacy' | null`：
+  - `forward` = 命中「模型转发」自动生成的 `forward:<对外模型名>` 路由（新路由）；
+  - `legacy` = 老路由（含早期无 `route_id` 的精确/通配符路由）；
+  - `null` = 该日志没有关联路由（如直连/本地模型），不误标为老路由。
+- **耗时改秒**：`ProxyLogs.tsx` 的 `formatLatency()` 统一输出秒（`0.8s` / `1.2s` / `12s`），首字耗时、首字/总耗时、桌面与移动端全部复用同一函数，页面内不再出现 `ms` 字样。动态小数位：≥10s 取整、≥1s 一位、<1s 两位，并去掉末尾多余的 0。
+- **展示位置**：桌面列表行、移动端卡片、展开详情各加一枚徽标（新路由=蓝色 info，老路由=灰色 muted）；无路由日志不显示徽标。
+- **映射后的模型也进日志**：只要 `model_actual` 与 `model_requested` 不同（老路由的 `model_mapping`、新路由通道的 `source_model` 都会落到 `model_actual`），列表行在模型名下方追加一行 `→ deepseek-v4.1-flash`，移动端卡片追同一枚灰色徽标，鼠标悬停显示「模型映射：gpt-6-astra → deepseek-v4.1-flash」；映射后与请求同名时不重复展示。展开详情原有的「请求模型 → 实际模型」保留。
+- **路由缓存性能核查（结论：影响可忽略）**：路由**不是全程常驻内存**。`tokenRouter` 里有两层进程内缓存——`routeCacheSnapshot`（`token_routes` 全表快照，只含 `enabled=1`）与 `routeMatchCache`（按 routeId 缓存 通道/账号/站点/令牌），TTL 均为 `TOKEN_ROUTER_CACHE_TTL_MS`（默认 **1500ms**，生产实测值 1500）。也就是命中缓存时零 DB 查询；每 1.5s 后的第一个请求走一次冷路径，需要查 `token_routes` 全表 + 该路由相关 `route_channels`/`accounts`/`sites`/`account_tokens`/`oauth_route_units`。
+  - 以生产库规模实测（`token_routes=384`、`route_channels=658`，复制到临时库跑 `TokenRouter.selectChannel()`，25 轮冷启动 + 500 轮热命中）：**冷路径 avg 3.1ms / p50 2.7ms / p95 5.9ms / max 7.9ms；热命中 avg 0.21ms / p95 0.27ms**。
+  - 结论：冷查询是「每 1.5s 至多一次」的摊销成本，且只有几毫秒，相对一次上游 LLM 请求（数百 ms 起步）完全可忽略，不会成为 p99 瓶颈；现有内存占用也只有几百行级别，无需改动。
+- **测试**：`stats.proxy-logs.test.ts` 新增一例（`forward:` 路由 → `forward`、普通路由 → `legacy`，并覆盖详情接口），全套 9 例通过；`ProxyLogs.server-driven.test.tsx` 新增一例（映射模型展示 + 同名不重复），与 `logs.mobile.test.tsx` 共 17 例通过。
+- **主要文件**：`src/server/routes/api/stats.ts`、`src/server/routes/api/stats.proxy-logs.test.ts`、`src/web/api.ts`、`src/web/pages/ProxyLogs.tsx`、`src/web/pages/ProxyLogs.server-driven.test.tsx`
+- **状态**：已完成（已构建、重启并按生产数据端到端校验：`route_id=572` → `forward`，`route_id=75` → `legacy`；`gpt-6-astra → deepseek-v4.1-flash` 已在日志中展示）
+
+### 53. 新增「模型转发」页面：对外模型名直接绑站点/上游模型/多账号，优先级高于老路由
+
+- **类型**：新功能（独立转发规则 + 新页面）
+- **需求来源**：本会话（用户：「我想要的是有个添加按钮，然后选择要转发的站点，模型名，如果该站点维护多个账号，还能选择多个账号…新路由的，比如 gpt-6-astra 生效就走新路由的，老路由默认失效，新路由没有启用的，依旧走老路由」）
+- **数据模型**：新增 `model_forward_rules`（对外模型名唯一、启用状态、同步生成的 `route_id`）与 `model_forward_targets`（规则 → 站点 + 账号 + 上游模型 + 通道 id + 权重），迁移 `drizzle/0031_yielding_cerebro.sql`；两张表加进 `TABLES_WITH_NUMERIC_ID`，保证 MySQL/Postgres 下能拿到自增 id。
+- **实现方式（复用既有调度，不另造一套选择器）**：每条规则会同步出一条真实 `token_routes` + 若干 `route_channels`，因此冷却、失败退避、权重随机、站点健康度、计费与日志全部沿用现有链路。
+  - 生成的路由 `model_pattern` 带保留前缀 `forward:`（例如 `forward:gpt-6-astra`），`display_name` 才是对外模型名。前缀同时保证 `patternRouteChannelSyncService` 不会把其它路由的通道复制进来、也不会被复制出去。
+  - 通道 `source_model` = 目标的上游模型名，`manual_override=1`，自动重建不会删改。
+  - 令牌自动解析：优先默认令牌，其次支持该上游模型的可用令牌（`token_model_availability`）。
+- **优先级与回落**：`tokenRouter.findRoute()` 先按 `display_name` 找启用中的转发路由，且要求「至少一个通道可派发（通道启用、账号与站点 active、不在冷却中）」，命中就直接用；否则跳过所有 `forward:` 路由，回到原来的精确匹配 / 通配符匹配。因此：**规则启用 → 老路由被接管；规则停用或全部通道不可用 → 自动回落老路由**，无需改动老路由数据。
+- **修正一个会导致规则失效的坑**：`rebuildTokenRoutesFromAvailability()` 会删除「pattern 不在最新可用模型列表里」的精确路由，而 `forward:*` 不是真实模型名，会被每次模型刷新清掉（实测重启后规则路由被删）。已在该清理循环里跳过 `forward:` 前缀路由，并加了回归测试。
+- **路由页面隔离**：`listRoutesWithSources()` 过滤掉 `forward:` 路由，新规则不会污染「路由」页面；`/v1/models` 里同一个对外模型名仍然只出现一次。
+- **前端**：新增页面 `/model-forwarding`「模型转发」（侧边栏在「路由」之后）。顶层 `src/web/pages/ModelForwarding.tsx` 只做编排，弹窗拆到 `src/web/pages/model-forwarding/`（`RuleEditorModal` / `types`）。弹窗里：填对外模型名（带模型建议列表）、逐条添加目标（选站点 → 填/选上游模型名 → 勾选该站点下的账号多选，账号超过 6 个时带搜索），每个目标可单独删除；列表卡片显示目标、按站点的账号数、每个通道的状态（正常/冷却中/已停用/待命）与最近使用时间。
+- **接口**：`GET/POST /api/model-forward-rules`、`PUT /api/model-forward-rules/:id`、`POST /api/model-forward-rules/:id/enabled`、`DELETE /api/model-forward-rules/:id`、`GET /api/model-forward-options[?siteId=]`（站点 + 账号 + 站点模型列表）。
+- **测试与门禁**：新增 `modelForwardService.test.ts`（7 例：同步生成路由与通道、令牌自动解析、启停联动、同账号多上游模型、重名拦截、非法入参、删除级联、编辑时通道复用）、`tokenRouter.modelForward.test.ts`（3 例：转发优先 + 停用回落 + 冷却回落、重建不清理转发路由）、`routes/api/modelForward.test.ts`（3 例：CRUD/启停/删除、非法入参 400、选项接口）、`web/pages/modelForwarding.architecture.test.ts`（4 例：分层、多选账号、前缀隔离、路由与 API 接线）。相关回归 `tokenRouter*`、`tokens*`、`tokenRoutes*`、`modelService*` 共 227 例通过；`test:schema:unit` 15 例通过；server/web 两道 `tsc` 通过；`build:server` 与 `vite build` 通过；已 `systemctl restart metapi`，生产库自动建表成功。
+- **端到端验证**：生产库建了规则 `gpt-6-astra → happycoding(site 19) / deepseek-v4.1-flash / 账号 7`，走网关 SK 连续调用 5/5 成功，`proxy_logs` 记为 `route_id=572 / channel_id=1128 / model_requested=gpt-6-astra / model_actual=deepseek-v4.1-flash`；停用规则后立即回落到老路由 `route_id=75 / channel_id=1125`，重新启用又回到转发路由；`POST /api/routes/rebuild` 后转发路由与通道均保留。
+- **主要文件**：`src/server/db/schema.ts`、`drizzle/0031_yielding_cerebro.sql`、`src/server/services/modelForwardService.ts`、`src/server/routes/api/modelForward.ts`、`src/server/services/tokenRouter.ts`、`src/server/services/modelService.ts`、`src/server/routes/api/tokens.ts`、`src/server/index.ts`、`src/web/pages/ModelForwarding.tsx`、`src/web/pages/model-forwarding/*`、`src/web/App.tsx`、`src/web/api.ts`
+- **状态**：已完成（规则 CRUD、多账号、优先级与回落、页面均已上线）
+
+### 52. 路由页面支持模型映射可视化编辑：对外模型名可转发到上游任意模型
+
+- **类型**：新功能（路由模型映射 UI + 展示）
+- **需求来源**：本会话（用户：「在路由菜单里我只看见你设置了这个站，但是没有写具体模型…可以，帮我加一下吧，让我能随意映射模型」）
+- **背景**：`token_routes.model_mapping` 早已是转发链路的一环（`resolveMappedModel()` 把请求模型改写成上游模型），但前端只定义过类型、没有任何展示或编辑入口，导致 `gpt-6-astra → deepseek-v4.1-flash` 这类映射只能靠改库设置，页面上看不到。
+- **后端**：无需改动。`GET /api/routes`、`/api/routes/summary` 本就返回 `modelMapping`，`POST /api/routes`、`PUT /api/routes/:id` 本就接受 `string | null`（`src/server/contracts/tokenRoutePayloads.ts` 的 zod schema 已含该字段）。
+- **前端**：
+  - 新增 `src/web/pages/token-routes/ModelMappingEditor.tsx`：多行「请求模型 → 上游模型」编辑器，支持增删行；行内保留本地状态，避免边输入边被解析截断；存在半填写行时给出红色提示。
+  - `src/web/pages/token-routes/ManualRoutePanel.tsx`：编辑弹窗底部新增「模型映射」卡片，`pattern` 与 `explicit_group` 两种模式都可编辑。
+  - `RouteEditorForm` 新增 `modelMapping` 字段；`TokenRoutes.tsx` 在编辑时回填（`normalizeModelMappingValue`）、保存时归一化（空则写 null），并拦截未填完整的映射行（`hasIncompleteModelMappingEntries`）。
+  - `src/web/pages/token-routes/RouteCard.tsx`：折叠卡片显示 `映射 <目标模型>` 徽标（多行时 `+N`），展开卡片展示完整的 `from → to` 映射链，鼠标悬停有完整提示。
+- **数据**：生产库无需刷数据——全库仅 `token_routes.id=75`（`gpt-6-astra`）有映射，格式已是规范 JSON，与新旧读写路径都兼容。
+- **测试与门禁**：`utils.test.ts` 补 4 例（解析合法/非法、序列化归一、空值、未填完整检测）；web/server 两道 `tsc --noEmit` 通过；`tokenRoutes*` 7 个用例文件 40 例通过 + `RouteCard.test.tsx` 16 例通过；`vite build` 通过并已 `systemctl restart metapi`。
+- **端到端验证**：经 `PUT /api/routes/75` 改映射后走网关 SK 调用，`proxy_logs` 显示 `model_requested=gpt-6-astra / model_actual` 随映射变化（切到 `glm-5.3-flash` 时上游返回 503、日志记为按新映射转发，随即还原为 `deepseek-v4.1-flash` 并恢复 200），证明界面写回的映射确实生效。
+- **主要文件**：`src/web/pages/token-routes/ModelMappingEditor.tsx`、`src/web/pages/token-routes/ManualRoutePanel.tsx`、`src/web/pages/token-routes/RouteCard.tsx`、`src/web/pages/token-routes/utils.ts`、`src/web/pages/TokenRoutes.tsx`
+
 ### 51. 新增「提示词管理」：题库 + 题目 + 标准答案/评分要点，内置鹈鹕测试与糖果测试
 
 - **类型**：新功能（评测提示词登记）

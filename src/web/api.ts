@@ -453,11 +453,14 @@ export type ProxyLogBillingDetails = {
   };
 } | null;
 
+export type ProxyLogRouteKind = 'forward' | 'legacy';
+
 export type ProxyLogListItem = {
   id: number;
   createdAt: string;
   modelRequested: string;
   modelActual: string;
+  routeKind?: ProxyLogRouteKind | null;
   status: string;
   latencyMs: number;
   isStream?: boolean | null;
@@ -955,6 +958,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ channels }),
     }),
+  // 模型转发（对外模型名 → 站点/上游模型/多账号）
+  getModelForwardRules: () => request("/api/model-forward-rules"),
+  getModelForwardOptions: (siteId?: number) =>
+    request(`/api/model-forward-options${buildQueryString(siteId ? { siteId } : undefined)}`),
+  createModelForwardRule: (data: any) =>
+    request("/api/model-forward-rules", { method: "POST", body: JSON.stringify(data) }),
+  updateModelForwardRule: (id: number, data: any) =>
+    request(`/api/model-forward-rules/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  setModelForwardRuleEnabled: (id: number, enabled: boolean) =>
+    request(`/api/model-forward-rules/${id}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  deleteModelForwardRule: (id: number) =>
+    request(`/api/model-forward-rules/${id}`, { method: "DELETE" }),
   addRoute: (data: any) =>
     request("/api/routes", { method: "POST", body: JSON.stringify(data) }),
   updateRoute: (id: number, data: any) =>

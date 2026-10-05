@@ -294,6 +294,46 @@ export const routeChannels = sqliteTable('route_channels', {
   routeTokenIdx: index('route_channels_route_token_idx').on(table.routeId, table.tokenId),
 }));
 
+// 「对外模型转发」规则：把某个对外模型名固定转发到指定站点/模型/账号组合。
+// 每条规则会同步生成一条 token_routes（model_pattern 带 forward: 前缀，display_name 为对外模型名）
+// 以及若干 route_channels（manual_override=1，source_model 为该目标的上游模型名）。
+export const modelForwardRules = sqliteTable('model_forward_rules', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  modelName: text('model_name').notNull(),
+  enabled: integer('enabled', { mode: 'boolean' }).default(true),
+  routeId: integer('route_id'),
+  notes: text('notes'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  modelNameUnique: uniqueIndex('model_forward_rules_model_name_unique').on(table.modelName),
+  enabledIdx: index('model_forward_rules_enabled_idx').on(table.enabled),
+  routeIdIdx: index('model_forward_rules_route_id_idx').on(table.routeId),
+}));
+
+// 转发目标：一条规则下每个「站点 + 上游模型 + 账号」组合一行，对应一条 route_channels。
+export const modelForwardTargets = sqliteTable('model_forward_targets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  ruleId: integer('rule_id').notNull().references(() => modelForwardRules.id, { onDelete: 'cascade' }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  tokenId: integer('token_id').references(() => accountTokens.id, { onDelete: 'set null' }),
+  upstreamModel: text('upstream_model').notNull(),
+  channelId: integer('channel_id'),
+  weight: integer('weight').default(10),
+  enabled: integer('enabled', { mode: 'boolean' }).default(true),
+  sortOrder: integer('sort_order').default(0),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  ruleAccountModelUnique: uniqueIndex('model_forward_targets_rule_account_model_unique')
+    .on(table.ruleId, table.accountId, table.upstreamModel),
+  ruleSortIdx: index('model_forward_targets_rule_sort_idx').on(table.ruleId, table.sortOrder),
+  siteIdIdx: index('model_forward_targets_site_id_idx').on(table.siteId),
+  accountIdIdx: index('model_forward_targets_account_id_idx').on(table.accountId),
+  channelIdIdx: index('model_forward_targets_channel_id_idx').on(table.channelId),
+}));
+
 export const proxyLogs = sqliteTable('proxy_logs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   routeId: integer('route_id'),

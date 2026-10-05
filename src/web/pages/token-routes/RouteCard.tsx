@@ -45,6 +45,7 @@ import {
   isExplicitGroupRoute,
   resolveRouteTitle,
   resolveRouteIcon,
+  resolveModelMappingSummary,
 } from './utils.js';
 import {
   buildPriorityBuckets,
@@ -586,6 +587,10 @@ function RouteCardInner({
   const showAddChannelButton = !readOnlyRoute && !channelManagementDisabled;
   const showMissingTokenHints = !channelManagementDisabled && (missingTokenSiteItems.length > 0 || missingTokenGroupItems.length > 0);
   const routeUnits = collectRouteUnits(channels);
+  const modelMappingEntries = resolveModelMappingSummary(route.modelMapping);
+  const modelMappingHint = modelMappingEntries
+    .map((entry) => `${entry.from} → ${entry.to}`)
+    .join('\n');
   const routingStrategyOptions = [
     {
       value: 'weighted',
@@ -741,6 +746,17 @@ function RouteCardInner({
               </span>
             ) : null}
           </div>
+
+          {modelMappingEntries.length > 0 ? (
+            <span
+              className="badge badge-warning"
+              style={{ fontSize: 10, flexShrink: 0 }}
+              data-tooltip={modelMappingHint}
+            >
+              {tr('映射')} {modelMappingEntries[0].to}
+              {modelMappingEntries.length > 1 ? ` +${modelMappingEntries.length - 1}` : ''}
+            </span>
+          ) : null}
 
           {readOnlyRoute ? (
             <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>
@@ -984,6 +1000,21 @@ function RouteCardInner({
           </div>
         </div>
       )}
+
+      {!compact && modelMappingEntries.length > 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+          <span style={{ fontSize: 11.5, color: 'var(--color-text-secondary)' }}>{tr('模型映射')}</span>
+          {modelMappingEntries.map((entry) => (
+            <code
+              key={`model-mapping-${entry.from}->${entry.to}`}
+              className="badge badge-warning"
+              style={{ fontSize: 10.5, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              {entry.from} → {entry.to}
+            </code>
+          ))}
+        </div>
+      ) : null}
 
       {!compact && explicitGroupRoute ? (
         <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--color-text-muted)', marginBottom: 6 }}>

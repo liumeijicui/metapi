@@ -17,6 +17,7 @@ import {
   type ProxyLogDetail,
   type ProxyLogListItem,
   type ProxyLogsSummary,
+  type ProxyLogRouteKind,
   type ProxyLogStatusFilter,
   type ProxyLogUsageSource,
 } from "../api.js";
@@ -266,11 +267,42 @@ async function copyTextToClipboard(text: string) {
   document.body.removeChild(textarea);
 }
 
+// 统一用秒展示，例：800ms → 0.8s，1234ms → 1.2s。
 function formatLatency(ms: number) {
-  if (ms >= 1000) {
-    return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`;
-  }
-  return `${ms}ms`;
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  const seconds = ms / 1000;
+  const digits = seconds >= 10 ? 0 : seconds >= 1 ? 1 : 2;
+  const text = seconds
+    .toFixed(digits)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+  return `${text}s`;
+}
+
+// 区分请求走的是「模型转发」新路由还是老路由。
+function formatRouteKindLabel(kind: ProxyLogRouteKind | null | undefined) {
+  if (kind === "forward") return "新路由";
+  if (kind === "legacy") return "老路由";
+  return null;
+}
+
+// 日志里也标出请求被映射/转发后真正发往上游的模型，例：→ deepseek-v4.1-flash。
+function resolveMappedModel(
+  requested?: string | null,
+  actual?: string | null,
+): string | null {
+  const requestedModel = (requested || "").trim();
+  const actualModel = (actual || "").trim();
+  if (!actualModel || actualModel === requestedModel) return null;
+  return actualModel;
+}
+
+function formatMappedModelLabel(
+  requested?: string | null,
+  actual?: string | null,
+): string | null {
+  const mapped = resolveMappedModel(requested, actual);
+  return mapped ? `→ ${mapped}` : null;
 }
 
 function latencyColor(ms: number) {
@@ -2619,6 +2651,11 @@ export default function ProxyLogs() {
               const firstByteLabel = formatFirstByteLabel(
                 detailLog.firstByteLatencyMs,
               );
+              const routeKindLabel = formatRouteKindLabel(log.routeKind);
+              const mappedModelLabel = formatMappedModelLabel(
+                log.modelRequested,
+                log.modelActual,
+              );
 
               return (
                 <MobileCard
@@ -2666,6 +2703,23 @@ export default function ProxyLogs() {
                         style={{ fontSize: 10 }}
                       >
                         {clientDisplay.secondary}
+                      </span>
+                    ) : null}
+                    {routeKindLabel ? (
+                      <span
+                        className={`badge ${log.routeKind === "forward" ? "badge-info" : "badge-muted"}`}
+                        style={{ fontSize: 10 }}
+                      >
+                        {routeKindLabel}
+                      </span>
+                    ) : null}
+                    {mappedModelLabel ? (
+                      <span
+                        className="badge badge-muted"
+                        title={`模型映射：${log.modelRequested} → ${log.modelActual}`}
+                        style={{ fontSize: 10 }}
+                      >
+                        {mappedModelLabel}
                       </span>
                     ) : null}
                     {streamModeLabel ? (
@@ -2854,6 +2908,11 @@ export default function ProxyLogs() {
                 const firstByteLabel = formatFirstByteLabel(
                   detailLog.firstByteLatencyMs,
                 );
+                const routeKindLabel = formatRouteKindLabel(log.routeKind);
+                const mappedModelLabel = formatMappedModelLabel(
+                  log.modelRequested,
+                  log.modelActual,
+                );
 
                 return (
                   <React.Fragment key={log.id}>
@@ -2913,6 +2972,19 @@ export default function ProxyLogs() {
                             model={log.modelRequested}
                             style={{ alignSelf: "flex-start" }}
                           />
+                          {mappedModelLabel ? (
+                            <div
+                              title={`模型映射：${log.modelRequested} → ${log.modelActual}`}
+                              style={{
+                                fontSize: 11,
+                                lineHeight: 1.4,
+                                color: "var(--color-text-muted)",
+                                fontVariantNumeric: "tabular-nums",
+                              }}
+                            >
+                              {mappedModelLabel}
+                            </div>
+                          ) : null}
                           {downstreamKeySummary ? (
                             <div
                               style={{
@@ -2924,7 +2996,7 @@ export default function ProxyLogs() {
                               {downstreamKeySummary}
                             </div>
                           ) : null}
-                          {streamModeLabel || firstByteLabel ? (
+                          {routeKindLabel || streamModeLabel || firstByteLabel ? (
                             <div
                               style={{
                                 display: "flex",
@@ -2932,6 +3004,14 @@ export default function ProxyLogs() {
                                 flexWrap: "wrap",
                               }}
                             >
+                              {routeKindLabel ? (
+                                <span
+                                  className={`badge ${log.routeKind === "forward" ? "badge-info" : "badge-muted"}`}
+                                  style={{ fontSize: 10 }}
+                                >
+                                  {routeKindLabel}
+                                </span>
+                              ) : null}
                               {streamModeLabel ? (
                                 <span
                                   className="badge badge-muted"
@@ -3194,6 +3274,23 @@ export default function ProxyLogs() {
                                             }}
                                           >
                                             {detailLog.username || "未知账号"}
+                                          </strong>
+                                        </>
+                                      )}
+                                      {formatRouteKindLabel(detailLog.routeKind) && (
+                                        <>
+                                          ，路由:{" "}
+                                          <strong
+                                            style={{
+                                              color:
+                                                detailLog.routeKind === "forward"
+                                                  ? "var(--color-primary)"
+                                                  : "var(--color-text-primary)",
+                                            }}
+                                          >
+                                            {formatRouteKindLabel(
+                                              detailLog.routeKind,
+                                            )}
                                           </strong>
                                         </>
                                       )}

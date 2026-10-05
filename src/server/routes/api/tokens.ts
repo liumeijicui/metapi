@@ -41,6 +41,7 @@ import {
   parseTokenRouteCreatePayload,
   parseTokenRouteUpdatePayload,
 } from '../../contracts/tokenRoutePayloads.js';
+import { isForwardRoutePattern } from '../../services/modelForwardService.js';
 import {
   populateRouteChannelsByModelPattern,
   rebuildAutomaticRouteChannelsByModelPattern,
@@ -146,7 +147,9 @@ function decorateRoutesWithSources(
 }
 
 async function listRoutesWithSources(): Promise<RouteRow[]> {
-  const routes = await db.select().from(schema.tokenRoutes).all();
+  // 「模型转发」规则生成的 token_routes 由 /model-forwarding 页面管理，不在路由页面展示。
+  const routes = (await db.select().from(schema.tokenRoutes).all())
+    .filter((route) => !isForwardRoutePattern(route.modelPattern));
   const sourceRouteIdsByRouteId = await loadRouteSourceIdsMap(routes.map((route) => route.id));
   return decorateRoutesWithSources(routes, sourceRouteIdsByRouteId);
 }

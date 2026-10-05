@@ -20,6 +20,7 @@ import {
 } from './accountExtraConfig.js';
 import { invalidateTokenRouterCache, normalizeModelAlias } from './tokenRouter.js';
 import { getBlockedBrandRules, isModelBlockedByBrand } from './brandMatcher.js';
+import { isForwardRoutePattern } from './modelForwardService.js';
 import { config } from '../config.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
@@ -1639,6 +1640,10 @@ export async function rebuildTokenRoutesFromAvailability(
     }
     const modelPattern = (route.modelPattern || '').trim();
     if (!modelPattern || !isExactModelPattern(modelPattern) || latestModelNames.has(modelPattern)) {
+      continue;
+    }
+    // 「模型转发」规则生成的路由用的是保留前缀，不是真实上游模型名，不能被当成失效模型清理掉。
+    if (isForwardRoutePattern(modelPattern)) {
       continue;
     }
 

@@ -290,6 +290,53 @@ describe('ProxyLogs server-driven page', () => {
     }
   });
 
+  it('renders the mapped upstream model when a log requested model differs from the actual one', async () => {
+    const mapped = buildListResponse();
+    mapped.items = [
+      {
+        ...mapped.items[0],
+        id: 201,
+        modelRequested: 'gpt-6-astra',
+        modelActual: 'deepseek-v4.1-flash',
+        routeKind: 'forward',
+      },
+      {
+        ...mapped.items[0],
+        id: 202,
+        modelRequested: 'gpt-4o',
+        modelActual: 'gpt-4o',
+        routeKind: 'legacy',
+      },
+    ];
+    apiMock.getProxyLogs.mockResolvedValue(mapped);
+    apiMock.getProxyLogsQuery.mockResolvedValue(mapped);
+
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('gpt-6-astra');
+      expect(text).toContain('→ deepseek-v4.1-flash');
+      // 映射后与请求模型一致时不再重复展示。
+      expect(text.match(/→ gpt-4o/g)).toBeNull();
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+    }
+  });
+
   it('shows proxy debug traces inline and edits settings through the modal', async () => {
     let root!: WebTestRenderer;
 

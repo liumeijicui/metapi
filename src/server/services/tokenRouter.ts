@@ -15,6 +15,7 @@ import {
 } from './routeRoutingStrategy.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
+import { isForwardRoutePattern } from './modelForwardService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import {
@@ -1336,6 +1337,22 @@ function normalizeRouteDisplayName(displayName: string | null | undefined): stri
 function isRouteDisplayNameMatch(model: string, displayName: string | null | undefined): boolean {
   const alias = normalizeRouteDisplayName(displayName);
   return !!alias && alias === model;
+}
+
+/**
+ * 转发路由是否存在可派发的通道：通道启用、账号与站点处于 active、且不在冷却中。
+ * 用于决定「新转发规则」是否接管该模型，取不到可用通道时回落到普通路由。
+ */
+function hasDispatchableChannel(match: RouteMatch, nowMs = Date.now()): boolean {
+  return match.channels.some((candidate) => {
+    if (!candidate.channel.enabled) return false;
+    if (candidate.account.status !== 'active') return false;
+    if (candidate.site.status !== 'active') return false;
+    const cooldownUntil = candidate.channel.cooldownUntil;
+    if (!cooldownUntil) return true;
+    const parsed = Date.parse(cooldownUntil);
+    return Number.isNaN(parsed) || parsed <= nowMs;
+  });
 }
 
 function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
@@ -3002,14 +3019,30 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    const matchedRoute = routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => (
+    // 「模型转发」规则优先：对外模型名命中启用中的转发路由时直接走它，
+    // 该规则没有可用通道（未启用/全部账号停用/全部冷却中）时再回落到普通路由。
+    const forwardRoute = routes.find((route) => (
+      !isExplicitGroupRoute(route)
+      && isForwardRoutePattern(route.modelPattern)
+      && isRouteDisplayNameMatch(model, route.displayName)
+    ));
+    if (forwardRoute) {
+      const forwardMatch = await this.loadRouteMatch(forwardRoute);
+      if (hasDispatchableChannel(forwardMatch)) {
+        return forwardMatch;
+      }
+    }
+
+    const legacyRoutes = routes.filter((route) => !isForwardRoutePattern(route.modelPattern));
+
+    const matchedRoute = legacyRoutes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+      || legacyRoutes.find((route) => (
         !isExplicitGroupRoute(route)
         && isExactRouteModelPattern(route.modelPattern)
         && (route.modelPattern || '').trim() === model
       ))
-      || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
+      || legacyRoutes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+      || legacyRoutes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
 
     if (!matchedRoute) return null;
 

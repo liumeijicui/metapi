@@ -32,6 +32,7 @@ import {
   listProxyDebugTraces,
 } from "../../services/proxyDebugTraceStore.js";
 import { parseProxyLogMessageMeta } from "../../services/proxyLogMessage.js";
+import { isForwardRoutePattern } from "../../services/modelForwardService.js";
 import { requiresManagedAccountTokens } from "../../services/accountExtraConfig.js";
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from "../../services/accountTokenService.js";
 import {
@@ -583,6 +584,7 @@ function mapProxyLogRow(
       groupName?: string | null;
       tags?: string | null;
     } | null;
+    token_routes?: { modelPattern?: string | null } | null;
   },
   options?: { includeBillingDetails?: boolean },
 ) {
@@ -592,8 +594,17 @@ function mapProxyLogRow(
       ? row.proxy_logs.errorMessage
       : "",
   );
+  const routeModelPattern = typeof row.token_routes?.modelPattern === "string"
+    ? row.token_routes.modelPattern.trim()
+    : "";
+  // 区分「模型转发」新路由与老路由；routeId 为空表示请求没有经过路由（或路由已删）。
+  const routeKind = routeModelPattern
+    ? (isForwardRoutePattern(routeModelPattern) ? "forward" : "legacy")
+    : (row.proxy_logs.routeId == null ? null : "legacy");
+
   return {
     ...row.proxy_logs,
+    routeKind,
     isStream:
       row.proxy_logs.isStream == null ? null : Boolean(row.proxy_logs.isStream),
     firstByteLatencyMs:
@@ -719,6 +730,9 @@ export async function statsRoutes(app: FastifyInstance) {
             accounts: {
               username: schema.accounts.username,
             },
+            token_routes: {
+              modelPattern: schema.tokenRoutes.modelPattern,
+            },
             sites: {
               id: schema.sites.id,
               name: schema.sites.name,
@@ -737,6 +751,10 @@ export async function statsRoutes(app: FastifyInstance) {
             eq(schema.proxyLogs.accountId, schema.accounts.id),
           )
           .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+          .leftJoin(
+            schema.tokenRoutes,
+            eq(schema.proxyLogs.routeId, schema.tokenRoutes.id),
+          )
           .leftJoin(
             schema.downstreamApiKeys,
             eq(
@@ -770,6 +788,7 @@ export async function statsRoutes(app: FastifyInstance) {
         groupName?: string | null;
         tags?: string | null;
       } | null;
+      token_routes?: { modelPattern?: string | null } | null;
     }>;
 
     let totalQuery = db
@@ -977,6 +996,9 @@ export async function statsRoutes(app: FastifyInstance) {
               proxy_logs: fields,
               accounts: schema.accounts,
               sites: schema.sites,
+              token_routes: {
+                modelPattern: schema.tokenRoutes.modelPattern,
+              },
               downstream_api_keys: {
                 id: schema.downstreamApiKeys.id,
                 name: schema.downstreamApiKeys.name,
@@ -990,6 +1012,10 @@ export async function statsRoutes(app: FastifyInstance) {
               eq(schema.proxyLogs.accountId, schema.accounts.id),
             )
             .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+            .leftJoin(
+              schema.tokenRoutes,
+              eq(schema.proxyLogs.routeId, schema.tokenRoutes.id),
+            )
             .leftJoin(
               schema.downstreamApiKeys,
               eq(
@@ -1017,6 +1043,7 @@ export async function statsRoutes(app: FastifyInstance) {
               groupName?: string | null;
               tags?: string | null;
             } | null;
+            token_routes?: { modelPattern?: string | null } | null;
           }
         | undefined;
 

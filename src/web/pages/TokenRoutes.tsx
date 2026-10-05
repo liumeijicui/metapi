@@ -57,6 +57,8 @@ import {
   normalizeRouteDisplayIconValue,
   inferEndpointTypesFromPlatform,
   getModelPatternError,
+  normalizeModelMappingValue,
+  hasIncompleteModelMappingEntries,
 } from './token-routes/utils.js';
 import { applyPriorityRailDrop, isPriorityRailNewLayerId } from './token-routes/priorityRail.js';
 import { useRouteChannels } from './token-routes/useRouteChannels.js';
@@ -81,6 +83,7 @@ type RouteEditorForm = {
   displayName: string;
   displayIcon: string;
   modelPattern: string;
+  modelMapping: string;
   sourceRouteIds: number[];
   advancedOpen: boolean;
 };
@@ -90,6 +93,7 @@ const EMPTY_ROUTE_FORM: RouteEditorForm = {
   displayName: '',
   displayIcon: '',
   modelPattern: '',
+  modelMapping: '',
   sourceRouteIds: [],
   advancedOpen: false,
 };
@@ -512,6 +516,13 @@ export default function TokenRoutes() {
       }
     }
 
+    const rawModelMapping = form.modelMapping.trim();
+    if (hasIncompleteModelMappingEntries(rawModelMapping)) {
+      toast.error('存在未填写完整的模型映射，请补全后再保存');
+      return;
+    }
+    const normalizedModelMapping = normalizeModelMappingValue(rawModelMapping);
+
     setSaving(true);
     try {
       if (editingRouteId) {
@@ -522,6 +533,7 @@ export default function TokenRoutes() {
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
+          modelMapping: normalizedModelMapping,
           ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
         });
         toast.success(routeMode === 'pattern' && modelPatternChanged ? tr('群组已更新并重新匹配通道') : tr('群组已更新'));
@@ -531,6 +543,7 @@ export default function TokenRoutes() {
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
+          modelMapping: normalizedModelMapping,
           ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
         });
         toast.success(tr('群组已创建'));
@@ -554,6 +567,7 @@ export default function TokenRoutes() {
       modelPattern: route.modelPattern || '',
       displayName: route.displayName || '',
       displayIcon: normalizeRouteDisplayIconValue(route.displayIcon),
+      modelMapping: normalizeModelMappingValue(route.modelMapping) || '',
       sourceRouteIds: routeMode === 'explicit_group' ? [...(route.sourceRouteIds || [])] : [],
       advancedOpen: routeMode === 'pattern',
     });

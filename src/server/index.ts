@@ -19,6 +19,7 @@ import { eventsRoutes } from './routes/api/events.js';
 import { taskRoutes } from './routes/api/tasks.js';
 import { testRoutes } from './routes/api/test.js';
 import { modelMonitorRoutes } from './routes/api/modelMonitor.js';
+import { modelForwardRoutes } from './routes/api/modelForward.js';
 import { assistedLoginRoutes } from './routes/api/assistedLogin.js';
 import {
   startAssistedLoginWatchSchedulers,
@@ -236,6 +237,7 @@ await app.register(updateCenterRoutes);
 await app.register(taskRoutes);
 await app.register(testRoutes);
 await app.register(modelMonitorRoutes);
+await app.register(modelForwardRoutes);
 await app.register(assistedLoginRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);

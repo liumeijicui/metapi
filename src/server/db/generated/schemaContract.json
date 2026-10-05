@@ -720,6 +720,128 @@
         }
       }
     },
+    "model_forward_rules": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "enabled": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": "true",
+          "primaryKey": false
+        },
+        "route_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "notes": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "model_forward_targets": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "rule_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "token_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "upstream_model": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "channel_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "weight": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": "10",
+          "primaryKey": false
+        },
+        "enabled": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": "true",
+          "primaryKey": false
+        },
+        "sort_order": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "oauth_route_unit_members": {
       "columns": {
         "id": {
@@ -2839,6 +2961,73 @@
       "unique": false
     },
     {
+      "name": "model_forward_rules_enabled_idx",
+      "table": "model_forward_rules",
+      "columns": [
+        "enabled"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_forward_rules_model_name_unique",
+      "table": "model_forward_rules",
+      "columns": [
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
+      "name": "model_forward_rules_route_id_idx",
+      "table": "model_forward_rules",
+      "columns": [
+        "route_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_forward_targets_account_id_idx",
+      "table": "model_forward_targets",
+      "columns": [
+        "account_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_forward_targets_channel_id_idx",
+      "table": "model_forward_targets",
+      "columns": [
+        "channel_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_forward_targets_rule_account_model_unique",
+      "table": "model_forward_targets",
+      "columns": [
+        "rule_id",
+        "account_id",
+        "upstream_model"
+      ],
+      "unique": true
+    },
+    {
+      "name": "model_forward_targets_rule_sort_idx",
+      "table": "model_forward_targets",
+      "columns": [
+        "rule_id",
+        "sort_order"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_forward_targets_site_id_idx",
+      "table": "model_forward_targets",
+      "columns": [
+        "site_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -3419,6 +3608,22 @@
       ]
     },
     {
+      "name": "model_forward_rules_model_name_unique",
+      "table": "model_forward_rules",
+      "columns": [
+        "model_name"
+      ]
+    },
+    {
+      "name": "model_forward_targets_rule_account_model_unique",
+      "table": "model_forward_targets",
+      "columns": [
+        "rule_id",
+        "account_id",
+        "upstream_model"
+      ]
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -3605,6 +3810,50 @@
         "id"
       ],
       "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_forward_targets",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_forward_targets",
+      "columns": [
+        "rule_id"
+      ],
+      "referencedTable": "model_forward_rules",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_forward_targets",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_forward_targets",
+      "columns": [
+        "token_id"
+      ],
+      "referencedTable": "account_tokens",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "SET NULL"
     },
     {
       "table": "oauth_route_unit_members",

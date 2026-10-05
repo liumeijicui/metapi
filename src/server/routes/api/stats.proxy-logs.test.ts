@@ -32,6 +32,7 @@ describe("stats proxy logs routes", () => {
     await db.delete(schema.downstreamApiKeys).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    await db.delete(schema.tokenRoutes).run();
   });
 
   afterAll(async () => {
@@ -813,5 +814,103 @@ describe("stats proxy logs routes", () => {
         expect.objectContaining({ id: site.id, name: "split-site" }),
       ]),
     );
+  });
+
+  it("labels proxy logs with forward/legacy route kind from the linked token route", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "routekind-site",
+        url: "https://routekind-site.example.com",
+        platform: "new-api",
+      })
+      .returning()
+      .get();
+
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "routekind-user",
+        accessToken: "routekind-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    const forwardRoute = await db
+      .insert(schema.tokenRoutes)
+      .values({
+        modelPattern: "forward:gpt-6-astra",
+        displayName: "gpt-6-astra",
+        enabled: true,
+      })
+      .returning()
+      .get();
+
+    const legacyRoute = await db
+      .insert(schema.tokenRoutes)
+      .values({
+        modelPattern: "gpt-6-astra",
+        modelMapping: JSON.stringify({ "gpt-6-astra": "deepseek-v4.1-flash" }),
+        enabled: true,
+      })
+      .returning()
+      .get();
+
+    await db
+      .insert(schema.proxyLogs)
+      .values([
+        {
+          accountId: account.id,
+          routeId: forwardRoute.id,
+          modelRequested: "gpt-6-astra",
+          modelActual: "deepseek-v4.1-flash",
+          status: "success",
+          isStream: 1,
+          firstByteLatencyMs: 120,
+          createdAt: formatUtcSqlDateTime(new Date("2026-03-10T08:00:00.000Z")),
+        },
+        {
+          accountId: account.id,
+          routeId: legacyRoute.id,
+          modelRequested: "gpt-6-astra",
+          modelActual: "deepseek-v4.1-flash",
+          status: "success",
+          isStream: 1,
+          firstByteLatencyMs: 200,
+          createdAt: formatUtcSqlDateTime(new Date("2026-03-10T08:01:00.000Z")),
+        },
+        {
+          accountId: account.id,
+          modelRequested: "gpt-4o",
+          modelActual: "gpt-4o",
+          status: "success",
+          isStream: 0,
+          firstByteLatencyMs: 50,
+          createdAt: formatUtcSqlDateTime(new Date("2026-03-10T08:02:00.000Z")),
+        },
+      ])
+      .run();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/stats/proxy-logs?limit=10&view=query&search=gpt-6-astra",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      items: Array<{ id: number; routeId: number | null; routeKind: string | null }>;
+    };
+    const kinds = new Map(body.items.map((item) => [item.routeId, item.routeKind]));
+    expect(kinds.get(forwardRoute.id)).toBe("forward");
+    expect(kinds.get(legacyRoute.id)).toBe("legacy");
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: `/api/stats/proxy-logs/${body.items.find((item) => item.routeId === forwardRoute.id)?.id}`,
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    expect((detailResponse.json() as { routeKind: string | null }).routeKind).toBe("forward");
   });
 });
