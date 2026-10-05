@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyReply } from 'fastify';
 import {
   ModelForwardError,
+  attachModelForwardTarget,
   createModelForwardRule,
   deleteModelForwardRule,
   listModelForwardOptions,
@@ -26,6 +27,15 @@ function parseId(value: unknown): number | null {
 export async function modelForwardRoutes(app: FastifyInstance) {
   app.get('/api/model-forward-rules', async () => {
     return { success: true, rules: await listModelForwardRules() };
+  });
+
+  // 模型监控页的一键操作：把「站点 + 模型」挂到某个对外模型的末尾。
+  app.post('/api/model-forward-attach', async (request, reply) => {
+    try {
+      return { success: true, ...(await attachModelForwardTarget(request.body ?? {})) };
+    } catch (error) {
+      return sendModelForwardError(reply, error);
+    }
   });
 
   app.get<{ Querystring: { siteId?: string } }>('/api/model-forward-options', async (request, reply) => {

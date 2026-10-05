@@ -1,3 +1,87 @@
+### 59. 站点公告只同步最近 2 天（新增保留窗口 + 历史公告清理）
+
+- **类型**：优化
+- **需求来源**：本会话（用户：「我们系统的公告，不知道是同步的上游站点多少天的，帮我改成只同步近2天的吧」）
+
+#### 问题
+- 上游（`sub2api` 的 `/api/v1/announcements?page=1&page_size=100`，以及各 new-api 站）会把很久以前的公告一起返回，同步逻辑是「来多少存多少」，导致库里积压了 7、8 月的老公告（实测库里 49 条里最老的是 7 月 15 日）。
+
+#### 改了什么
+- **保留窗口**：新增配置 `SITE_ANNOUNCEMENT_RETENTION_DAYS`（默认 `2`，已写进 `.env`）。同步时先按窗口判断：公告时间早于「现在 - 2 天」就**不落库**，计入 `skippedOld`。
+- **时间基准**：`resolveAnnouncementTimeMs` 取上游「更新 / 创建 / 开始 / 结束」时间里**最晚**的一个——一条二月创建、今天被编辑过、或维护窗口还没结束的公告都算「新」，不会被误删。
+- **无时间戳的公告保留**：像 new-api 的 `/api/notice` 只返回一段当前文本、没有任何时间戳，这类公告代表「站点当前公告」而不是历史记录，`resolveAnnouncementTimeMs` 返回 null，不受窗口过滤（否则会把站点当前公告也丢掉）。
+- **历史清理**：每轮同步后会顺手把这个站点里时间早于窗口的存量公告删掉（计入 `pruned`），所以首次启用窗口不需要手工清库；公告页也加了副标题「只同步各站点最近 2 天的公告，更早的不会入库。」
+
+#### 测试与实测
+- 新增单测：老公告被忽略（`skippedOld=1`）且不入库；存量老公告在下一轮被清掉（`pruned=1`）；无时间戳公告跨轮保留；有未来 `endsAt` 的老公告按最新时间算仍保留。
+- `siteAnnouncementService.test.ts` 5 例、store / polling / web 用例共 12 例通过；两道 `tsc` 通过。
+- 生产实测：重启后首次同步把库里 49 条公告压缩到近 2 天范围（清理掉的都是 7-9 月的历史公告）。
+
+### 58. 模型监控：「仅模型列表」站点不跟着 15 分钟轮次跑，改为每天早上 7 点后刷一次
+
+- **类型**：优化
+- **需求来源**：本会话（用户：「对于通过 sk- 拉出来的模型就不要做 15 分钟拉取一次了，他的变化很少，每天早上 7 点拉取一次就行」）
+
+#### 改了什么
+- **按状态跳过**：`executeModelMonitorFetch` 遍历站点时，上一轮状态是 `models_only`（没有监控接口、只用密钥列了模型）的站点，如果今天的刷新点上已经刷过，就整站跳过——不打上游、不写库、不清上一轮数据，页面继续沿用已有结果。
+- **每天一次**：新增配置 `MODEL_MONITOR_MODEL_LIST_REFRESH_HOUR`（默认 7），判定逻辑 `isModelListDailyRefreshDue(fetchedAt, now, refreshHour)`——`fetchedAt` 早于「今天 refreshHour:00」就算到期，当天刷过就不再刷。窗口本来就是 7:00 起，所以 7 点后的第一轮就会把它们刷掉。
+- **跳过可见**：`runModelMonitorFetch` 的汇总新增 `skippedModelListSites`，调度日志追加 `skipList=N`，并单独打一行 `[ModelMonitor] skipped N models-only sites (...)`；`/api/model-monitor/overview` 回传 `modelListRefreshHour`，页面在「仅模型列表」折叠块标注「（每天早上刷新一次）」。
+- **正常站点不受影响**：有监控接口的站点依旧每 15 分钟一轮；站点如果后来升级出了监控接口，因为每天还会重试一次，会自动从 `models_only` 回到 `ok`。
+
+#### 测试与实测
+- 新增单测：`isModelListDailyRefreshDue` 边界（今天 7:00 之后刷过 = 不到期、6:59 刷的 = 到期、昨天刷的 = 到期、无记录/坏时间戳 = 到期）；集成用例「今天刷过 → `scannedSites=0` / `skippedModelListSites=1`，不打上游且数据保留；改成昨天 → 重新拉一次并把时间戳推进」；「正常监控站点连续两轮都照跑」。
+- `modelMonitorService.test.ts` 22 例通过，web 断言 7 例通过，两道 `tsc` 通过。
+
+### 57. 模型监控降级采集：没有监控接口的站点（sub2api / 老版本 new-api）改用密钥只拉模型列表
+
+- **类型**：功能补全 + 缺陷修复
+- **需求来源**：本会话（用户：「模型监控目前都是拉的别人模型广场的数据，对于 sub2api 之类，或者老版本的 new api 可能没有这些接口，对于这部分站点，是不是可以通过 sk- 的秘钥拉取模型，耗时这些无法获取到的就不显示」）
+
+#### 改了什么
+- **降级路径**：`fetchSiteMetrics` 在「平台没有 `getPerfMetricsSummary`」或「上游返回 404 说站点没有 `/api/perf-metrics`」时，不再直接判成 `unsupported`，而是用同一份凭据（账号 JWT 或 sk- 密钥）走 `adapter.getModels()`（即 `/v1/models`）把模型名拉回来。
+- **指标留空而不是编 0**：降级拿到的模型行 `successRate / avgLatencyMs / avgTps` 全部写 `null`，`showThroughput=false`，`recentSuccess=[]`；`PerfMetricsModel` 的指标字段类型相应放宽成 `number | null`。页面成功率/延迟/吞吐显示 `—`，不显示假数据。
+- **新状态 `models_only`（页面显示「仅模型列表」）**：降级成功的站点归到 `models_only`，与 `unsupported`、`error` 区分开；页头统计加「仅模型列表 N」，站点下拉标「（仅模型）」，另有一块折叠区列出这些站点。`ModelMonitorModelView.metricsAvailable` 由站点状态推导，卡片/表格据此隐藏成功率、延迟、吞吐与采样条，只显示模型名 + 价格 + 挂到转发。
+- **失败原因写清楚**：降级也失败时把原因并进站点状态，例如「站点没有 /api/perf-metrics 接口（版本较旧）；用密钥没读回任何模型（密钥无权限或被盾拦截）」，不再笼统报一句不支持。
+- **优先 sk- 令牌**：降级时把 `api_token`（sk- 密钥）排在账号 JWT 前面——`/v1/models` 本来就是密钥接口；一份读不到会再试下一份，最多 `MODEL_LIST_FALLBACK_LIMIT = 3` 份，避免令牌多的站点把每份都发一次上游请求。
+
+#### 测试与实测
+- 新增单测：`sub2api` 无监控接口 → 降级 `models_only`（去重、空名过滤、指标全 null、`metricsAvailable=false`）；老版本 new-api 404 → 降级成功；密钥也读不回模型 → 回到 `unsupported` 且原因包含「没读回任何模型」。`modelMonitorService.test.ts` 18 例、web 源码断言 6 例、连同模型转发相关共 55 例通过；两道 `tsc` 通过。
+- 生产实测（重启后自动跑一轮，40 站点）：`799 models in 98570ms (ok=21 modelsOnly=10 empty=3 unsupported=2 error=4)`——原来 13 个「不支持」里有 10 个现在能显示模型列表（如 123nhh、Columbina 这两个站点连 `/v1/models` 也读不回来，仍如实标记为不支持并写明原因）。
+- 注意：站点一个凭据都没有时会报 `error：站点下没有可用凭据（缺少账号或密钥）`（例如 X-API），这是配置问题，比旧实现直接吞成「站点不支持」更接近真实情况。
+
+### 56. 模型监控定时采集修复（07:00-23:00 每 15 分钟）+ 一键挂到模型转发 + 站点/模型可搜索可输入
+
+- **类型**：缺陷修复 + 功能补全
+- **需求来源**：本会话（用户：「模型监控那7点到23点每15min刷新一次的定时任务好像失效了，帮我搞起来。如果到下个任务时，上次任务还没跑完，则忽略此次任务，任务都是单线程执行，一个个站跑，不要并发跑」+「模型转发里的站点名，模型名这些既能下拉搜索，又能直接输入填充」+「模型那加个操作能直接把该站点的该模型，再选择对外模型，直接挂到对外模型的最后面，重复的不允许添加，页面提醒」）
+
+#### 1) 定时采集失效的根因与修复
+- **根因一（直接原因）**：采集窗口配置默认是 `07:00-12:00`，而 `.env` 里没有覆盖，所以 12:00 之后一律不跑。用户要的是 07:00-23:00。默认值改成 23，并在 `.env` 里显式写死 `MODEL_MONITOR_WINDOW_START_HOUR=7`、`MODEL_MONITOR_WINDOW_END_HOUR=23`、`MODEL_MONITOR_INTERVAL_MS=900000`，不再依赖代码默认值。
+- **根因二（可观测性）**：旧实现跑成功、跑失败都不打日志，页面也看不到调度状态，任务假死时完全无感。现在每轮「起跑 / 跑完 / 跳过」都写 `[Scheduler] Model monitor ...` 日志，并把调度状态（`nextRunAt / lastRunStartedAt / lastRunFinishedAt / skippedRuns`）并进 `/api/model-monitor/overview`，页头显示「下次采集」与「已跳过 N 次」。
+- **重写调度逻辑**：用显式的「下次可跑时间」代替旧的 `now - 上次开始 < interval` 隐式判断，并且**启动时先 tick 一次**——进程在窗口内重启会立刻补一轮，不再白等 15 分钟（旧实现只要计时器起点不对，整段时间都可能不跑）。
+- **跳而不排队**：到点发现上一轮还在跑时，只把本次 slot 记为「跳过」并顺延到下一个 interval，不排队、不并发；单飞（`runModelMonitorFetch` 复用同一轮 promise）保持不变。
+- **单线程按站点顺序**：`executeModelMonitorFetch` 一直是 `for (const site of sites) { await ... }`，40 个站点一个一个采，没有跨站点并发；本次未改动采集顺序，只补了回归测试锁住这个行为。
+- **实测**：重启后进窗口立刻自动起跑一轮——`40 sites, 655 models in 52096ms (ok=21 empty=3 unsupported=13 error=3)`，`nextRunAt` = 起跑时间 + 15 分钟，服务 RSS 约 200MB，无内存压力。
+
+#### 2) 一键挂到模型转发
+- **后端**：新增 `attachModelForwardTarget({ siteId, upstreamModel, modelName, accountId? })` 与 `POST /api/model-forward-attach`。
+  - 对外模型已有规则 → 追加一个目标，`sort_order` 取「当前最大值 + 1」，也就是**永远挂在最后面**（优先级最低，作为兜底），并同步成 `route_channels.priority`；
+  - 对外模型还没有规则 → 顺手新建一条，只有这一个目标（接口回 `created=true`，页面提示「已新建对外模型并挂上该模型」）；
+  - 账号自动挑：优先该站点 active 且有可用令牌的账号，其次第一个 active 账号；也允许显式传 `accountId`（会校验归属站点）；
+  - **重复拒绝**：同一账号 + 同一上游模型（大小写不敏感、trim 后比较）已存在时返回 400，文案 `「<对外模型>」下已经有 <模型> 这个转发目标了，不能重复添加`。
+- **前端**：模型监控页的卡片和表格各加一个「挂到转发」按钮，弹窗里用可搜索 / 可输入的下拉选对外模型（已有规则直接选，输入新名字就新建），保存后 toast 出结果，重复挂载原样透出后端的原因。
+
+#### 3) 站点名 / 模型名可搜索 + 可直接输入
+- 新增通用 `Combobox` 组件（触发器本身就是输入框）：既能下拉搜索候选，也能直接敲字填充。
+  - `allowCustom=false`（模型转发弹窗的「站点」）：只能选候选，但直接把站点名敲进去时，完全匹配或候选只剩一个就自动补全成那一项；对不上会回退，避免「看着填了其实没生效」。
+  - `allowCustom=true`（「上游模型名」、监控页挂载弹窗的「对外模型」）：输入什么就用什么，候选只用于提示和快速挑选，回车即采用。
+  - 支持 ↑↓ 高亮、回车选中、Esc 还原、× 清空、点空白处落定。
+- 模型转发弹窗的「站点」「上游模型名」由 `ModernSelect` / `input+datalist` 换成 `Combobox`（上游模型名换掉 `datalist` 后可以真正自由输入）。
+
+- **测试**：`Combobox.test.tsx` 5 例（过滤 / 直接输入补全 / allowCustom / 回退 / 点击选中）；`modelMonitorService.test.ts` 加 4 例调度器用例（进窗口立刻补一轮且按 interval、窗口外不跑、上一轮没跑完则跳过且不并发、开关关闭不启动，共 16 例）；`modelForwardService.test.ts` 加 1 例挂载（追加末尾 / 重复拒绝 / 自动新建，共 11 例）；`routes/api/modelForward.test.ts` 加 1 例挂载接口（共 6 例）；`modelForwarding.architecture.test.ts` 加 2 例（Combobox 接线、监控页挂载接线，共 9 例）。相关 52 例全部通过；server/web 两道 `tsc` 通过；`build:server` + `vite build` 通过。
+- **端到端验证**：生产环境用真实站点实测挂载四步——新对外模型自动创建、第二个模型追加到末尾（priority 0/1）、大小写不同的重复挂载被 400 拦下、验完删除临时规则（路由与通道已清理）；自动采集一轮 40 站点成功。
+- **主要文件**：`src/server/config.ts`、`.env`、`src/server/services/modelMonitorService.ts`、`src/server/services/modelForwardService.ts`、`src/server/routes/api/modelForward.ts`、`src/web/components/Combobox.tsx`、`src/web/api.ts`、`src/web/pages/ModelMonitor.tsx`、`src/web/pages/model-forwarding/RuleEditorModal.tsx`
+- **状态**：已完成（已构建、重启并端到端校验）
+
 ### 55. 模型转发：对外模型名查重（大小写不敏感）+ 转发目标排序与单独启停
 
 - **类型**：功能补全（模型转发页）

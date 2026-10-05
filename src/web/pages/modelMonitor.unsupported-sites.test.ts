@@ -6,11 +6,27 @@ describe('ModelMonitor unsupported sites', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/web/pages/ModelMonitor.tsx'), 'utf8');
 
   it('keeps "site has no metrics endpoint" out of the failure list', () => {
-    // 「站点不支持」是已知状态，不该和真正的采集失败混在同一个列表里。
+    // 「站点不支持 / 仅模型列表」都是已知状态，不该和真正的采集失败混在一起。
     expect(source).toContain(
-      "const failedSites = sites.filter((site) => site.status !== 'ok' && site.status !== 'unsupported');",
+      "const isKnownLimited = (status: string) => status === 'unsupported' || status === 'models_only';",
+    );
+    expect(source).toContain(
+      "const failedSites = sites.filter((site) => site.status !== 'ok' && !isKnownLimited(site.status));",
     );
     expect(source).toContain("const unsupportedSites = sites.filter((site) => site.status === 'unsupported');");
+  });
+
+  it('「仅模型列表」站点标注为每天刷新一次', () => {
+    expect(source).toContain('modelListRefreshHour');
+    expect(source).toContain('每天早上刷新一次');
+  });
+
+  it('没有监控接口的站点降级成「仅模型列表」：隐藏指标、单独归类', () => {
+    expect(source).toContain("const modelsOnlySites = sites.filter((site) => site.status === 'models_only');");
+    expect(source).toContain("if (status === 'models_only') return '仅模型列表';");
+    expect(source).toContain('metricsAvailable');
+    expect(source).toContain('站点未提供监控指标');
+    expect(source).toContain('model-monitor-unsupported-list');
   });
 
   it('folds unsupported sites into a collapsed row and excludes them from coverage', () => {

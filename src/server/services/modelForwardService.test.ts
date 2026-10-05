@@ -193,6 +193,58 @@ describe('modelForwardService', () => {
     expect(priorities.get('model-b')).toBe(0);
   });
 
+  it('模型监控一键挂载：追加到末尾、重复拒绝、缺规则时自动新建', async () => {
+    const created = await service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: 'gpt-5.5',
+      modelName: 'my-public-model',
+    });
+    expect(created.created).toBe(true);
+    expect(created.rule.modelName).toBe('my-public-model');
+    expect(created.rule.targets).toHaveLength(1);
+    expect(created.rule.targets[0].upstreamModel).toBe('gpt-5.5');
+
+    // 再挂一个别的模型：追加到末尾，顺序排在后面。
+    const appended = await service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: 'gpt-6',
+      modelName: 'my-public-model',
+    });
+    expect(appended.created).toBe(false);
+    expect(appended.rule.targets.map((target) => target.upstreamModel)).toEqual(['gpt-5.5', 'gpt-6']);
+
+    // 同一个账号 + 同一个上游模型重复挂 → 直接拒绝。
+    await expect(service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: 'gpt-5.5',
+      modelName: 'my-public-model',
+    })).rejects.toThrow(/不能重复添加/);
+
+    // 大小写不同也算重复。
+    await expect(service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: 'GPT-5.5',
+      modelName: 'My-Public-Model',
+    })).rejects.toThrow(/不能重复添加/);
+
+    // 挂到不存在的站点 / 缺参数都要报错。
+    await expect(service.attachModelForwardTarget({
+      siteId: 999_999,
+      upstreamModel: 'x',
+      modelName: 'y',
+    })).rejects.toThrow();
+    await expect(service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: '',
+      modelName: 'y',
+    })).rejects.toThrow(/缺少要挂载的模型名/);
+    await expect(service.attachModelForwardTarget({
+      siteId,
+      upstreamModel: 'x',
+      modelName: '',
+    })).rejects.toThrow(/请选择或填写/);
+  });
+
   it('转发目标可以单独启用 / 停用，不影响同规则下其它目标', async () => {
     const rule = await service.createModelForwardRule({
       modelName: 'gpt-6-astra',

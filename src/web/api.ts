@@ -960,6 +960,16 @@ export const api = {
     }),
   // 模型转发（对外模型名 → 站点/上游模型/多账号）
   getModelForwardRules: () => request("/api/model-forward-rules"),
+  attachModelForwardTarget: (data: {
+    siteId: number;
+    upstreamModel: string;
+    modelName: string;
+    accountId?: number | null;
+  }) =>
+    request("/api/model-forward-attach", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   getModelForwardOptions: (siteId?: number) =>
     request(`/api/model-forward-options${buildQueryString(siteId ? { siteId } : undefined)}`),
   createModelForwardRule: (data: any) =>

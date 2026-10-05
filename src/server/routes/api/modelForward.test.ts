@@ -218,6 +218,42 @@ describe('model forward routes', () => {
     expect(badTarget.statusCode).toBe(400);
   });
 
+  it('模型监控一键挂载接口：追加到末尾，重复返回 400', async () => {
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-attach',
+      payload: { siteId, upstreamModel: 'gpt-5.5', modelName: 'public-model' },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().created).toBe(true);
+    expect(first.json().rule.targets).toHaveLength(1);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-attach',
+      payload: { siteId, upstreamModel: 'gpt-6', modelName: 'public-model' },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().created).toBe(false);
+    expect(second.json().rule.targets.map((target: { upstreamModel: string }) => target.upstreamModel))
+      .toEqual(['gpt-5.5', 'gpt-6']);
+
+    const duplicated = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-attach',
+      payload: { siteId, upstreamModel: 'gpt-5.5', modelName: 'PUBLIC-MODEL' },
+    });
+    expect(duplicated.statusCode).toBe(400);
+    expect(duplicated.json().message).toContain('不能重复添加');
+
+    const missingModel = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-attach',
+      payload: { siteId, upstreamModel: '', modelName: 'public-model' },
+    });
+    expect(missingModel.statusCode).toBe(400);
+  });
+
   it('选项中包含站点、账号与站点模型列表', async () => {
     const options = await app.inject({ method: 'GET', url: `/api/model-forward-options?siteId=${siteId}` });
     expect(options.statusCode).toBe(200);

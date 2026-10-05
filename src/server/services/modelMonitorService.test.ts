@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { config } from '../config.js';
 
 const getAdapterMock = vi.fn();
 
@@ -82,6 +83,26 @@ describe('modelMonitorService', () => {
     });
   });
 
+  describe('isModelListDailyRefreshDue', () => {
+    it('当天刷新点之后刷过就不算到期，之前的算到期', () => {
+      const now = new Date(2026, 9, 5, 9, 30); // 10-05 09:30
+      const boundary = new Date(2026, 9, 5, 7, 0).toISOString();
+      expect(service.isModelListDailyRefreshDue(boundary, now, 7)).toBe(false);
+      expect(service.isModelListDailyRefreshDue(new Date(2026, 9, 5, 8, 0).toISOString(), now, 7)).toBe(false);
+      // 今天 06:59 刷的，还没到 7 点，需要再来一次。
+      expect(service.isModelListDailyRefreshDue(new Date(2026, 9, 5, 6, 59).toISOString(), now, 7)).toBe(true);
+      // 昨天刷的，今天还没刷。
+      expect(service.isModelListDailyRefreshDue(new Date(2026, 9, 4, 23, 0).toISOString(), now, 7)).toBe(true);
+    });
+
+    it('没有记录或时间戳不可解析时按需要刷新处理', () => {
+      const now = new Date(2026, 9, 5, 9, 30);
+      expect(service.isModelListDailyRefreshDue(null, now, 7)).toBe(true);
+      expect(service.isModelListDailyRefreshDue(undefined, now, 7)).toBe(true);
+      expect(service.isModelListDailyRefreshDue('not-a-date', now, 7)).toBe(true);
+    });
+  });
+
   describe('parseStoredRecentSuccess', () => {
     it('解析存下来的采样点并丢弃坏数据', () => {
       expect(service.parseStoredRecentSuccess('[{"ts":100,"rate":99.5},{"ts":null,"rate":"70"},{"rate":"x"}]'))
@@ -139,7 +160,8 @@ describe('modelMonitorService', () => {
     it('采集成功时写入模型行与站点状态，不支持的平台单独归类', async () => {
       const demo = await seedSite();
       await seedAccount(demo.id);
-      await seedSite({ name: 'OpenAI Site', url: 'https://openai.example.com', platform: 'openai' });
+      const openaiSite = await seedSite({ name: 'OpenAI Site', url: 'https://openai.example.com', platform: 'openai' });
+      await seedAccount(openaiSite.id);
 
       getAdapterMock.mockImplementation((platform: string) => {
         if (platform !== 'new-api') return { platformName: platform };
@@ -364,6 +386,271 @@ describe('modelMonitorService', () => {
       resolveRun?.();
       await first;
       expect(service.isModelMonitorRunning()).toBe(false);
+    });
+
+    it('平台没有监控接口时降级用密钥读模型名：指标留空并标记为仅模型列表', async () => {
+      const site = await seedSite({ platform: 'sub2api' });
+      const account = await seedAccount(site.id, { accessToken: 'jwt-session-token' });
+      // 同时存在账号 JWT 和 sk- 令牌时，降级要优先用 sk- 令牌。
+      await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'default',
+        token: 'sk-demo-key',
+        isDefault: true,
+        valueStatus: 'ready',
+        enabled: true,
+      }).run();
+      const calls: unknown[][] = [];
+      const getModels = vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return ['gpt-4o', 'claude-3', 'gpt-4o', '  '];
+      });
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'sub2api',
+        getModels,
+      }));
+
+      const summary = await service.runModelMonitorFetch();
+
+      expect(calls).toHaveLength(1);
+      expect(String(calls[0][0])).toContain('demo.example.com');
+      // 第一份就是 sk- 令牌（不是账号 JWT），也说明成功一次就停止重试。
+      expect(calls[0][1]).toBe('sk-demo-key');
+      expect(summary.status).toMatchObject({ ok: 0, modelsOnly: 1, empty: 0, unsupported: 0, error: 0 });
+      expect(summary.models).toBe(2);
+
+      const siteRow = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(siteRow).toMatchObject({ status: 'models_only', modelsCount: 2 });
+      expect(siteRow.message).toContain('仅展示模型列表');
+
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(rows.map((row) => row.modelName).sort()).toEqual(['claude-3', 'gpt-4o']);
+      // 指标读不到就留空，不能编造 0。
+      expect(rows.every((row) => (
+        row.successRate === null && row.avgLatencyMs === null && row.avgTps === null
+      ))).toBe(true);
+      expect(service.parseStoredRecentSuccess(rows[0].recentSuccess)).toEqual([]);
+
+      const overview = await service.loadModelMonitorOverview();
+      expect(overview.sites[0].status).toBe('models_only');
+      expect(overview.models).toHaveLength(2);
+      expect(overview.models.every((model) => model.metricsAvailable === false)).toBe(true);
+      expect(overview.models.every((model) => model.successRate === null && model.avgLatencyMs === null)).toBe(true);
+    });
+
+    it('监控接口 404（老版本）时也降级；密钥也读不到模型时保持站点不支持', async () => {
+      const fallbackSite = await seedSite({ name: 'Old Site', url: 'https://old.example.com' });
+      await seedAccount(fallbackSite.id);
+      const unsupported = { ok: false as const, unsupported: true, message: '站点没有 /api/perf-metrics 接口（版本较旧）' };
+
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => unsupported),
+        getModels: vi.fn(async () => ['deepseek-v4-flash']),
+      }));
+      const summary = await service.runModelMonitorFetch();
+      expect(summary.status).toMatchObject({ modelsOnly: 1, unsupported: 0 });
+      const siteRow = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(siteRow).toMatchObject({ status: 'models_only', modelsCount: 1 });
+
+      // 换一个读不到模型列表的站点：结论要回到「不支持」，而不是假装成功。
+      await db.delete(schema.siteModelMonitorModels).run();
+      await db.delete(schema.siteModelMonitorSites).run();
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => unsupported),
+        getModels: vi.fn(async () => []),
+      }));
+      const second = await service.runModelMonitorFetch();
+      expect(second.status).toMatchObject({ modelsOnly: 0, unsupported: 1, error: 0 });
+      const row = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(row.status).toBe('unsupported');
+      // 失败原因要说清楚：接口没有 + 密钥也没读回模型，而不是笼统一句失败。
+      expect(row.message).toContain('版本较旧');
+      expect(row.message).toContain('没读回任何模型');
+      expect((await db.select().from(schema.siteModelMonitorModels).all())).toHaveLength(0);
+    });
+
+    it('「仅模型列表」站点当天刷过就跳过，第二天 7 点后才会再刷', async () => {
+      const site = await seedSite({ platform: 'sub2api' });
+      await seedAccount(site.id);
+      const getModelsCalls: string[] = [];
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'sub2api',
+        getModels: vi.fn(async () => {
+          getModelsCalls.push('call');
+          return ['gpt-4o'];
+        }),
+      }));
+
+      // 先把站点标记成「今天 07:30 已经用密钥刷过」。
+      const todayAt0730 = new Date();
+      todayAt0730.setHours(7, 30, 0, 0);
+      await db.insert(schema.siteModelMonitorSites).values({
+        siteId: site.id,
+        status: 'models_only',
+        message: '站点没有模型监控接口，仅展示模型列表（指标无法获取）',
+        modelsCount: 1,
+        fetchedAt: todayAt0730.toISOString(),
+      }).run();
+      await db.insert(schema.siteModelMonitorModels).values({
+        siteId: site.id,
+        modelName: 'gpt-4o',
+        fetchedAt: todayAt0730.toISOString(),
+      }).run();
+
+      const summary = await service.runModelMonitorFetch();
+      expect(summary.scannedSites).toBe(0);
+      expect(summary.skippedModelListSites).toBe(1);
+      // 跳过的站点不再打上游，也不清掉上一轮的数据。
+      expect(getModelsCalls).toHaveLength(0);
+      expect((await db.select().from(schema.siteModelMonitorModels).all())).toHaveLength(1);
+      const siteRow = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(siteRow.fetchedAt).toBe(todayAt0730.toISOString());
+
+      // 把刷新时间改成昨天：应该重新拉一次。
+      const yesterdayAt0730 = new Date();
+      yesterdayAt0730.setDate(yesterdayAt0730.getDate() - 1);
+      yesterdayAt0730.setHours(7, 30, 0, 0);
+      await db.update(schema.siteModelMonitorSites)
+        .set({ fetchedAt: yesterdayAt0730.toISOString() })
+        .run();
+      const next = await service.runModelMonitorFetch();
+      expect(next.skippedModelListSites).toBe(0);
+      expect(next.scannedSites).toBe(1);
+      expect(getModelsCalls).toHaveLength(1);
+      // 刷完时间戳被推进到今天。
+      const refreshed = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(Date.parse(refreshed.fetchedAt || '')).toBeGreaterThan(yesterdayAt0730.getTime());
+    });
+
+    it('正常监控站点不受每日刷新限制，每轮照跑', async () => {
+      const site = await seedSite();
+      await seedAccount(site.id);
+      const perf = vi.fn(async () => ({
+        ok: true as const,
+        data: { summary: null, windowStart: null, windowEnd: null, showThroughput: null, models: [model('a')] },
+      }));
+      getAdapterMock.mockImplementation(() => ({ platformName: 'new-api', getPerfMetricsSummary: perf }));
+
+      await service.runModelMonitorFetch();
+      const second = await service.runModelMonitorFetch();
+      expect(second.scannedSites).toBe(1);
+      expect(second.skippedModelListSites).toBe(0);
+      expect(perf).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('startModelMonitorScheduler', () => {
+    async function seedSiteWithAccount(name: string) {
+      const site = await db.insert(schema.sites).values({
+        name,
+        url: `https://${name}.example.com`,
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+      await db.insert(schema.accounts).values({
+        siteId: site.id, username: 'u', accessToken: 't', status: 'active',
+      }).run();
+      return site;
+    }
+
+    /** 每个站点一轮采集会调用一次适配器，用它数「跑了几轮」。 */
+    function stubAdapter(impl?: () => Promise<unknown>) {
+      getAdapterMock.mockImplementation(() => ({
+        getPerfMetricsSummary: vi.fn(impl ?? (async () => ({
+          models: [model('gpt-5.5')],
+          windowStart: 0,
+          windowEnd: 0,
+          showThroughput: true,
+        }))),
+      }));
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // 固定到窗口内的本地时间（默认 07:00-23:00）。
+      vi.setSystemTime(new Date(2026, 9, 5, 8, 0, 0));
+      stubAdapter();
+    });
+
+    afterEach(() => {
+      service.stopModelMonitorScheduler();
+      vi.useRealTimers();
+    });
+
+    it('进窗口后立刻补一轮，之后按 interval 走', async () => {
+      await seedSiteWithAccount('sched-a');
+
+      const state = service.startModelMonitorScheduler();
+      expect(state.enabled).toBe(true);
+      expect(state.windowEndHour).toBe(23);
+      expect(state.nextRunAt).not.toBeNull();
+
+      // 启动即在窗口内 → 立刻起跑一轮。
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAdapterMock).toHaveBeenCalledTimes(1);
+      expect(service.getModelMonitorSchedulerState().lastRunStartedAt).not.toBeNull();
+
+      // 还不到 interval：tick 再多次也不重复跑。
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(getAdapterMock).toHaveBeenCalledTimes(1);
+
+      // 跨过 interval：再跑一轮。
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      expect(getAdapterMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('窗口外不采集，进窗口后的第一次 tick 立刻补一轮', async () => {
+      await seedSiteWithAccount('sched-b');
+      vi.setSystemTime(new Date(2026, 9, 5, 6, 0, 0));
+
+      service.startModelMonitorScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAdapterMock).toHaveBeenCalledTimes(0);
+
+      // 6:00 → 7:01，跨过窗口起点后应立刻起跑。
+      await vi.advanceTimersByTimeAsync(61 * 60_000);
+      expect(getAdapterMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('上一轮没跑完时跳过本次，不排队也不并发', async () => {
+      await seedSiteWithAccount('sched-c');
+      // 放大超时，让这一轮一直挂在进行中。
+      const originalTimeout = config.modelMonitorTimeoutMs;
+      config.modelMonitorTimeoutMs = 24 * 60 * 60 * 1000;
+      let releaseRun: (() => void) | null = null;
+      const hanging = new Promise<never>((resolve) => { releaseRun = () => resolve(undefined as never); });
+      stubAdapter(() => hanging);
+
+      try {
+        service.startModelMonitorScheduler();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getAdapterMock).toHaveBeenCalledTimes(1);
+        expect(service.isModelMonitorRunning()).toBe(true);
+
+        // 下一个 slot 到点时上一轮还挂着 → 跳过，且不会并发起第二轮。
+        await vi.advanceTimersByTimeAsync(16 * 60_000);
+        expect(getAdapterMock).toHaveBeenCalledTimes(1);
+        expect(service.getModelMonitorSchedulerState().skippedRuns).toBeGreaterThan(0);
+
+        releaseRun?.();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        config.modelMonitorTimeoutMs = originalTimeout;
+      }
+    });
+
+    it('关闭开关时不启动调度器', () => {
+      const originalEnabled = config.modelMonitorEnabled;
+      config.modelMonitorEnabled = false;
+      try {
+        const state = service.startModelMonitorScheduler();
+        expect(state.enabled).toBe(false);
+        expect(state.nextRunAt).toBeNull();
+      } finally {
+        config.modelMonitorEnabled = originalEnabled;
+      }
     });
   });
 

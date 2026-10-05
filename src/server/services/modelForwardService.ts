@@ -461,6 +461,105 @@ export async function updateModelForwardRule(id: number, raw: unknown): Promise<
 
 export type ModelForwardTargetMoveAction = 'up' | 'down' | 'top';
 
+/** 站点里挑一个可用账号：优先 active + 有可用令牌的，其次第一个 active。 */
+async function pickSiteAccountId(siteId: number): Promise<number | null> {
+  const rows = await db.select({ account: schema.accounts, token: schema.accountTokens })
+    .from(schema.accounts)
+    .leftJoin(schema.accountTokens, and(
+      eq(schema.accountTokens.accountId, schema.accounts.id),
+      eq(schema.accountTokens.isDefault, true),
+    ))
+    .where(eq(schema.accounts.siteId, siteId))
+    .orderBy(asc(schema.accounts.id))
+    .all();
+  const active = rows.filter((row) => row.account.status === 'active');
+  const pool = active.length > 0 ? active : rows;
+  const usable = pool.find((row) => row.token && isUsableAccountToken(row.token));
+  return (usable ?? pool[0])?.account.id ?? null;
+}
+
+export type ModelForwardAttachInput = {
+  siteId: number;
+  upstreamModel: string;
+  modelName: string;
+  accountId?: number | null;
+};
+
+export type ModelForwardAttachResult = {
+  created: boolean;
+  rule: ModelForwardRuleRow;
+};
+
+/**
+ * 把「某个站点的某个模型」挂到对外模型转发的末尾（模型监控页的一键操作）。
+ * - 对外模型已有规则 → 追加一个目标，sortOrder 放到最后（优先级最低，兜底用）；
+ * - 对外模型还没有规则 → 顺手建一条，只有这一个目标；
+ * - 同一个账号 + 同一个上游模型已经在规则里 → 直接报错，不重复挂。
+ */
+export async function attachModelForwardTarget(raw: unknown): Promise<ModelForwardAttachResult> {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const siteId = normalizePositiveInt(body.siteId);
+  const upstreamModel = normalizeModelName(body.upstreamModel);
+  const modelName = normalizeModelName(body.modelName);
+  if (!siteId) throw new ModelForwardError('缺少站点');
+  if (!upstreamModel) throw new ModelForwardError('缺少要挂载的模型名');
+  if (!modelName) throw new ModelForwardError('请选择或填写要挂到的对外模型名');
+
+  const requestedAccountId = normalizePositiveInt(body.accountId);
+  const accountId = requestedAccountId ?? await pickSiteAccountId(siteId);
+  if (!accountId) throw new ModelForwardError('该站点下没有可用账号，先在「账号」页面添加');
+  const account = await db.select().from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!account) throw new ModelForwardError('账号不存在');
+  if (account.siteId !== siteId) throw new ModelForwardError('账号不属于该站点');
+
+  const existingRule = await findRuleByModelName(modelName);
+  if (!existingRule) {
+    const created = await createModelForwardRule({
+      modelName,
+      enabled: true,
+      targets: [{ siteId, accountId, upstreamModel }],
+    });
+    return { created: true, rule: created };
+  }
+
+  const rule = await db.select().from(schema.modelForwardRules)
+    .where(eq(schema.modelForwardRules.id, existingRule.id))
+    .get();
+  if (!rule) throw new ModelForwardError('转发规则不存在');
+
+  const targets = await db.select().from(schema.modelForwardTargets)
+    .where(eq(schema.modelForwardTargets.ruleId, rule.id))
+    .orderBy(asc(schema.modelForwardTargets.sortOrder), asc(schema.modelForwardTargets.id))
+    .all();
+  const normalizedUpstream = upstreamModel.toLowerCase();
+  const duplicated = targets.find((target) => (
+    target.accountId === accountId
+    && target.upstreamModel.trim().toLowerCase() === normalizedUpstream
+  ));
+  if (duplicated) {
+    throw new ModelForwardError(`「${rule.modelName}」下已经有 ${upstreamModel} 这个转发目标了，不能重复添加`);
+  }
+
+  const nextSortOrder = targets.reduce((max, target) => Math.max(max, target.sortOrder ?? 0), -1) + 1;
+  await db.insert(schema.modelForwardTargets).values({
+    ruleId: rule.id,
+    siteId,
+    accountId,
+    tokenId: null,
+    upstreamModel,
+    weight: 10,
+    enabled: true,
+    sortOrder: nextSortOrder,
+  }).run();
+
+  await syncModelForwardRule(rule.id);
+  const updated = (await listModelForwardRules()).find((item) => item.id === rule.id);
+  if (!updated) throw new ModelForwardError('挂载转发目标失败');
+  return { created: false, rule: updated };
+}
+
 /** 按当前顺序重排 sortOrder，保证是 0..n-1 的连续整数。 */
 async function renumberTargetSortOrders(ruleId: number): Promise<void> {
   const rows = await db.select({ id: schema.modelForwardTargets.id })

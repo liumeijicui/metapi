@@ -230,11 +230,16 @@ export interface PerfMetricsSample {
   rate: number;
 }
 
+/**
+ * 指标为 null 表示这个平台没有监控接口，只拿到了模型名（例如 sub2api
+ * 或老版本 new-api，只能靠 sk- 密钥读 `/v1/models`）。页面把 null 显示成
+ * 「—」，不会编造 0 来假装有数据。
+ */
 export interface PerfMetricsModel {
   modelName: string;
-  avgLatencyMs: number;
-  successRate: number;
-  avgTps: number;
+  avgLatencyMs: number | null;
+  successRate: number | null;
+  avgTps: number | null;
   recentSuccess: PerfMetricsSample[];
 }
 

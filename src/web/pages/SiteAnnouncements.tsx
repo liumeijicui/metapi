@@ -157,7 +157,10 @@ export default function SiteAnnouncements() {
   return (
     <div className="animate-fade-in">
       <div className="page-header">
-        <h2 className="page-title">{tr('站点公告')}</h2>
+        <div>
+          <h2 className="page-title">{tr('站点公告')}</h2>
+          <div className="page-subtitle">{tr('只同步各站点最近 2 天的公告，更早的不会入库。')}</div>
+        </div>
         <div className="page-actions">
           <button
             onClick={() => load(true)}

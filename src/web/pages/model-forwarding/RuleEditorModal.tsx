@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
-import ModernSelect from '../../components/ModernSelect.js';
+import Combobox from '../../components/Combobox.js';
 import { tr } from '../../i18n.js';
 import type {
   ModelForwardAccountOption,
@@ -97,7 +97,11 @@ export default function RuleEditorModal({
   }, [options.accounts]);
 
   const siteOptions = useMemo(
-    () => options.sites.map((site) => ({ value: String(site.id), label: site.name })),
+    () => options.sites.map((site) => ({
+      value: String(site.id),
+      label: site.name,
+      description: site.status === 'active' ? undefined : site.status,
+    })),
     [options.sites],
   );
 
@@ -237,31 +241,39 @@ export default function RuleEditorModal({
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{tr('站点')}</span>
-                    <ModernSelect
+                    {/* 站点：可下拉搜索，也可以直接把站点名敲进去（对上就自动补全）。 */}
+                    <Combobox
                       value={target.siteId === null ? '' : String(target.siteId)}
                       onChange={(nextValue) => {
                         const nextSiteId = Number(nextValue);
-                        updateTarget(index, { siteId: nextSiteId, accountIds: [] });
+                        updateTarget(index, { siteId: Number.isSafeInteger(nextSiteId) && nextSiteId > 0 ? nextSiteId : null, accountIds: [] });
                         if (Number.isSafeInteger(nextSiteId) && nextSiteId > 0) onLoadSiteModels(nextSiteId);
                       }}
-                      options={siteOptions}
-                      placeholder={tr('选择站点')}
+                      options={siteOptions.map((site) => ({
+                        value: site.value,
+                        label: site.label,
+                        description: site.description,
+                      }))}
+                      placeholder={tr('搜索或输入站点名')}
                       emptyLabel={tr('暂无站点')}
+                      data-testid={`model-forward-site-${index}`}
                     />
                   </label>
 
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{tr('上游模型名')}</span>
-                    <input
-                      style={INPUT_STYLE}
-                      list={`model-forward-site-models-${index}`}
-                      placeholder={tr('该站点上的模型名，例如 deepseek-v4.1-flash')}
+                    {/* 上游模型名：可搜索该站点的模型清单，也可以直接输入任意模型名。 */}
+                    <Combobox
                       value={target.upstreamModel}
-                      onChange={(event) => updateTarget(index, { upstreamModel: event.target.value })}
+                      onChange={(nextValue) => updateTarget(index, { upstreamModel: nextValue })}
+                      options={(target.upstreamModel.trim() && !models.includes(target.upstreamModel.trim())
+                        ? [target.upstreamModel.trim(), ...models]
+                        : models).slice(0, 500).map((name) => ({ value: name, label: name }))}
+                      allowCustom
+                      placeholder={tr('搜索或输入模型名，例如 deepseek-v4.1-flash')}
+                      emptyLabel={tr('该站点还没有已知模型，直接输入即可')}
+                      data-testid={`model-forward-upstream-${index}`}
                     />
-                    <datalist id={`model-forward-site-models-${index}`}>
-                      {models.slice(0, 500).map((name) => <option key={name} value={name} />)}
-                    </datalist>
                   </label>
                 </div>
 

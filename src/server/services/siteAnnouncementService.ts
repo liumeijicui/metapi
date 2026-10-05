@@ -1,4 +1,5 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
+import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { getAdapter } from './platforms/index.js';
@@ -14,8 +15,80 @@ export type SiteAnnouncementSyncResult = {
   notifications: number;
   events: number;
   failed: number;
+  /** 上游返回、但时间早于保留窗口、被直接忽略的公告数。 */
+  skippedOld: number;
+  /** 从库里清掉的、早于保留窗口的历史公告数。 */
+  pruned: number;
   failedSites: Array<{ siteId: number; siteName: string; message: string }>;
 };
+
+/** 公告保留窗口（天）：只同步/保留最近这么多天的公告。 */
+export function resolveSiteAnnouncementRetentionDays(raw: number | undefined): number {
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(1, Math.trunc(raw as number));
+}
+
+function parseAnnouncementTimeMs(raw: string | null | undefined): number | null {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * 公告的时间基准：取上游「创建 / 更新 / 开始 / 结束」里最晚的一个。
+ * 这个值用于判断公告是否落在保留窗口内——一条很老的公告如果今天被更新过，
+ * 或者维护窗口还没结束，都应该保留。
+ *
+ * 全部缺失时返回 null：这类没有时间戳的公告（例如 new-api 的站点公告
+ * `/api/notice` 只有一段当前文本）代表「当前有效」，不受窗口过滤。
+ */
+export function resolveAnnouncementTimeMs(input: {
+  upstreamCreatedAt?: string | null;
+  upstreamUpdatedAt?: string | null;
+  startsAt?: string | null;
+  endsAt?: string | null;
+}): number | null {
+  const candidates = [
+    input.upstreamUpdatedAt,
+    input.upstreamCreatedAt,
+    input.startsAt,
+    input.endsAt,
+  ]
+    .map(parseAnnouncementTimeMs)
+    .filter((value): value is number => value !== null);
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+/**
+ * 删掉这个站点里时间早于保留窗口的公告。时间戳缺失的行不动，
+ * 它们代表站点当前公告而不是历史记录。
+ */
+async function pruneOldSiteAnnouncements(siteId: number, cutoffMs: number): Promise<number> {
+  const rows = await db.select({
+    id: schema.siteAnnouncements.id,
+    upstreamCreatedAt: schema.siteAnnouncements.upstreamCreatedAt,
+    upstreamUpdatedAt: schema.siteAnnouncements.upstreamUpdatedAt,
+    startsAt: schema.siteAnnouncements.startsAt,
+    endsAt: schema.siteAnnouncements.endsAt,
+  })
+    .from(schema.siteAnnouncements)
+    .where(eq(schema.siteAnnouncements.siteId, siteId))
+    .all();
+
+  const staleIds = rows
+    .filter((row) => {
+      const timeMs = resolveAnnouncementTimeMs(row);
+      return timeMs !== null && timeMs < cutoffMs;
+    })
+    .map((row) => row.id);
+
+  if (!staleIds.length) return 0;
+  await db.delete(schema.siteAnnouncements)
+    .where(inArray(schema.siteAnnouncements.id, staleIds))
+    .run();
+  return staleIds.length;
+}
 
 function toStoredPayload(rawPayload: unknown): string | null {
   if (rawPayload === undefined) return null;
@@ -75,9 +148,13 @@ export async function syncSiteAnnouncements(options?: { siteId?: number | null }
     notifications: 0,
     events: 0,
     failed: 0,
+    skippedOld: 0,
+    pruned: 0,
     failedSites: [],
   };
 
+  const retentionDays = resolveSiteAnnouncementRetentionDays(config.siteAnnouncementRetentionDays);
+  const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const sites = await listTargetSites(options?.siteId ?? null);
 
   for (const site of sites) {
@@ -94,6 +171,13 @@ export async function syncSiteAnnouncements(options?: { siteId?: number | null }
       const seenAt = formatUtcSqlDateTime(new Date());
 
       for (const announcement of announcements) {
+        // 上游会把很久以前的公告一起返回，只留最近 N 天，老公告直接不落库。
+        const announcementTimeMs = resolveAnnouncementTimeMs(announcement);
+        if (announcementTimeMs !== null && announcementTimeMs < cutoffMs) {
+          result.skippedOld += 1;
+          continue;
+        }
+
         const existing = await db.select()
           .from(schema.siteAnnouncements)
           .where(and(
@@ -154,6 +238,9 @@ export async function syncSiteAnnouncements(options?: { siteId?: number | null }
         await sendNotification(title, message, announcement.level);
         result.notifications += 1;
       }
+
+      // 顺手清掉这个站点之前已经存进来的历史公告（首次启用窗口时用得上）。
+      result.pruned += await pruneOldSiteAnnouncements(site.id, cutoffMs);
     } catch (error) {
       result.failed += 1;
       result.failedSites.push({

@@ -88,6 +88,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     logCleanupUsageLogsEnabled: parseBoolean(env.LOG_CLEANUP_USAGE_LOGS_ENABLED, false),
     logCleanupProgramLogsEnabled: parseBoolean(env.LOG_CLEANUP_PROGRAM_LOGS_ENABLED, false),
     logCleanupRetentionDays: Math.max(1, Math.trunc(parseNumber(env.LOG_CLEANUP_RETENTION_DAYS, 30))),
+    // 站点公告只同步/保留最近这么多天：上游会把很久以前的公告一起返回，
+    // 全量入库既没意义又让公告页越来越长。
+    siteAnnouncementRetentionDays: Math.max(1, Math.trunc(parseNumber(env.SITE_ANNOUNCEMENT_RETENTION_DAYS, 2))),
     webhookUrl: env.WEBHOOK_URL || '',
     barkUrl: env.BARK_URL || '',
     webhookEnabled: parseBoolean(env.WEBHOOK_ENABLED, true),
@@ -148,12 +151,16 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),
     modelAvailabilityProbeTimeoutMs: Math.max(3_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 15_000))),
     modelAvailabilityProbeConcurrency: Math.max(1, Math.min(16, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_CONCURRENCY, 1)))),
-    // 模型监控采集：默认每天 07:00-12:00（[start, end) 小时区间）每 15 分钟一轮。
+    // 模型监控采集：默认每天 07:00-23:00（[start, end) 小时区间）每 15 分钟一轮。
+    // 窗口内单线程按站点顺序一个个采集；上一轮没跑完时直接跳过本次，不排队不并发。
     modelMonitorEnabled: parseBoolean(env.MODEL_MONITOR_ENABLED, true),
     modelMonitorIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_MONITOR_INTERVAL_MS, 15 * 60 * 1000))),
     modelMonitorTimeoutMs: Math.max(5_000, Math.trunc(parseNumber(env.MODEL_MONITOR_TIMEOUT_MS, 30_000))),
     modelMonitorWindowStartHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_START_HOUR, 7)))),
-    modelMonitorWindowEndHour: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_END_HOUR, 12)))),
+    modelMonitorWindowEndHour: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_END_HOUR, 23)))),
+    // 没有监控接口、只能用密钥列模型的站点（models_only），模型列表变化很少，
+    // 不跟着 15 分钟轮次跑，只在每天这个小时之后刷一次。
+    modelMonitorModelListRefreshHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_MODEL_LIST_REFRESH_HOUR, 7)))),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),

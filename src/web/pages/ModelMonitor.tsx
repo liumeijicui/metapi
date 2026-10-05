@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
+import CenteredModal from '../components/CenteredModal.js';
+import Combobox from '../components/Combobox.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -19,6 +21,8 @@ type ModelRow = {
   windowStart: number | null;
   windowEnd: number | null;
   showThroughput: boolean | null;
+  /** false = 站点没有监控接口，这一行只有模型名，页面不显示指标。 */
+  metricsAvailable?: boolean;
   /** 'token' = 每 100 万 token 的美元价，'call' = 每次调用的美元价。 */
   pricingUnit: 'token' | 'call' | null;
   inputPrice: number | null;
@@ -43,6 +47,19 @@ type Overview = {
   windowStartHour: number;
   windowEndHour: number;
   intervalMs: number;
+  /** 「仅模型列表」站点每天几点后刷新一次（其余 15 分钟轮次会跳过它们）。 */
+  modelListRefreshHour?: number;
+  scheduler?: {
+    enabled: boolean;
+    intervalMs: number;
+    windowStartHour: number;
+    windowEndHour: number;
+    running: boolean;
+    lastRunStartedAt: string | null;
+    lastRunFinishedAt: string | null;
+    skippedRuns: number;
+    nextRunAt: string | null;
+  };
   modelOptions: Array<{ modelName: string; siteCount: number }>;
   sites: SiteRow[];
   models: ModelRow[];
@@ -163,6 +180,7 @@ function formatRelative(value: string | null | undefined): string {
 function siteStatusLabel(status: string): string {
   if (status === 'ok') return '采集正常';
   if (status === 'empty') return '本轮无数据';
+  if (status === 'models_only') return '仅模型列表';
   if (status === 'unsupported') return '站点不支持';
   if (status === 'error') return '采集失败';
   return '等待采集';
@@ -171,6 +189,7 @@ function siteStatusLabel(status: string): string {
 function siteStatusClass(status: string): string {
   if (status === 'ok') return 'badge badge-success';
   if (status === 'empty') return 'badge badge-muted';
+  if (status === 'models_only') return 'badge badge-info';
   if (status === 'unsupported') return 'badge badge-info';
   if (status === 'error') return 'badge badge-error';
   return 'badge badge-muted';
@@ -203,8 +222,58 @@ export default function ModelMonitor() {
   const [sortKey, setSortKey] = useState('success');
   const [showFailures, setShowFailures] = useState(false);
   const [showUnsupported, setShowUnsupported] = useState(false);
+  const [showModelsOnly, setShowModelsOnly] = useState(false);
   const [copiedModel, setCopiedModel] = useState<string | null>(null);
+  const [attachTarget, setAttachTarget] = useState<ModelRow | null>(null);
+  const [attachModelName, setAttachModelName] = useState('');
+  const [attachBusy, setAttachBusy] = useState(false);
+  const [forwardNames, setForwardNames] = useState<string[]>([]);
+  const [forwardNamesLoaded, setForwardNamesLoaded] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 打开「挂到转发」弹窗时再拉一次对外模型清单，保证是当前的。
+  const openAttach = useCallback(async (model: ModelRow) => {
+    setAttachTarget(model);
+    setAttachModelName(model.modelName);
+    if (forwardNamesLoaded) return;
+    try {
+      const res = await api.getModelForwardRules();
+      const names = Array.isArray(res?.rules)
+        ? res.rules.map((rule: { modelName?: string }) => String(rule.modelName || '')).filter(Boolean)
+        : [];
+      setForwardNames(names);
+      setForwardNamesLoaded(true);
+    } catch {
+      setForwardNames([]);
+    }
+  }, [forwardNamesLoaded]);
+
+  const submitAttach = useCallback(async () => {
+    if (!attachTarget) return;
+    const modelName = attachModelName.trim();
+    if (!modelName) {
+      toast.error(tr('请选择或填写要挂到的对外模型名'));
+      return;
+    }
+    setAttachBusy(true);
+    try {
+      const res = await api.attachModelForwardTarget({
+        siteId: attachTarget.siteId,
+        upstreamModel: attachTarget.modelName,
+        modelName,
+      });
+      toast.success(res?.created
+        ? tr('已新建对外模型并挂上该模型')
+        : tr('已挂到该对外模型的最后面'));
+      setAttachTarget(null);
+      setForwardNamesLoaded(false);
+    } catch (error: any) {
+      // 重复添加等业务错误由后端给出可读原因，这里原样透出。
+      toast.error(error?.message || tr('挂载失败'));
+    } finally {
+      setAttachBusy(false);
+    }
+  }, [attachTarget, attachModelName, toast]);
 
   // 模型名是复制按钮：手打一长串模型名太费劲，点一下就拿走。
   const copyModelName = useCallback((name: string) => {
@@ -273,15 +342,19 @@ export default function ModelMonitor() {
   const modelOptions = overview?.modelOptions ?? [];
   // 站点自己就没有这个接口，属于「已知无法采集」，和真正需要关注的失败
   // 分开：默认不占版面，只在需要时展开看一眼。
-  const failedSites = sites.filter((site) => site.status !== 'ok' && site.status !== 'unsupported');
+  const isKnownLimited = (status: string) => status === 'unsupported' || status === 'models_only';
+  const failedSites = sites.filter((site) => site.status !== 'ok' && !isKnownLimited(site.status));
   const unsupportedSites = sites.filter((site) => site.status === 'unsupported');
+  // 没有监控接口、但用密钥读回了模型名的站点：有数据可看，只是没有指标。
+  const modelsOnlySites = sites.filter((site) => site.status === 'models_only');
 
   const stats = useMemo(() => {
     const okSites = sites.filter((site) => site.status === 'ok').length;
     const unsupported = sites.filter((site) => site.status === 'unsupported').length;
+    const modelsOnly = sites.filter((site) => site.status === 'models_only').length;
     const rates = models.map((model) => model.successRate).filter((rate): rate is number => rate != null);
     const average = rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : null;
-    return { okSites, totalSites: sites.length - unsupported, unsupported, average };
+    return { okSites, totalSites: sites.length - unsupported, unsupported, modelsOnly, average };
   }, [models, sites]);
 
   const windowText = overview
@@ -294,9 +367,19 @@ export default function ModelMonitor() {
         <div>
           <h2 className="page-title">{tr('模型监控')}</h2>
           <div className="page-subtitle">
-            {tr('取自各站点自己的模型监控接口，只保留最近一轮；')}
+            {tr('取自各站点自己的模型监控接口，只保留最近一轮；没有监控接口的站点用密钥只列模型名，每天早上刷新一次。')}
             <span title={formatTimestamp(overview?.updatedAt)}>{formatRelative(overview?.updatedAt)}</span>
             {overview ? ` · ${tr('每 15 分钟采集一次')}${windowText}` : ''}
+            {overview?.scheduler?.nextRunAt ? (
+              <span title={formatTimestamp(overview.scheduler.nextRunAt)}>
+                {` · ${tr('下次采集')} ${formatRelative(overview.scheduler.nextRunAt)}`}
+              </span>
+            ) : null}
+            {overview?.scheduler?.skippedRuns ? (
+              <span title={tr('上一轮还没跑完时跳过本次，避免并发采集')}>
+                {` · ${tr('已跳过')} ${overview.scheduler.skippedRuns} ${tr('次')}`}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="page-actions">
@@ -334,6 +417,12 @@ export default function ModelMonitor() {
               {stats.okSites} / {stats.totalSites}
             </strong>
           </div>
+          {stats.modelsOnly ? (
+            <div className="stat-card-row">
+              <span>{tr('仅模型列表')}</span>
+              <strong title={tr('站点没有监控接口，只用密钥取到了模型名')}>{stats.modelsOnly}</strong>
+            </div>
+          ) : null}
         </div>
         <div className="stat-card">
           <div className="stat-card-row">
@@ -379,7 +468,9 @@ export default function ModelMonitor() {
                 value: String(site.siteId),
                 label: site.status === 'unsupported'
                   ? `${site.siteName}${tr('（不支持）')}`
-                  : site.siteName,
+                  : site.status === 'models_only'
+                    ? `${site.siteName}${tr('（仅模型）')}`
+                    : site.siteName,
               })),
             ]}
             size="sm"
@@ -446,6 +537,37 @@ export default function ModelMonitor() {
         </div>
       ) : null}
 
+      {modelsOnlySites.length ? (
+        <div className="model-monitor-unsupported">
+          <button
+            className="model-monitor-unsupported-head"
+            onClick={() => setShowModelsOnly((current) => !current)}
+          >
+            <span className="badge badge-info">{tr('仅模型列表')}</span>
+            <span>
+              {modelsOnlySites.length} {tr('个站点没有监控接口，已用密钥只取回模型名')}
+              {overview?.modelListRefreshHour != null
+                ? tr('（每天早上刷新一次）')
+                : null}
+            </span>
+            <span>{showModelsOnly ? tr('收起') : tr('展开')}</span>
+          </button>
+          {showModelsOnly ? (
+            <div className="model-monitor-unsupported-list">
+              {modelsOnlySites.map((site) => (
+                site.url ? (
+                  <a key={site.siteId} href={site.url} target="_blank" rel="noreferrer" title={site.message || site.url}>
+                    {site.siteName}
+                  </a>
+                ) : (
+                  <span key={site.siteId} title={site.message || ''}>{site.siteName}</span>
+                )
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {unsupportedSites.length ? (
         <div className="model-monitor-unsupported">
           <button
@@ -487,7 +609,9 @@ export default function ModelMonitor() {
         </div>
       ) : view === 'cards' ? (
         <div className="model-monitor-grid">
-          {models.map((model) => (
+          {models.map((model) => {
+            const metricsAvailable = model.metricsAvailable !== false;
+            return (
             <div className="card model-monitor-card" key={`${model.siteId}:${model.modelName}`}>
               <div className="model-monitor-card-head">
                 <button
@@ -501,9 +625,13 @@ export default function ModelMonitor() {
                     {copiedModel === model.modelName ? tr('已复制') : tr('复制')}
                   </span>
                 </button>
-                <span className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
-                  {formatPercent(model.successRate)}
-                </span>
+                {metricsAvailable ? (
+                  <span className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
+                    {formatPercent(model.successRate)}
+                  </span>
+                ) : (
+                  <span className="badge badge-info" title={tr('站点没有模型监控接口，只有模型名')}>{tr('仅模型')}</span>
+                )}
               </div>
               {model.siteUrl ? (
                 <a
@@ -518,24 +646,44 @@ export default function ModelMonitor() {
               ) : (
                 <div className="model-monitor-card-site">{model.siteName}</div>
               )}
-              <SuccessBars samples={model.recentSuccess} windowStart={model.windowStart} />
-              <div className="model-monitor-card-metrics">
-                <span title={tr('平均延迟')}>
-                  <em>{tr('延迟')}</em>
-                  {formatLatency(model.avgLatencyMs)}
-                </span>
-                {model.showThroughput !== false ? (
-                  <span title={tr('吞吐')}>
-                  <em>{tr('吞吐量')}</em>
-                    {formatThroughput(model.avgTps)}
+              {metricsAvailable ? (
+                <>
+                  <SuccessBars samples={model.recentSuccess} windowStart={model.windowStart} />
+                  <div className="model-monitor-card-metrics">
+                    <span title={tr('平均延迟')}>
+                      <em>{tr('延迟')}</em>
+                      {formatLatency(model.avgLatencyMs)}
+                    </span>
+                    {model.showThroughput !== false ? (
+                      <span title={tr('吞吐')}>
+                      <em>{tr('吞吐量')}</em>
+                        {formatThroughput(model.avgTps)}
+                      </span>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <div className="model-monitor-card-metrics">
+                  <span title={tr('站点没有监控接口，成功率/延迟/吞吐均无法获取')}>
+                    {tr('站点未提供监控指标')}
                   </span>
-                ) : null}
-              </div>
+                </div>
+              )}
               {formatModelPrice(model) ? (
                 <div className="model-monitor-card-price">{formatModelPrice(model)}</div>
               ) : null}
+              <button
+                type="button"
+                className="btn btn-link"
+                style={{ fontSize: 11.5, padding: 0, alignSelf: 'flex-start' }}
+                title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
+                onClick={() => void openAttach(model)}
+              >
+                {tr('挂到转发')}
+              </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -549,10 +697,13 @@ export default function ModelMonitor() {
                 <th>{tr('吞吐')}</th>
                 <th>{tr('价格')}</th>
                 <th>{tr('最近更新')}</th>
+                <th>{tr('操作')}</th>
               </tr>
             </thead>
             <tbody>
-              {models.map((model) => (
+              {models.map((model) => {
+                const metricsAvailable = model.metricsAvailable !== false;
+                return (
                 <tr key={`${model.siteId}:${model.modelName}`}>
                   <td>
                     <button
@@ -574,15 +725,29 @@ export default function ModelMonitor() {
                       </a>
                     ) : model.siteName}
                   </td>
-                  <td className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
-                    {formatPercent(model.successRate)}
+                  <td className={metricsAvailable ? `model-monitor-rate is-${resolveRateLevel(model.successRate)}` : ''}>
+                    {metricsAvailable ? formatPercent(model.successRate) : (
+                      <span className="badge badge-info" title={tr('站点没有监控接口，只有模型名')}>{tr('仅模型')}</span>
+                    )}
                   </td>
-                  <td>{formatLatency(model.avgLatencyMs)}</td>
-                  <td>{formatThroughput(model.avgTps)}</td>
+                  <td>{metricsAvailable ? formatLatency(model.avgLatencyMs) : '—'}</td>
+                  <td>{metricsAvailable ? formatThroughput(model.avgTps) : '—'}</td>
                   <td className="model-monitor-price">{formatModelPrice(model) || '—'}</td>
                   <td title={formatTimestamp(model.fetchedAt)}>{formatRelative(model.fetchedAt)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn-link"
+                      style={{ fontSize: 12, padding: 0 }}
+                      title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
+                      onClick={() => void openAttach(model)}
+                    >
+                      {tr('挂到转发')}
+                    </button>
+                  </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -597,6 +762,78 @@ export default function ModelMonitor() {
           <i className="model-monitor-bar is-unknown" /> {tr('无采样')}
         </span>
       </div>
+
+      <CenteredModal
+        open={attachTarget !== null}
+        onClose={() => { if (!attachBusy) setAttachTarget(null); }}
+        title={tr('挂到模型转发')}
+        maxWidth={560}
+        footer={(
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={attachBusy}
+              onClick={() => setAttachTarget(null)}
+            >
+              {tr('取消')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={attachBusy}
+              onClick={() => void submitAttach()}
+            >
+              {attachBusy ? tr('挂载中…') : tr('挂到末尾')}
+            </button>
+          </div>
+        )}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13 }}>
+          <div style={{ color: 'var(--color-text-secondary)' }}>
+            {tr('把下面这个「站点 + 模型」挂到某个对外模型转发的最后面；同一个模型重复挂会被拒绝。')}
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              padding: '10px 12px',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-bg-subtle, transparent)',
+            }}
+          >
+            <div>
+              <span style={{ color: 'var(--color-text-muted)' }}>{tr('站点')}：</span>
+              <strong>{attachTarget?.siteName}</strong>
+            </div>
+            <div>
+              <span style={{ color: 'var(--color-text-muted)' }}>{tr('模型')}：</span>
+              <strong>{attachTarget?.modelName}</strong>
+            </div>
+          </div>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+              {tr('挂到哪个对外模型')}
+            </span>
+            <Combobox
+              value={attachModelName}
+              onChange={setAttachModelName}
+              options={forwardNames.map((name) => ({ value: name, label: name }))}
+              allowCustom
+              placeholder={tr('搜索已有对外模型，或直接输入新的名字')}
+              emptyLabel={tr('还没有转发规则，直接输入名字会新建一条')}
+              data-testid="model-monitor-attach-combobox"
+            />
+            <span style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
+              {forwardNames.length === 0
+                ? tr('现在还没有对外模型转发规则；直接输入名字保存后会自动新建一条。')
+                : tr('选已有对外模型会追加到它的最后面；输入新名字会新建一条转发规则。')}
+            </span>
+          </label>
+        </div>
+      </CenteredModal>
     </div>
   );
 }

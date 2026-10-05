@@ -14,6 +14,7 @@ describe('ModelForwarding 模型转发页', () => {
   const api = read('src/web/api.ts');
   const tokensRoute = read('src/server/routes/api/tokens.ts');
   const tokenRouter = read('src/server/services/tokenRouter.ts');
+  const service = read('src/server/services/modelForwardService.ts');
 
   it('顶层页面只做编排，弹窗拆到 model-forwarding/ 子目录', () => {
     expect(page).toContain("from './model-forwarding/RuleEditorModal.js'");
@@ -66,6 +67,28 @@ describe('ModelForwarding 模型转发页', () => {
     expect(service).toContain('moveModelForwardTarget');
     expect(service).toContain('setModelForwardTargetEnabled');
     expect(service).toContain('const priority = index;');
+  });
+
+  it('站点与上游模型名都能搜索 + 直接输入（Combobox）', () => {
+    const combobox = read('src/web/components/Combobox.tsx');
+    expect(editor).toContain("from '../../components/Combobox.js'");
+    expect(editor).toContain('data-testid={`model-forward-site-${index}`}');
+    expect(editor).toContain('data-testid={`model-forward-upstream-${index}`}');
+    expect(editor).toContain('allowCustom');
+    // 组件本身：可输入、可过滤、可自由填写。
+    expect(combobox).toContain('allowCustom');
+    expect(combobox).toContain('visibleOptions');
+  });
+
+  it('模型监控页可以一键把「站点 + 模型」挂到对外模型末尾', () => {
+    const monitor = read('src/web/pages/ModelMonitor.tsx');
+    expect(monitor).toContain('attachModelForwardTarget');
+    expect(monitor).toContain("tr('挂到转发')");
+    expect(monitor).toContain('data-testid="model-monitor-attach-combobox"');
+    expect(monitor).toContain("tr('挂到末尾')");
+    expect(api).toContain('"/api/model-forward-attach"');
+    expect(service).toContain('attachModelForwardTarget');
+    expect(service).toContain('nextSortOrder');
   });
 
   it('弹窗会即时提示对外模型名重复，并把它接进保存校验', () => {

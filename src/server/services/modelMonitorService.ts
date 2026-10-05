@@ -5,9 +5,13 @@ import { getAdapter } from './platforms/index.js';
 import { isReadyAccountToken } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog, type ModelPricingCatalogInput } from './modelPricingService.js';
-import type { PerfMetricsSummary } from './platforms/base.js';
+import type { PerfMetricsSummary, PlatformAdapter } from './platforms/base.js';
 
-export type ModelMonitorSiteStatus = 'ok' | 'empty' | 'unsupported' | 'error';
+/**
+ * 'models_only' 表示站点没有模型监控接口（sub2api、老版本 new-api 等），
+ * 只靠凭据读了 `/v1/models`，页面只显示模型名，成功率/延迟/吞吐留空。
+ */
+export type ModelMonitorSiteStatus = 'ok' | 'models_only' | 'empty' | 'unsupported' | 'error';
 
 export type ModelMonitorSiteResult = {
   siteId: number;
@@ -25,11 +29,14 @@ export type ModelMonitorRunSummary = {
   scannedSites: number;
   status: {
     ok: number;
+    modelsOnly: number;
     empty: number;
     unsupported: number;
     error: number;
   };
   models: number;
+  /** 因为「仅模型列表」站点今天已经刷过、本次被跳过的站点数。 */
+  skippedModelListSites: number;
   sites: ModelMonitorSiteResult[];
 };
 
@@ -63,6 +70,8 @@ export type ModelMonitorModelView = {
   windowStart: number | null;
   windowEnd: number | null;
   showThroughput: boolean | null;
+  /** false 表示这个站点没有监控接口，指标一律缺失，页面不显示指标只显示模型名。 */
+  metricsAvailable: boolean;
   pricingUnit: 'token' | 'call' | null;
   inputPrice: number | null;
   outputPrice: number | null;
@@ -75,6 +84,10 @@ export type ModelMonitorOverview = {
   windowStartHour: number;
   windowEndHour: number;
   intervalMs: number;
+  /** 「仅模型列表」站点每天几点后刷新一次（其余轮次跳过）。 */
+  modelListRefreshHour: number;
+  /** 调度状态：让页面能显示「上次跑完 / 下次采集」，也方便排查任务有没有活着。 */
+  scheduler: ModelMonitorSchedulerState;
   /**
    * 下拉筛选用的模型名清单（含每个模型覆盖几个站点）。跟着站点与最低成功率
    * 筛，但不跟着模型名本身筛，否则选中之后就没法在下拉里换其它模型。
@@ -101,6 +114,23 @@ export type ModelMonitorOverview = {
 let monitorRunInFlight: Promise<ModelMonitorRunSummary> | null = null;
 let monitorSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 let monitorLastRunStartedAtMs = 0;
+let monitorNextRunAtMs: number | null = null;
+let monitorLastRunStartedAtIso: string | null = null;
+let monitorLastRunFinishedAtIso: string | null = null;
+let monitorSkippedRuns = 0;
+
+export type ModelMonitorSchedulerState = {
+  enabled: boolean;
+  intervalMs: number;
+  windowStartHour: number;
+  windowEndHour: number;
+  running: boolean;
+  lastRunStartedAt: string | null;
+  lastRunFinishedAt: string | null;
+  /** 因为上一轮还没跑完而被跳过的次数（跳过而不是排队，避免堆任务）。 */
+  skippedRuns: number;
+  nextRunAt: string | null;
+};
 
 const MONITOR_TICK_MS = 60_000;
 
@@ -224,6 +254,31 @@ export function parseStoredRecentSuccess(raw: unknown): Array<{ ts: number | nul
  * 采集窗口：`[startHour, endHour)`，两端都按服务端本地时间算。跨夜的窗口
  * （start > end）按「跨过午夜」处理，这样把窗口写成 22-6 也仍然是直觉行为。
  */
+/**
+ * 「仅模型列表」站点（没有监控接口、只能靠密钥列模型）是否需要刷新：
+ * 每天 `refreshHour` 点之后刷一次，当天刷过就跳过，避免 15 分钟一次的空转。
+ * 没有任何上一轮记录（新站点）或时间戳不可解析时都算「需要刷」。
+ */
+export function isModelListDailyRefreshDue(
+  fetchedAt: string | null | undefined,
+  now: Date,
+  refreshHour: number,
+): boolean {
+  if (!fetchedAt) return true;
+  const fetchedMs = Date.parse(fetchedAt);
+  if (!Number.isFinite(fetchedMs)) return true;
+  const boundaryMs = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    refreshHour,
+    0,
+    0,
+    0,
+  ).getTime();
+  return fetchedMs < boundaryMs;
+}
+
 export function isModelMonitorWindowOpen(
   now: Date,
   startHour: number,
@@ -348,6 +403,100 @@ type SiteMetricsFetchResult = {
   pricing: Map<string, ModelMonitorModelPricing>;
 };
 
+const MODEL_LIST_ONLY_MESSAGE = '站点没有模型监控接口，仅展示模型列表（指标无法获取）';
+const MODEL_LIST_ONLY_UNAVAILABLE_MESSAGE = '该平台没有模型监控接口';
+
+/** 降级读模型名时最多试几份凭据。 */
+const MODEL_LIST_FALLBACK_LIMIT = 3;
+
+/**
+ * 降级采集：站点没有 `/api/perf-metrics`（sub2api、老版本 new-api 等）时，
+ * 用同一份凭据（账号 JWT 或 sk- 密钥）读 `/v1/models`，只取模型名。
+ * 成功率 / 延迟 / 吞吐读不到就留 null，页面显示成「—」，不编造 0。
+ * 拿不到模型列表时返回 null，调用方维持原来的 unsupported / error 结论。
+ */
+/** 降级结果：成功带回模型行，失败带回一句能写进站点状态的原因。 */
+type ModelListFallbackOutcome =
+  | { ok: true; result: SiteMetricsFetchResult }
+  | { ok: false; reason: string };
+
+/**
+ * 降级读模型列表时优先用 sk- 令牌（`/v1/models` 本来就是密钥接口），
+ * 再退回账号 JWT；最多试 MODEL_LIST_FALLBACK_LIMIT 份，避免令牌多的站点
+ * 把每一份都发一次上游请求。
+ */
+async function collectModelListFallback(
+  site: SiteRow,
+  adapter: PlatformAdapter,
+  credentials: MonitorCredential[],
+): Promise<ModelListFallbackOutcome> {
+  const ordered = [
+    ...credentials.filter((credential) => credential.kind === 'api_token'),
+    ...credentials.filter((credential) => credential.kind !== 'api_token'),
+  ].slice(0, MODEL_LIST_FALLBACK_LIMIT);
+
+  let reason = '站点没有任何可用于读取模型列表的凭据';
+  for (const credential of ordered) {
+    const outcome = await fetchModelListOnly(site, adapter, credential);
+    if (outcome.ok) return outcome;
+    reason = outcome.reason;
+  }
+  return { ok: false, reason };
+}
+
+async function fetchModelListOnly(
+  site: SiteRow,
+  adapter: PlatformAdapter,
+  credential: MonitorCredential,
+): Promise<ModelListFallbackOutcome> {
+  const listModels = adapter.getModels?.bind(adapter);
+  if (typeof listModels !== 'function') {
+    return { ok: false, reason: '站点类型暂不支持用密钥读模型列表' };
+  }
+  let models: string[];
+  try {
+    models = await withTimeout(
+      listModels(site.url, credential.value, credential.platformUserId),
+      config.modelMonitorTimeoutMs,
+      `读取 ${site.name} 的模型列表`,
+    );
+  } catch (error) {
+    return { ok: false, reason: `用密钥读模型列表失败：${(error as Error)?.message || 'unknown error'}` };
+  }
+  const unique = Array.from(new Set(
+    (models || []).map((name) => String(name || '').trim()).filter(Boolean),
+  ));
+  if (!unique.length) {
+    return { ok: false, reason: '用密钥没读回任何模型（密钥无权限或被盾拦截）' };
+  }
+
+  const pricing = await loadSiteModelPricing(site, credential);
+  const data: PerfMetricsSummary = {
+    summary: null,
+    windowStart: null,
+    windowEnd: null,
+    // 站点连监控接口都没有，吞吐列直接不显示（false），而不是「未知」。
+    showThroughput: false,
+    models: unique.map((modelName) => ({
+      modelName,
+      avgLatencyMs: null,
+      successRate: null,
+      avgTps: null,
+      recentSuccess: [],
+    })),
+  };
+  return {
+    ok: true,
+    result: {
+      status: 'models_only',
+      message: MODEL_LIST_ONLY_MESSAGE,
+      credential,
+      data,
+      pricing,
+    },
+  };
+}
+
 async function fetchSiteMetrics(
   site: SiteRow,
   preferredKind: string | null,
@@ -355,8 +504,8 @@ async function fetchSiteMetrics(
 ): Promise<SiteMetricsFetchResult> {
   const emptyPricing = new Map<string, ModelMonitorModelPricing>();
   const adapter = getAdapter(String(site.platform || ''));
-  if (!adapter || typeof adapter.getPerfMetricsSummary !== 'function') {
-    return { status: 'unsupported', message: '该平台没有模型监控接口', credential: null, data: null, pricing: emptyPricing };
+  if (!adapter) {
+    return { status: 'unsupported', message: MODEL_LIST_ONLY_UNAVAILABLE_MESSAGE, credential: null, data: null, pricing: emptyPricing };
   }
 
   const credentials = await listSiteCredentials(site.id, preferredKind, preferredId);
@@ -364,10 +513,25 @@ async function fetchSiteMetrics(
     return { status: 'error', message: '站点下没有可用凭据（缺少账号或密钥）', credential: null, data: null, pricing: emptyPricing };
   }
 
+  const perfMetrics = adapter.getPerfMetricsSummary?.bind(adapter);
+
+  // 平台压根没有监控接口：直接降级用凭据读模型名。
+  if (!perfMetrics) {
+    const fallback = await collectModelListFallback(site, adapter, credentials);
+    if (fallback.ok) return fallback.result;
+    return {
+      status: 'unsupported',
+      message: `${MODEL_LIST_ONLY_UNAVAILABLE_MESSAGE}；${fallback.reason}`,
+      credential: null,
+      data: null,
+      pricing: emptyPricing,
+    };
+  }
+
   let lastMessage = '';
   for (const credential of credentials) {
     const outcome = await withTimeout(
-      adapter.getPerfMetricsSummary(site.url, credential.value, credential.platformUserId),
+      perfMetrics(site.url, credential.value, credential.platformUserId),
       config.modelMonitorTimeoutMs,
       `读取 ${site.name} 的模型监控`,
     ).catch((error: unknown) => ({
@@ -389,7 +553,17 @@ async function fetchSiteMetrics(
     }
     lastMessage = outcome.message;
     if (outcome.unsupported) {
-      return { status: 'unsupported', message: outcome.message, credential: null, data: null, pricing: emptyPricing };
+      // 站点版本旧是所有凭据的共性问题，不用再逐个试监控接口；
+      // 但模型列表可能只有某一份 sk- 密钥能读到，所以换几份凭据试降级。
+      const fallback = await collectModelListFallback(site, adapter, credentials);
+      if (fallback.ok) return fallback.result;
+      return {
+        status: 'unsupported',
+        message: `${outcome.message}；${fallback.reason}`,
+        credential: null,
+        data: null,
+        pricing: emptyPricing,
+      };
     }
   }
 
@@ -513,10 +687,14 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
 
   const previous: Array<{
     siteId: number;
+    status: string;
+    fetchedAt: string | null;
     credentialKind: string | null;
     credentialId: number | null;
   }> = await db.select({
     siteId: schema.siteModelMonitorSites.siteId,
+    status: schema.siteModelMonitorSites.status,
+    fetchedAt: schema.siteModelMonitorSites.fetchedAt,
     credentialKind: schema.siteModelMonitorSites.credentialKind,
     credentialId: schema.siteModelMonitorSites.credentialId,
   }).from(schema.siteModelMonitorSites).all();
@@ -527,14 +705,25 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
     finishedAt: new Date(startedAtMs).toISOString(),
     durationMs: 0,
     scannedSites: 0,
-    status: { ok: 0, empty: 0, unsupported: 0, error: 0 },
+    status: { ok: 0, modelsOnly: 0, empty: 0, unsupported: 0, error: 0 },
     models: 0,
+    skippedModelListSites: 0,
     sites: [],
   };
 
+  const now = new Date();
   for (const site of sites) {
-    summary.scannedSites += 1;
     const remembered = previousBySite.get(site.id);
+    // 「仅模型列表」站点今天刷新过就跳过：模型列表变化很少，没必要 15 分钟拉一次。
+    // 跳过不写库、不清数据，页面继续沿用上一轮结果。
+    if (
+      remembered?.status === 'models_only'
+      && !isModelListDailyRefreshDue(remembered.fetchedAt, now, config.modelMonitorModelListRefreshHour)
+    ) {
+      summary.skippedModelListSites += 1;
+      continue;
+    }
+    summary.scannedSites += 1;
     let result: Awaited<ReturnType<typeof fetchSiteMetrics>>;
     try {
       result = await fetchSiteMetrics(site, remembered?.credentialKind ?? null, remembered?.credentialId ?? null);
@@ -563,7 +752,9 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
       };
     }
 
-    summary.status[result.status] += 1;
+    // 'models_only' 在计数对象里叫 modelsOnly，别按状态值直接当 key 用。
+    if (result.status === 'models_only') summary.status.modelsOnly += 1;
+    else summary.status[result.status] += 1;
     if (result.data) summary.models += result.data.models.length;
     summary.sites.push({
       siteId: site.id,
@@ -575,6 +766,12 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
     });
   }
 
+  if (summary.skippedModelListSites > 0) {
+    console.log(
+      `[ModelMonitor] skipped ${summary.skippedModelListSites} models-only sites `
+      + `(already refreshed after ${config.modelMonitorModelListRefreshHour}:00 today)`,
+    );
+  }
   summary.finishedAt = new Date().toISOString();
   summary.durationMs = Date.now() - startedAtMs;
   return summary;
@@ -593,34 +790,84 @@ export function runModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
   return run;
 }
 
-export function startModelMonitorScheduler(): {
-  enabled: boolean;
-  intervalMs: number;
-  windowStartHour: number;
-  windowEndHour: number;
-} {
-  stopModelMonitorScheduler();
-  const state = {
+export function getModelMonitorSchedulerState(): ModelMonitorSchedulerState {
+  return {
     enabled: config.modelMonitorEnabled,
     intervalMs: config.modelMonitorIntervalMs,
     windowStartHour: config.modelMonitorWindowStartHour,
     windowEndHour: config.modelMonitorWindowEndHour,
+    running: isModelMonitorRunning(),
+    lastRunStartedAt: monitorLastRunStartedAtIso,
+    lastRunFinishedAt: monitorLastRunFinishedAtIso,
+    skippedRuns: monitorSkippedRuns,
+    nextRunAt: monitorNextRunAtMs === null ? null : new Date(monitorNextRunAtMs).toISOString(),
   };
-  if (!state.enabled) return state;
+}
 
-  monitorLastRunStartedAtMs = 0;
-  monitorSchedulerTimer = setInterval(() => {
-    if (isModelMonitorRunning()) return;
-    const now = new Date();
-    if (!isModelMonitorWindowOpen(now, state.windowStartHour, state.windowEndHour)) return;
-    if (Date.now() - monitorLastRunStartedAtMs < state.intervalMs) return;
-    monitorLastRunStartedAtMs = Date.now();
-    void runModelMonitorFetch().catch((error: unknown) => {
-      console.error('[Scheduler] Model monitor error:', error);
-    });
-  }, MONITOR_TICK_MS);
+/**
+ * 采集调度：窗口内（默认 07:00-23:00）每 `intervalMs`（默认 15 分钟）跑一轮，
+ * 单线程、按站点顺序一个个采集（见 executeModelMonitorFetch），同一时刻只有一轮。
+ *
+ * 与旧实现的区别：
+ * - 用显式的「下次可跑时间」代替 `now - 上次开始 < interval` 的隐式判断，重启后
+ *   进窗口会立刻补一轮，不会因为计时器起点而整段时间都不跑；
+ * - 到点发现上一轮还没跑完时，直接跳过这一次（不排队、不并发），并计数 + 打日志；
+ * - 每次起跑 / 跑完都打日志，任务有没有活着一眼能从 journalctl 看出来。
+ */
+export function startModelMonitorScheduler(): ModelMonitorSchedulerState {
+  stopModelMonitorScheduler();
+  const state = {
+    enabled: config.modelMonitorEnabled,
+    intervalMs: Math.max(MONITOR_TICK_MS, config.modelMonitorIntervalMs),
+    windowStartHour: config.modelMonitorWindowStartHour,
+    windowEndHour: config.modelMonitorWindowEndHour,
+  };
+  monitorNextRunAtMs = null;
+  if (!state.enabled) {
+    console.log('[Scheduler] Model monitor disabled (MODEL_MONITOR_ENABLED=false)');
+    return getModelMonitorSchedulerState();
+  }
+
+  const tick = () => {
+    const nowMs = Date.now();
+    if (!isModelMonitorWindowOpen(new Date(nowMs), state.windowStartHour, state.windowEndHour)) {
+      // 窗口外什么都不做；进窗口后的第一次 tick 会立刻补一轮。
+      monitorNextRunAtMs = null;
+      return;
+    }
+    if (monitorNextRunAtMs === null) monitorNextRunAtMs = nowMs;
+    if (nowMs < monitorNextRunAtMs) return;
+    if (isModelMonitorRunning()) {
+      monitorSkippedRuns += 1;
+      monitorNextRunAtMs = nowMs + state.intervalMs;
+      console.log(`[Scheduler] Model monitor slot skipped: previous run still in flight (skipped=${monitorSkippedRuns})`);
+      return;
+    }
+    monitorNextRunAtMs = nowMs + state.intervalMs;
+    monitorLastRunStartedAtMs = nowMs;
+    monitorLastRunStartedAtIso = new Date(nowMs).toISOString();
+    console.log(`[Scheduler] Model monitor run started at ${monitorLastRunStartedAtIso}`);
+    void runModelMonitorFetch()
+      .then((summary) => {
+        monitorLastRunFinishedAtIso = summary.finishedAt;
+        console.log(
+          `[Scheduler] Model monitor run complete: ${summary.scannedSites} sites, `
+          + `${summary.models} models in ${summary.durationMs}ms `
+          + `(ok=${summary.status.ok} modelsOnly=${summary.status.modelsOnly} empty=${summary.status.empty} `
+          + `unsupported=${summary.status.unsupported} error=${summary.status.error} `
+          + `skipList=${summary.skippedModelListSites})`,
+        );
+      })
+      .catch((error: unknown) => {
+        monitorLastRunFinishedAtIso = new Date().toISOString();
+        console.error('[Scheduler] Model monitor error:', error);
+      });
+  };
+
+  tick();
+  monitorSchedulerTimer = setInterval(tick, MONITOR_TICK_MS);
   monitorSchedulerTimer.unref?.();
-  return state;
+  return getModelMonitorSchedulerState();
 }
 
 export function stopModelMonitorScheduler(): void {
@@ -634,6 +881,10 @@ export function __resetModelMonitorStateForTests(): void {
   stopModelMonitorScheduler();
   monitorRunInFlight = null;
   monitorLastRunStartedAtMs = 0;
+  monitorNextRunAtMs = null;
+  monitorLastRunStartedAtIso = null;
+  monitorLastRunFinishedAtIso = null;
+  monitorSkippedRuns = 0;
   modelMonitorPricingLoader = fetchModelPricingCatalog;
 }
 
@@ -697,6 +948,13 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     });
   }
 
+  // 站点状态决定模型行要不要显示指标：'models_only' 的站点这一轮的模型
+  // 只有名字，页面对这些行隐藏成功率/延迟/吞吐，避免误以为有采样。
+  const metricsAvailableBySite = new Map<number, boolean>();
+  for (const row of siteRows) {
+    metricsAvailableBySite.set(row.siteId, row.status !== 'models_only');
+  }
+
   const modelQuery = db.select().from(schema.siteModelMonitorModels);
   const modelRows: Array<typeof schema.siteModelMonitorModels.$inferSelect> = conditions.length
     ? await modelQuery.where(and(...conditions)).all()
@@ -715,6 +973,7 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     windowStart: row.windowStart,
     windowEnd: row.windowEnd,
     showThroughput: row.showThroughput,
+    metricsAvailable: metricsAvailableBySite.get(row.siteId) !== false,
     pricingUnit: row.pricingUnit === 'token' || row.pricingUnit === 'call' ? row.pricingUnit : null,
     inputPrice: row.inputPrice,
     outputPrice: row.outputPrice,
@@ -747,6 +1006,8 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     windowStartHour: config.modelMonitorWindowStartHour,
     windowEndHour: config.modelMonitorWindowEndHour,
     intervalMs: config.modelMonitorIntervalMs,
+    modelListRefreshHour: config.modelMonitorModelListRefreshHour,
+    scheduler: getModelMonitorSchedulerState(),
     modelOptions,
     sites: siteRows
       .map((row) => ({
