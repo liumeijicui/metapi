@@ -114,6 +114,8 @@ describe('prompt library routes', () => {
       'pelican-benchmark',
       'candy-count',
       'classic-reasoning',
+      'clock-test',
+      'hexagon-bounce',
     ]);
     expect(presets.every((item: { imported: boolean }) => item.imported === false)).toBe(true);
     expect(presets.find((item: { slug: string }) => item.slug === 'candy-count').cases[0].expectedAnswer).toBe('21');
@@ -128,6 +130,46 @@ describe('prompt library routes', () => {
 
     const notFound = await app.inject({ method: 'POST', url: '/api/prompt-presets/unknown/import' });
     expect(notFound.statusCode).toBe(400);
+  });
+
+  it('启动时会补齐内置题库且保持幂等', async () => {
+    const serviceModule = await import('../../services/promptLibraryService.js');
+    const first = await serviceModule.ensureBuiltinPromptPresets();
+    expect(first.imported).toEqual([
+      'pelican-benchmark',
+      'candy-count',
+      'classic-reasoning',
+      'clock-test',
+      'hexagon-bounce',
+    ]);
+    const second = await serviceModule.ensureBuiltinPromptPresets();
+    expect(second.imported).toEqual([]);
+
+    const suites = await app.inject({ method: 'GET', url: '/api/prompt-suites' });
+    const slugs = suites.json().suites.map((item: { slug: string }) => item.slug).sort();
+    expect(slugs).toEqual([
+      'candy-count',
+      'classic-reasoning',
+      'clock-test',
+      'hexagon-bounce',
+      'pelican-benchmark',
+    ]);
+  });
+
+  it('GET /api/prompt-cases 返回带题库名的启用题目', async () => {
+    await (await import('../../services/promptLibraryService.js')).ensureBuiltinPromptPresets();
+
+    const response = await app.inject({ method: 'GET', url: '/api/prompt-cases' });
+    expect(response.statusCode).toBe(200);
+    const { cases } = response.json();
+    expect(cases.length).toBeGreaterThan(0);
+    // 每条都带题库名，且默认只返回启用题目
+    expect(cases.every((item: { suiteName: string; enabled: boolean }) => Boolean(item.suiteName) && item.enabled)).toBe(true);
+    const pelican = cases.find((item: { suiteSlug: string }) => item.suiteSlug === 'pelican-benchmark');
+    expect(pelican.suiteName).toBe('鹈鹕测试');
+    const titles = cases.map((item: { title: string }) => item.title);
+    expect(titles).toContain('鹈鹕骑自行车（原版）');
+    expect(titles).toContain('糖果一共有多少颗');
   });
 
   it('删除题库会连带清掉题目', async () => {

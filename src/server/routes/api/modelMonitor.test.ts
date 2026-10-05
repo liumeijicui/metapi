@@ -32,6 +32,8 @@ describe('model monitor routes', () => {
   beforeEach(async () => {
     await db.delete(schema.siteModelMonitorModels).run();
     await db.delete(schema.siteModelMonitorSites).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.sites).run();
 
     const site = await db.insert(schema.sites).values({
@@ -87,6 +89,40 @@ describe('model monitor routes', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().models[0].modelName).toBe('gpt-5.5');
+  });
+
+  it('returns chat channels for a site+model, validating params', async () => {
+    const missing = await app.inject({ method: 'GET', url: '/api/model-monitor/chat-channels?siteId=1' });
+    expect(missing.statusCode).toBe(400);
+
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'demo',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      routeMode: 'pattern',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      sourceModel: 'gpt-5.5',
+      enabled: true,
+    }).run();
+
+    const ok = await app.inject({
+      method: 'GET',
+      url: `/api/model-monitor/chat-channels?siteId=${site.id}&model=gpt-5.5`,
+    });
+    expect(ok.statusCode).toBe(200);
+    const body = ok.json();
+    expect(body.success).toBe(true);
+    expect(body.channels).toHaveLength(1);
+    expect(body.channels[0]).toMatchObject({ accountName: 'demo', upstreamModel: 'gpt-5.5' });
   });
 
   it('queues a collection run when refresh is requested', async () => {

@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import {
   isModelMonitorRunning,
+  listChatChannelsForSiteModel,
   loadModelMonitorOverview,
   runModelMonitorFetch,
 } from '../../services/modelMonitorService.js';
@@ -34,6 +35,20 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       sort: parseModelMonitorSort(request.query.sort),
     });
   });
+
+  // 「对话」弹窗要固定到某个站点时，先问这里能选哪些通道。
+  app.get<{ Querystring: { siteId?: string; model?: string } }>(
+    '/api/model-monitor/chat-channels',
+    async (request, reply) => {
+      const siteId = Math.trunc(parseOptionalNumber(request.query.siteId) ?? 0);
+      const model = String(request.query.model || '').trim();
+      if (siteId <= 0 || !model) {
+        return reply.code(400).send({ success: false, message: 'siteId 和 model 不能为空' });
+      }
+      const channels = await listChatChannelsForSiteModel(siteId, model);
+      return { success: true, channels };
+    },
+  );
 
   app.post('/api/model-monitor/refresh', async () => {
     if (isModelMonitorRunning()) {

@@ -7,6 +7,23 @@ import type {
 export type DownstreamClientKind = CliProfileId;
 export type DownstreamClientConfidence = CliProfileClientConfidence;
 
+/**
+ * 内置「模型测试」请求的标记头。值要和 `proxy-core/channelSelection.ts` 里的
+ * `TESTER_REQUEST_HEADER` 保持一致（那里用字面量做通道固定，这里不引入它，
+ * 避免把 tokenRouter 拖进这条轻量路径）。
+ */
+export const TESTER_REQUEST_HEADER = 'x-metapi-tester-request';
+export const TESTER_CLIENT_APP_ID = 'metapi_model_tester';
+export const TESTER_CLIENT_APP_NAME = '模型测试';
+
+/**
+ * 来自我们自己的「模型操练厂 / 模型监控对话」的请求。日志里要能一眼看出
+ * 是测试流量，所以在识别客户端这一步就把标记补上。
+ */
+export function isModelTesterRequest(headers?: Record<string, unknown>): boolean {
+  return normalizeHeaders(headers)[TESTER_REQUEST_HEADER]?.some((value) => value.trim() === '1') === true;
+}
+
 export type DownstreamClientContext = {
   clientKind: DownstreamClientKind;
   sessionId?: string;
@@ -264,6 +281,17 @@ export function detectDownstreamClientContext(input: {
 }): DownstreamClientContext {
   const detected = detectCliProfile(input);
   const normalizedHeaders = normalizeHeaders(input.headers);
+
+  // 内置测试请求优先标记：不要被 Cherry Studio 之类的弱指纹规则抢走。
+  if (normalizedHeaders[TESTER_REQUEST_HEADER]?.some((value) => value.trim() === '1')) {
+    return {
+      clientKind: detected.id,
+      clientAppId: TESTER_CLIENT_APP_ID,
+      clientAppName: TESTER_CLIENT_APP_NAME,
+      clientConfidence: 'exact',
+    };
+  }
+
   const explicitSelfReport = detectExplicitClientSelfReport(normalizedHeaders);
   const fingerprint = detectDownstreamClientFingerprint(input);
   const profileClientApp = fingerprint || explicitSelfReport

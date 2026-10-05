@@ -246,6 +246,47 @@ describe('detectDownstreamClientContext', () => {
     });
   });
 
+  it('把带 x-metapi-tester-request 的请求标记为「模型测试」，并优先于其它指纹', () => {
+    // 只有标记头时也给「模型测试」。
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: {
+        'x-metapi-tester-request': '1',
+      },
+    })).toEqual({
+      clientKind: 'generic',
+      clientAppId: 'metapi_model_tester',
+      clientAppName: '模型测试',
+      clientConfidence: 'exact',
+    });
+
+    // 即使同时带了 Cherry Studio 这类弱指纹，也要被测试标记盖掉。
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: {
+        'x-metapi-tester-request': '1',
+        'x-title': 'Cherry Studio',
+        'http-referer': 'https://cherry-ai.com',
+      },
+    })).toEqual({
+      clientKind: 'generic',
+      clientAppId: 'metapi_model_tester',
+      clientAppName: '模型测试',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('没有测试标记时不受影响（值为 0 或缺失都不算）', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: { 'x-metapi-tester-request': '0' },
+    }).clientAppName).not.toBe('模型测试');
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: {},
+    }).clientAppName).not.toBe('模型测试');
+  });
+
   it('recognizes app fingerprints alongside a generic protocol family', () => {
     expect(detectDownstreamClientContext({
       downstreamPath: '/v1/chat/completions',

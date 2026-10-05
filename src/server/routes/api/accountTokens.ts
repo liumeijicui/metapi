@@ -17,7 +17,9 @@ import {
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { type ApiTokenInfo, type CreatedApiToken } from '../../services/platforms/base.js';
-import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import { getAutoReloginConfig, getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import { decryptAccountPassword } from '../../services/accountCredentialService.js';
+import { persistRotatedRefreshCookie } from '../../services/accountCredentialRotation.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { withAccountCredentialContext, withAccountProxyOverride } from '../../services/siteProxy.js';
 import { type ModelRefreshResult } from '../../services/modelService.js';
@@ -151,8 +153,14 @@ async function createUpstreamToken(
   accessToken: string,
   platformUserId: number | null,
   proxyUrl: string | null,
+  securityPassword?: string | null,
 ): Promise<CreatedApiToken | null> {
-  const options = { name: AUTO_CREATED_TOKEN_NAME, unlimitedQuota: true };
+  const options = {
+    name: AUTO_CREATED_TOKEN_NAME,
+    unlimitedQuota: true,
+    // 站点把建密钥挂在二级验证后面时用它过验证；没有就按普通流程走。
+    securityPassword: securityPassword || null,
+  };
   return withTimeout(
     () => withAccountProxyOverride(proxyUrl, async () => {
       if (typeof adapter.createApiTokenWithValue === 'function') {
@@ -164,6 +172,38 @@ async function createUpstreamToken(
     TOKEN_CREATE_TIMEOUT_MS,
     `token create timeout (${Math.round(TOKEN_CREATE_TIMEOUT_MS / 1000)}s)`,
   );
+}
+
+/** 账号里保存的登录密码，用来走过站点自己的二级安全验证。 */
+function resolveAccountSecurityPassword(account: typeof schema.accounts.$inferSelect): string | null {
+  const relogin = getAutoReloginConfig(account.extraConfig);
+  if (!relogin) return null;
+  return decryptAccountPassword(relogin.passwordCipher);
+}
+
+/**
+ * Writes a session the site rotated during key creation back onto the account.
+ *
+ * Completing the site's security check upgrades the session cookie, and the
+ * verification lives in that cookie. Dropping it would make every later create
+ * start from a fresh challenge, so it is stored as a compare-and-set against the
+ * value this flow actually presented.
+ */
+async function persistRotatedSessionFromCreate(input: {
+  accountId: number;
+  siteId: number;
+  accessToken: string;
+  created: CreatedApiToken | null;
+}): Promise<void> {
+  const rotated = input.created?.rotatedSession;
+  if (!rotated?.value) return;
+  await persistRotatedRefreshCookie({
+    accountId: input.accountId,
+    siteId: input.siteId,
+    cookieName: rotated.cookieName,
+    previousValue: rotated.previousValue || '',
+    nextValue: rotated.value,
+  });
 }
 
 /**
@@ -185,10 +225,12 @@ async function loadOrCreateUpstreamTokens(input: {
    * sync would immediately create a second, default-group key behind it.
    */
   allowMaskedCreate?: boolean;
-}): Promise<{ tokens: UpstreamApiTokenLike[]; created: boolean; createUnsupported: boolean }> {
-  const { adapter, siteUrl, accessToken, platformUserId, proxyUrl } = input;
+  /** 站点要求二级验证时用来过验证的账号密码。 */
+  securityPassword?: string | null;
+}): Promise<{ tokens: UpstreamApiTokenLike[]; created: boolean; createUnsupported: boolean; createdToken: CreatedApiToken | null }> {
+  const { adapter, siteUrl, accessToken, platformUserId, proxyUrl, securityPassword } = input;
   const allowMaskedCreate = input.allowMaskedCreate ?? true;
-  if (!adapter) return { tokens: [], created: false, createUnsupported: true };
+  if (!adapter) return { tokens: [], created: false, createUnsupported: true, createdToken: null };
 
   const listTokens = async () => withTimeout(
     () => withAccountProxyOverride(proxyUrl,
@@ -205,17 +247,20 @@ async function loadOrCreateUpstreamTokens(input: {
     // account unroutable.
     const allMasked = tokens.every((token) => isMaskedUpstreamTokenKey(token.key));
     if (!allowMaskedCreate || !allMasked || typeof adapter.createApiTokenWithValue !== 'function') {
-      return { tokens, created: false, createUnsupported: false };
+      return { tokens, created: false, createUnsupported: false, createdToken: null };
     }
-    const captured = await createUpstreamToken(adapter, siteUrl, accessToken, platformUserId, proxyUrl);
+    const captured = await createUpstreamToken(
+      adapter, siteUrl, accessToken, platformUserId, proxyUrl, securityPassword,
+    );
     if (captured?.key) {
       return {
         tokens: mergeCapturedTokens([capturedTokenToListEntry(captured)], tokens),
         created: true,
         createUnsupported: false,
+        createdToken: captured,
       };
     }
-    return { tokens, created: false, createUnsupported: false };
+    return { tokens, created: false, createUnsupported: false, createdToken: captured };
   }
 
   // Older deployments expose only the singular accessor; treat it as a list.
@@ -230,12 +275,15 @@ async function loadOrCreateUpstreamTokens(input: {
       tokens: [{ name: 'default', key: fallback, enabled: true, tokenGroup: 'default' }],
       created: false,
       createUnsupported: false,
+      createdToken: null,
     };
   }
 
-  const created = await createUpstreamToken(adapter, siteUrl, accessToken, platformUserId, proxyUrl);
+  const created = await createUpstreamToken(
+    adapter, siteUrl, accessToken, platformUserId, proxyUrl, securityPassword,
+  );
   if (!created) {
-    return { tokens: [], created: false, createUnsupported: true };
+    return { tokens: [], created: false, createUnsupported: true, createdToken: null };
   }
 
   tokens = await listTokens();
@@ -255,7 +303,7 @@ async function loadOrCreateUpstreamTokens(input: {
     tokens = mergeCapturedTokens([capturedTokenToListEntry(created)], tokens);
   }
 
-  return { tokens, created: true, createUnsupported: false };
+  return { tokens, created: true, createUnsupported: false, createdToken: created };
 }
 
 function buildSyncAccountLabel(item: SyncExecutionResult): string {
@@ -497,7 +545,7 @@ async function executeAccountTokenSync(
 
     // A site with no key yet is not a dead end: create one, otherwise the freshly
     // bound account has nothing to route with and silently stays unused.
-    const { tokens, created: keyCreated, createUnsupported } = await withAccountCredentialContext(
+    const { tokens, created: keyCreated, createUnsupported, createdToken } = await withAccountCredentialContext(
       { accountId: row.accounts.id, siteId: row.sites.id },
       () => loadOrCreateUpstreamTokens({
         adapter,
@@ -506,8 +554,17 @@ async function executeAccountTokenSync(
         platformUserId: platformUserId ?? null,
         proxyUrl: accountProxyUrl ?? null,
         allowMaskedCreate: usableLocalTokens.length === 0 && (options?.extraTokens?.length ?? 0) === 0,
+        securityPassword: resolveAccountSecurityPassword(row.accounts),
       }),
     );
+
+    // 站点在过安全验证时换了会话，要存回去，否则下次还要从头验证。
+    await persistRotatedSessionFromCreate({
+      accountId: row.accounts.id,
+      siteId: row.sites.id,
+      accessToken: row.accounts.accessToken,
+      created: createdToken,
+    });
 
     if (tokens.length === 0) {
       return {
@@ -868,6 +925,8 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       allowIps: asTrimmedString(body.allowIps),
       modelLimitsEnabled,
       modelLimits: asTrimmedString(body.modelLimits),
+      // 有些 New API 分支把建密钥挡在「安全验证」后面，用账号密码过一下。
+      securityPassword: resolveAccountSecurityPassword(account),
     };
     const createdToken = await withAccountProxyOverride(
       getProxyUrlFromExtraConfig(account.extraConfig),
@@ -885,6 +944,13 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (!createdToken) {
       return reply.code(502).send({ success: false, message: '站点创建令牌失败' });
     }
+
+    await persistRotatedSessionFromCreate({
+      accountId: account.id,
+      siteId: site.id,
+      accessToken: account.accessToken,
+      created: createdToken,
+    });
 
     // The value handed back here may be the only copy: relays that mask their
     // listing never echo it again, so it travels into the sync explicitly.

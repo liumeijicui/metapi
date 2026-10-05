@@ -133,6 +133,12 @@ export interface CreatedApiToken {
   name: string;
   key: string | null;
   tokenGroup?: string | null;
+  /**
+   * New session cookie the site handed back while the security check was
+   * completed. Callers holding the account row must write it back, otherwise the
+   * verification is lost with the response and the next create starts over.
+   */
+  rotatedSession?: { cookieName: string; value: string; previousValue?: string } | null;
 }
 
 export interface SiteAnnouncement {
@@ -157,6 +163,13 @@ export interface CreateApiTokenOptions {
   allowIps?: string;
   modelLimitsEnabled?: boolean;
   modelLimits?: string;
+  /**
+   * Account password, used only when the site gates key creation behind a
+   * second-factor step (some New API forks answer `VERIFICATION_REQUIRED` and
+   * expect `POST /api/verify` first). Callers pass it for this one call; it is
+   * never stored on the token or written back anywhere.
+   */
+  securityPassword?: string | null;
 }
 
 /**

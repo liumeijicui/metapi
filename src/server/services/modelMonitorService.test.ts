@@ -50,6 +50,8 @@ describe('modelMonitorService', () => {
     service.__setModelMonitorPricingLoaderForTests(async () => null);
     await db.delete(schema.siteModelMonitorModels).run();
     await db.delete(schema.siteModelMonitorSites).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
@@ -715,6 +717,105 @@ describe('modelMonitorService', () => {
 
       const bySite = await service.loadModelMonitorOverview({ sort: 'site' });
       expect(bySite.models[0].siteName).toBe('Alpha');
+    });
+  });
+
+  describe('listChatChannelsForSiteModel', () => {
+    async function seedSite(name = 'Chat Site') {
+      return db.insert(schema.sites).values({
+        name,
+        url: `https://${name.toLowerCase().replace(/\s+/g, '-')}.example.com`,
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+    }
+
+    async function seedAccount(siteId: number, username = 'demo') {
+      return db.insert(schema.accounts).values({
+        siteId,
+        username,
+        accessToken: 'jwt-token',
+        status: 'active',
+      }).returning().get();
+    }
+
+    async function seedRoute(modelPattern: string, displayName: string | null, enabled = true) {
+      return db.insert(schema.tokenRoutes).values({
+        modelPattern,
+        displayName,
+        routeMode: 'pattern',
+        enabled,
+      }).returning().get();
+    }
+
+    async function seedChannel(routeId: number, accountId: number, sourceModel: string | null, enabled = true) {
+      return db.insert(schema.routeChannels).values({
+        routeId,
+        accountId,
+        sourceModel,
+        enabled,
+      }).returning().get();
+    }
+
+    it('按站点+模型精确匹配普通路由，并带上上游模型名', async () => {
+      const site = await seedSite();
+      const account = await seedAccount(site.id, 'alice');
+      const route = await seedRoute('deepseek-v4.1-flash', null);
+      await seedChannel(route.id, account.id, 'deepseek-v4.1-flash');
+
+      const channels = await service.listChatChannelsForSiteModel(site.id, 'deepseek-v4.1-flash');
+      expect(channels).toHaveLength(1);
+      expect(channels[0]).toMatchObject({
+        routeId: route.id,
+        accountName: 'alice',
+        sourceModel: 'deepseek-v4.1-flash',
+        upstreamModel: 'deepseek-v4.1-flash',
+      });
+    });
+
+    it('转发路由用 display_name 命中，upstreamModel 取 source_model', async () => {
+      const site = await seedSite();
+      const account = await seedAccount(site.id, 'bob');
+      const route = await seedRoute('forward:gpt-6-astra', 'gpt-6-astra');
+      await seedChannel(route.id, account.id, 'deepseek-v4.1-flash');
+
+      const channels = await service.listChatChannelsForSiteModel(site.id, 'gpt-6-astra');
+      expect(channels).toHaveLength(1);
+      expect(channels[0]).toMatchObject({
+        routeId: route.id,
+        routeName: 'gpt-6-astra',
+        sourceModel: 'deepseek-v4.1-flash',
+        upstreamModel: 'deepseek-v4.1-flash',
+      });
+
+      // 别的对外名不会命中这条转发路由
+      expect(await service.listChatChannelsForSiteModel(site.id, 'gpt-5-astra')).toHaveLength(0);
+    });
+
+    it('过滤掉别的站点、已禁用通道与不匹配模型', async () => {
+      const site = await seedSite('Site A');
+      const otherSite = await seedSite('Site B');
+      const account = await seedAccount(site.id, 'carol');
+      const otherAccount = await seedAccount(otherSite.id, 'dave');
+
+      const route = await seedRoute('deepseek-v4.1-flash', null);
+      await seedChannel(route.id, account.id, 'deepseek-v4.1-flash');
+
+      // 同站点但通道被禁用
+      const disabledRoute = await seedRoute('deepseek-v4.1-flash', null);
+      await seedChannel(disabledRoute.id, account.id, 'deepseek-v4.1-flash', false);
+
+      // 别的站点的同模型通道
+      const otherRoute = await seedRoute('deepseek-v4.1-flash', null);
+      await seedChannel(otherRoute.id, otherAccount.id, 'deepseek-v4.1-flash');
+
+      const channels = await service.listChatChannelsForSiteModel(site.id, 'deepseek-v4.1-flash');
+      expect(channels).toHaveLength(1);
+      expect(channels[0].accountName).toBe('carol');
+
+      expect(await service.listChatChannelsForSiteModel(site.id, 'unknown-model')).toHaveLength(0);
+      expect(await service.listChatChannelsForSiteModel(0, 'deepseek-v4.1-flash')).toHaveLength(0);
+      expect(await service.listChatChannelsForSiteModel(site.id, '')).toHaveLength(0);
     });
   });
 });

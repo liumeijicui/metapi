@@ -8,6 +8,7 @@ import {
   getPromptSuite,
   importBuiltinPromptPreset,
   listBuiltinPromptPresets,
+  listEnabledPromptCasesWithSuite,
   listPromptCases,
   listPromptSuites,
   updatePromptCase,
@@ -102,6 +103,12 @@ export async function promptLibraryRoutes(app: FastifyInstance) {
     } catch (error) {
       return sendPromptLibraryError(reply, error);
     }
+  });
+
+  // 对话弹窗的快捷提示词：一次拿全部启用题目（带题库名），省去逐个题库请求。
+  app.get('/api/prompt-cases', async () => {
+    const cases = await listEnabledPromptCasesWithSuite();
+    return { success: true, cases };
   });
 
   app.get('/api/prompt-presets', async () => {

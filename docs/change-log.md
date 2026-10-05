@@ -1,3 +1,41 @@
+### 61. new-api 建密钥支持站点二级安全验证：明文回传 + 会话回写
+
+- **类型**：缺陷修复 / 功能补全
+- **需求来源**：本会话（用户：「帮我看下目前绑定的这些网站有没有建对话秘钥，一般是 sk- 开头的，如果没有能否通过 http 或者浏览器帮我建好，然后维护到我们的系统上」）
+
+#### 问题
+- 部分 new-api 分支把「创建令牌」放在二级安全验证后面：`POST /api/token/` 直接回 `403 VERIFICATION_REQUIRED` + 一次性 `verification_challenge`，不完成 `/api/verify` 就永远建不出密钥，账号只能在站点页面上手工建。
+- 这些分支的令牌列表和单条读取都只回脱敏值，且没有 reveal 路由，所以「建完再读」拿到的还是 `****`，等于白建。
+- 完成验证后站点会换发新的 `session` cookie；不存回去的话，旧 cookie 已经作废，下一次同步又要从头再验证一遍。
+
+#### 改了什么
+- `createApiTokenWithValue` 新增 `securityPassword` 选项（只在校验期临时传入，不落库）与 `rotatedSession` 返回。`newApi` 适配器在建密钥被安全验证拦下、且拿到了账号密码时，自动 `POST /api/verify {method:'password'}`，再用验证返回的**新会话**重试建密钥，并把新会话一并返回。
+- 明文只认「建密钥响应」里的 key：响应是脱敏值就回 `null`，绝不把 `****` 当密钥存入库。
+- 令牌同步与手动建令牌链路会自动带上账号密码（解密自 `autoRelogin`），建密钥成功后把轮转出的新会话写回账号（`persistRotatedRefreshCookie`，带 compare-and-set，避免覆盖更晚的会话）。
+- 建密钥落库时同时记录 `tokenGroup`，默认分组也能正确进系统。
+
+#### 测试与实测
+- 假站新增 `/api/verify` 与安全验证分支，新增两个用例：「用账号密码过二级验证拿明文 key 并回传新会话」「没给密码时不返回半成品 key」。
+- `newApi.test.ts` 48 例、`accountTokens.sync.test.ts` 34 例、`modelMonitorService.test.ts` 25 例共 107 例通过；两道 `tsc` 通过。
+- 生产实测：哈基米API站（site 36）原先只有一条脱敏 `li` 令牌，走新链路后自动建出 `metapi` 密钥（48 位明文、`value_status=ready`）并回写轮转会话；用该密钥 `POST /v1/chat/completions` 返回 200。
+
+### 60. 模型监控「对话」按钮 + 日志测试标记 + 内置提示词题库自动入库
+
+- **类型**：新功能
+- **需求来源**：本会话（用户：「模型监控的挂到转发后面再加个对话的按钮，直接对该模型发起对话。可以参考模型操练厂，日志里也标明测试。并且找找着提示词帮我刷到我们的提示词管理里，比如鹈鹕测试，糖果测试之类的提示词，对话的时候可以快捷选提示词，或者手动输入都行」）
+
+#### 改了什么
+- **「对话」入口**：模型监控的卡片视图和表格视图，在「挂到转发」旁边各加一个「对话」按钮，点开弹出 `ModelChatModal`，直接对「该站点 + 该模型」发一轮聊天。
+- **固定通道可选**：弹窗打开时调 `GET /api/model-monitor/chat-channels?siteId=&model=` 拉出该站点下能接这个模型、且启用的通道（普通路由按 `model_pattern` 命中，转发路由按 `display_name` 对外名命中），默认固定到第一个；下拉里也能切「自动路由」。没有可用通道时只提供自动路由并给出提示。
+- **复用测试链路**：发送走和模型操练厂同一条 `/api/test/proxy/stream`（`requestKind: json`、`stream: true`、带 `forcedChannelId`），支持流式增量、思考过程折叠、停止、清空对话，输入框 Ctrl/⌘ + Enter 发送。
+- **日志标明测试**：`downstreamClientContext` 现在把带 `x-metapi-tester-request: 1` 的请求优先识别成 `clientAppName = 模型测试`（会盖过 Cherry Studio 之类的弱指纹）。测试代理请求本来就带这个头，所以操练厂和这个对话弹窗的流量在代理日志里都会显示为「模型测试」。
+- **快捷提示词**：弹窗底部的「快捷提示词」面板一次拉取全部启用题目（新增 `GET /api/prompt-cases`，带题库名），支持按标题 / 题库 / 内容搜索，点一下填进输入框，也可以照常手动输入。
+- **题库补齐**：内置题库新增「时钟测试」（SVG 时钟指向 10:10）和「六边形弹跳球」（单文件 HTML 的旋转六边形弹跳球），加上原有的鹈鹕测试 / 糖果测试 / 经典推理测试共 5 个。启动时 `ensureBuiltinPromptPresets()` 按 slug 幂等补齐——换库或新装后不用再手动点导入，已有的题库不会被覆盖。
+
+#### 测试与实测
+- 新增 / 更新单测：`listChatChannelsForSiteModel`（pattern 命中、转发路由按对外名命中且 `upstream_model` 取 `source_model`、过滤他站 / 禁用通道 / 空参数）；`detectDownstreamClientContext` 测试头优先于其它指纹；`GET /api/prompt-cases` 带题库名且只回启用题；`ensureBuiltinPromptPresets` 幂等；web 断言「对话」入口 + 弹窗要素。
+- 相关套件 85 例通过，`promptLibrary.test.ts` 内置预设 slug 断言同步更新；两道 `tsc` 通过。
+
 ### 59. 站点公告只同步最近 2 天（新增保留窗口 + 历史公告清理）
 
 - **类型**：优化

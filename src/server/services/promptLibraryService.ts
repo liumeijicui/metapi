@@ -204,6 +204,51 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
       },
     ],
   },
+  {
+    name: '时钟测试',
+    slug: 'clock-test',
+    description:
+      '让模型画一个指向固定时刻的 SVG 时钟。表盘刻度、指针角度、指针长度都要对，是检验「几何关系 + 是否真的把指针画到 10:10 而不是 1:50」的经典视觉题。',
+    category: '视觉生成',
+    sourceUrl: null,
+    tags: ['视觉', 'SVG', '几何'],
+    sortOrder: 40,
+    cases: [
+      {
+        title: 'SVG 时钟指向 10:10',
+        prompt: 'Generate an SVG of an analog clock showing the time 10:10',
+        expectedAnswer: null,
+        answerNotes:
+          '主观视觉题，无唯一答案。评分要点：①输出可直接渲染的 <svg>（不是文字描述或图片链接）；②12 个时刻刻度齐全，数字或刻度线位置正确；③时针指向 10 与 11 之间偏 10（10:10 时时针约在 10 点的 1/6 处，不是正对 10）、分针正对 2；④时针比分针短；⑤中心有转轴。常见失败：指针角度反了（画成 1:50）、两根指针一样长、刻度缺失。',
+        judgeMode: 'manual',
+        tags: ['几何', '指针角度'],
+        sortOrder: 10,
+      },
+    ],
+  },
+  {
+    name: '六边形弹跳球',
+    slug: 'hexagon-bounce',
+    description:
+      '要求用一个 HTML 文件画出「小球在一个旋转的六边形里弹跳并遵守物理规律」。考验模型把几何、碰撞与动画写进一份可运行代码的能力，是 GPT-5 发布时用来演示代码能力的题目。',
+    category: '代码生成',
+    sourceUrl: null,
+    tags: ['代码', '物理', '动画'],
+    sortOrder: 50,
+    cases: [
+      {
+        title: '旋转六边形里的弹跳球（单文件）',
+        prompt:
+          'Write a single HTML file with JavaScript that renders a ball bouncing inside a rotating hexagon. The ball must obey the laws of physics (gravity, no energy loss on wall collisions, correct collision detection against the rotating walls). Include the drawing code as well.',
+        expectedAnswer: null,
+        answerNotes:
+          '主观代码题，无唯一答案。评分要点：①是可独立运行的单文件（内联 <script>/<canvas>，不需要外部依赖）；②六边形在持续旋转；③小球受重力、会随时间下落到下壁；④与旋转的边做碰撞检测（把球速变换到墙面坐标系处理），碰壁后速度方向正确、速率基本守恒；⑤球不会穿墙或卡住；⑥能实际跑起来。常见失败：六边形不转、球穿墙、把碰撞写成「碰到屏幕边缘反弹」、需要外部库导致跑不起来。',
+        judgeMode: 'manual',
+        tags: ['单文件', '碰撞检测'],
+        sortOrder: 10,
+      },
+    ],
+  },
 ];
 
 function normalizeTags(input: unknown): string[] {
@@ -582,6 +627,56 @@ export async function listBuiltinPromptPresets(): Promise<BuiltinPromptPresetVie
     const suiteId = bySlug.get(preset.slug) ?? null;
     return { ...preset, imported: suiteId !== null, suiteId };
   });
+}
+
+/** 启动时用：把所有内置题库补齐，已存在（按 slug）的跳过，不覆盖用户改动。 */
+export async function ensureBuiltinPromptPresets(): Promise<{ imported: string[] }> {
+  const existing = await db
+    .select({ slug: schema.promptSuites.slug })
+    .from(schema.promptSuites)
+    .all();
+  const present = new Set(existing.map((row) => String(row.slug)));
+  const imported: string[] = [];
+  for (const preset of BUILTIN_PROMPT_PRESETS) {
+    if (present.has(preset.slug)) continue;
+    await importBuiltinPromptPreset(preset.slug);
+    imported.push(preset.slug);
+  }
+  return { imported };
+}
+
+/** 对话弹窗的「快捷提示词」用：一次性取出所有启用题目，带题库名。 */
+export type PromptCaseWithSuite = PromptCaseRow & {
+  suiteName: string;
+  suiteSlug: string;
+  suiteCategory: string | null;
+};
+
+export async function listEnabledPromptCasesWithSuite(): Promise<PromptCaseWithSuite[]> {
+  const rows = await db
+    .select({
+      case: schema.promptCases,
+      suiteName: schema.promptSuites.name,
+      suiteSlug: schema.promptSuites.slug,
+      suiteCategory: schema.promptSuites.category,
+      suiteSortOrder: schema.promptSuites.sortOrder,
+    })
+    .from(schema.promptCases)
+    .innerJoin(schema.promptSuites, eq(schema.promptSuites.id, schema.promptCases.suiteId))
+    .where(eq(schema.promptCases.enabled, true))
+    .orderBy(
+      asc(schema.promptSuites.sortOrder),
+      asc(schema.promptSuites.id),
+      asc(schema.promptCases.sortOrder),
+      asc(schema.promptCases.id),
+    )
+    .all();
+  return rows.map((row) => ({
+    ...toCaseRow(row.case),
+    suiteName: row.suiteName,
+    suiteSlug: row.suiteSlug,
+    suiteCategory: row.suiteCategory ?? null,
+  }));
 }
 
 export type ImportPromptPresetResult = {

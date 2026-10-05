@@ -14,6 +14,12 @@ interface RequestSnapshot {
 }
 
 const COOKIE_SESSION_TOKEN = 'cookie-session-token';
+const SECURITY_GATE_SESSION = 'security-gate-session';
+const SECURITY_GATE_VERIFIED_SESSION = 'security-gate-verified-session';
+const SECURITY_GATE_CHALLENGE = 'challenge-token-abc';
+const SECURITY_GATE_PASSWORD = 'account-password-16';
+const SECURITY_GATE_CREATED_KEY = 'sk-createdOnlyInCreateResponse000000';
+const SECURITY_GATE_NO_PASSWORD_SESSION = 'security-gate-no-password-session';
 const COOKIE_REQUIRES_USER_TOKEN = 'cookie-requires-user';
 const COOKIE_REQUIRES_X_USER_ID_TOKEN = 'cookie-requires-x-user-id';
 const CHECKIN_ALREADY_TOKEN = 'checkin-already-token';
@@ -241,7 +247,71 @@ describe('NewApiAdapter', () => {
         return;
       }
 
+      if (req.url === '/api/verify') {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          let parsed: any = null;
+          try { parsed = JSON.parse(body); } catch {}
+          if (parsed?.method !== 'password' || parsed?.code !== SECURITY_GATE_PASSWORD) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: '密码错误' }));
+            return;
+          }
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Set-Cookie': `session=${SECURITY_GATE_VERIFIED_SESSION}; Path=/; HttpOnly`,
+          });
+          res.end(JSON.stringify({ success: true, data: { verified: true }, message: '验证成功' }));
+        });
+        return;
+      }
+
       if (req.url?.startsWith('/api/token/')) {
+        const gateCookie = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+
+        // 建密钥被挡在「安全验证」后面的分支：只有验证过的新会话才能建成功，
+        // 且明文 key 只出现在创建响应里（列表永远脱敏）。
+        if (req.method === 'POST' && gateCookie.includes(`session=${SECURITY_GATE_SESSION}`)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            code: 'VERIFICATION_REQUIRED',
+            message: '需要安全验证',
+            verification_challenge: SECURITY_GATE_CHALLENGE,
+          }));
+          return;
+        }
+        if (req.method === 'POST' && gateCookie.includes(`session=${SECURITY_GATE_NO_PASSWORD_SESSION}`)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            code: 'VERIFICATION_REQUIRED',
+            message: '需要安全验证',
+            verification_challenge: SECURITY_GATE_CHALLENGE,
+          }));
+          return;
+        }
+        if (req.method === 'POST' && gateCookie.includes(`session=${SECURITY_GATE_VERIFIED_SESSION}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 9001, name: 'metapi', key: SECURITY_GATE_CREATED_KEY, group: 'default', unlimited_quota: true },
+          }));
+          return;
+        }
+        if (gateCookie.includes(`session=${SECURITY_GATE_SESSION}`) || gateCookie.includes(`session=${SECURITY_GATE_VERIFIED_SESSION}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: {
+              page: 1,
+              total: 1,
+              items: [{ id: 426602, name: 'li', key: 'v6cc**********qe25', status: 1, group: 'default', unlimited_quota: true }],
+            },
+          }));
+          return;
+        }
+
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer auth_token=${AUTH_TOKEN_SIGNIN_ONLY_TOKEN}`) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
@@ -1435,5 +1505,47 @@ describe('NewApiAdapter', () => {
         rawPayload: { success: true, data: 'Welcome to the site' },
       },
     ]);
+  });
+  it('建密钥时用账号密码过站点的安全验证，并回传明文 key 与新会话', async () => {
+    const adapter = new NewApiAdapter();
+
+    const created = await adapter.createApiTokenWithValue(
+      baseUrl,
+      SECURITY_GATE_SESSION,
+      undefined,
+      { name: 'metapi', unlimitedQuota: true, securityPassword: SECURITY_GATE_PASSWORD },
+    );
+
+    expect(created?.key).toBe(SECURITY_GATE_CREATED_KEY);
+    expect(created?.name).toBe('metapi');
+    // 过验证换来的新会话要回传，调用方才能存回账号。
+    expect(created?.rotatedSession?.cookieName).toBe('session');
+    expect(created?.rotatedSession?.value).toBe(SECURITY_GATE_VERIFIED_SESSION);
+    expect(created?.rotatedSession?.previousValue).toBe(SECURITY_GATE_SESSION);
+
+    // 重试用的是验证后的会话，而且发生在过验证之后。
+    const createCalls = requests.filter((r) => r.method === 'POST' && r.url?.startsWith('/api/token/'));
+    const verifiedCreate = createCalls.findIndex(
+      (r) => String(r.headers.cookie || '').includes(`session=${SECURITY_GATE_VERIFIED_SESSION}`),
+    );
+    expect(verifiedCreate).toBeGreaterThan(-1);
+    const verifyIndex = requests.findIndex((r) => r.url === '/api/verify');
+    expect(verifyIndex).toBeGreaterThan(-1);
+    // 建密钥真正成功的那次必须在验证之后
+    expect(requests.indexOf(createCalls[verifiedCreate])).toBeGreaterThan(verifyIndex);
+  });
+
+  it('没给密码时安全验证过不去，不会返回半成品 key', async () => {
+    const adapter = new NewApiAdapter();
+
+    const created = await adapter.createApiTokenWithValue(
+      baseUrl,
+      SECURITY_GATE_NO_PASSWORD_SESSION,
+      undefined,
+      { name: 'metapi', unlimitedQuota: true },
+    );
+
+    expect(created).toBeNull();
+    expect(requests.some((r) => r.url === '/api/verify')).toBe(false);
   });
 });

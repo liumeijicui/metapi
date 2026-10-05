@@ -43,6 +43,7 @@ import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
 import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackfill.js';
 import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { startSiteAnnouncementPolling, stopSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
+import { ensureBuiltinPromptPresets } from './services/promptLibraryService.js';
 import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
@@ -275,6 +276,16 @@ if (existsSync(webDir)) {
 // Start scheduler
 await startScheduler();
 await reloadBackupWebdavScheduler();
+try {
+  // 内置题库（鹈鹕测试 / 糖果测试 / 时钟 / 六边形弹跳球…）幂等补齐，
+  // 换库或新装后不用手动去提示词管理里点导入。
+  const { imported } = await ensureBuiltinPromptPresets();
+  if (imported.length) {
+    console.log(`[PromptLibrary] imported builtin presets: ${imported.join(', ')}`);
+  }
+} catch (error) {
+  console.warn(`Failed to ensure builtin prompt presets: ${(error as Error)?.message || 'unknown error'}`);
+}
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startModelMonitorScheduler();

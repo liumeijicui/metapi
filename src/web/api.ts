@@ -1485,6 +1485,11 @@ export const api = {
   },
   refreshModelMonitor: () =>
     request("/api/model-monitor/refresh", { method: "POST" }),
+  getModelMonitorChatChannels: (siteId: number, model: string) =>
+    request<{ success: boolean; channels: any[] }>(
+      `/api/model-monitor/chat-channels?siteId=${encodeURIComponent(String(siteId))}&model=${encodeURIComponent(model)}`,
+      { timeoutMs: 30_000 },
+    ),
 
   // 提示词管理：题库（suite）+ 题目（case），题目可带标准答案或评分要点
   getPromptSuites: () =>
@@ -1528,6 +1533,11 @@ export const api = {
   deletePromptCase: (caseId: number) =>
     request(`/api/prompt-cases/${caseId}`, {
       method: "DELETE",
+      timeoutMs: 30_000,
+    }),
+  // 对话弹窗的快捷提示词：一次拿全部启用题目（带题库名）
+  getPromptCases: () =>
+    request<{ success: boolean; cases: any[] }>("/api/prompt-cases", {
       timeoutMs: 30_000,
     }),
   getPromptPresets: () =>

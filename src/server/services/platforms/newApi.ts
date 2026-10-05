@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type CheckinContext, type SiteAnnouncement, type SiteSessionInfo, type LoginResult, type PerfMetricsModel, type PerfMetricsOutcome, type PerfMetricsSample, type PerfMetricsSummary } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type CreatedApiToken, type CheckinContext, type SiteAnnouncement, type SiteSessionInfo, type LoginResult, type PerfMetricsModel, type PerfMetricsOutcome, type PerfMetricsSample, type PerfMetricsSummary } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -2257,34 +2257,172 @@ export class NewApiAdapter extends BasePlatformAdapter {
     platformUserId?: number,
     options?: CreateApiTokenOptions,
   ): Promise<boolean> {
-    accessToken = await this.resolveBearerToken(baseUrl, accessToken);
+    const created = await this.createApiTokenWithValue(baseUrl, accessToken, platformUserId, options);
+    return created !== null;
+  }
+
+  /**
+   * Same write as `createApiToken`, but it keeps the key the site answered with.
+   *
+   * Plenty of forks mask their token listing and ship no reveal route, so the
+   * create response is the only place the plaintext ever appears. Returning it
+   * here is what keeps a key this server minted usable instead of leaving an
+   * unreadable row behind.
+   *
+   * Some of those forks also gate the write behind a second factor: `POST
+   * /api/token/` answers `403 VERIFICATION_REQUIRED` with a one-shot challenge,
+   * and the key is only created after `POST /api/verify` succeeds with the
+   * account password. The verification hands back an upgraded session cookie,
+   * which is reported as `rotatedSession` so the caller can store it.
+   */
+  async createApiTokenWithValue(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+    options?: CreateApiTokenOptions,
+  ): Promise<CreatedApiToken | null> {
+    const resolvedAccessToken = await this.resolveBearerToken(baseUrl, accessToken);
     const payload = JSON.stringify(this.buildDefaultTokenPayload(options));
-    const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
+    const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, resolvedAccessToken);
 
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/api/token/`, {
         method: 'POST',
-        headers: this.authHeaders(accessToken, resolvedUserId || undefined),
+        headers: this.authHeaders(resolvedAccessToken, resolvedUserId || undefined),
         body: payload,
       });
-      if (res?.success) return true;
+      const captured = this.readCreatedToken(res, options);
+      if (captured) return captured;
     } catch {}
 
-    const cookieUserId = resolvedUserId || await this.probeUserIdByCookie(baseUrl, accessToken);
-    for (const cookie of this.buildCookieCandidates(accessToken)) {
-      try {
-        const headers: Record<string, string> = { Cookie: cookie };
-        this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
-        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/`, {
-          method: 'POST',
-          headers,
-          body: payload,
-        });
-        if (res?.success) return true;
-      } catch {}
+    const cookieUserId = resolvedUserId || await this.probeUserIdByCookie(baseUrl, resolvedAccessToken);
+    for (const cookie of this.buildCookieCandidates(resolvedAccessToken)) {
+      const attempt = await this.createTokenWithCookie(baseUrl, cookie, cookieUserId, payload, options);
+      if (attempt) return attempt;
     }
 
-    return false;
+    return null;
+  }
+
+  /**
+   * One cookie-credential create attempt, including the security-check retry.
+   *
+   * The challenge is spent by the verify call, so the retry has to run with the
+   * upgraded session the verify answered with — reusing the original cookie just
+   * earns a fresh challenge.
+   */
+  private async createTokenWithCookie(
+    baseUrl: string,
+    cookie: string,
+    cookieUserId: number | null,
+    payload: string,
+    options?: CreateApiTokenOptions,
+  ): Promise<CreatedApiToken | null> {
+    const buildHeaders = (cookieHeader: string): Record<string, string> => {
+      const headers: Record<string, string> = { Cookie: cookieHeader };
+      this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
+      return headers;
+    };
+
+    try {
+      const outcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/token/`, {
+        method: 'POST',
+        headers: buildHeaders(cookie),
+        body: payload,
+      });
+      const captured = this.readCreatedToken(outcome.data, options);
+      if (captured) return captured;
+
+      const challenge = this.readSecurityChallenge(outcome.data);
+      const password = (options?.securityPassword || '').trim();
+      if (!challenge || !password) return null;
+
+      const verified = await this.verifySecurityChallenge(baseUrl, cookie, cookieUserId, password, challenge);
+      if (!verified.ok || !verified.sessionCookie) return null;
+
+      const previousValue = this.readCookieValue(cookie, 'session');
+      const retryOutcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/token/`, {
+        method: 'POST',
+        headers: buildHeaders(verified.sessionCookie),
+        body: payload,
+      });
+      const retryCaptured = this.readCreatedToken(retryOutcome.data, options);
+      if (!retryCaptured) return null;
+      return {
+        ...retryCaptured,
+        rotatedSession: {
+          cookieName: 'session',
+          value: this.readCookieValue(verified.sessionCookie, 'session') || verified.sessionCookie,
+          previousValue: previousValue || undefined,
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private readCreatedToken(
+    payload: any,
+    options?: CreateApiTokenOptions,
+  ): CreatedApiToken | null {
+    if (!payload?.success) return null;
+    const key = typeof payload?.data?.key === 'string' ? payload.data.key.trim() : '';
+    const name = typeof payload?.data?.name === 'string' && payload.data.name.trim()
+      ? payload.data.name.trim()
+      : (options?.name || '').trim() || 'metapi';
+    const group = typeof payload?.data?.group === 'string' ? payload.data.group.trim() : '';
+    return {
+      name,
+      // A masked echo is not a key: report null so the caller reads the listing
+      // instead of storing a placeholder.
+      key: key && !this.isMaskedTokenKey(key) ? key : null,
+      tokenGroup: group || null,
+    };
+  }
+
+  private readSecurityChallenge(payload: any): string | null {
+    const code = typeof payload?.code === 'string' ? payload.code.toUpperCase() : '';
+    if (!code.startsWith('VERIFICATION_')) return null;
+    const challenge = typeof payload?.verification_challenge === 'string'
+      ? payload.verification_challenge.trim()
+      : '';
+    return challenge || null;
+  }
+
+  /**
+   * Completes the site's own second-factor step.
+   *
+   * The success answer carries an upgraded session in `Set-Cookie`, and that
+   * cookie — not the one sent — is what the retried write must present.
+   */
+  private async verifySecurityChallenge(
+    baseUrl: string,
+    cookie: string,
+    cookieUserId: number | null,
+    password: string,
+    challenge: string,
+  ): Promise<{ ok: boolean; sessionCookie: string | null }> {
+    try {
+      const headers: Record<string, string> = { Cookie: cookie };
+      this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
+      const outcome = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/verify`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ method: 'password', code: password, challenge }),
+      });
+      if (!outcome.data?.success) return { ok: false, sessionCookie: null };
+      const next = this.readCookieValue(outcome.cookieHeader, 'session');
+      if (!next) return { ok: false, sessionCookie: null };
+      return { ok: true, sessionCookie: this.upsertCookie(cookie, 'session', next) };
+    } catch {
+      return { ok: false, sessionCookie: null };
+    }
+  }
+
+  private readCookieValue(cookieHeader: string, name: string): string | null {
+    if (!cookieHeader) return null;
+    const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`, 'i'));
+    return match?.[1]?.trim() || null;
   }
 
   async getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]> {

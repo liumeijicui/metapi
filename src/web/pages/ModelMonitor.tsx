@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import Combobox from '../components/Combobox.js';
+import ModelChatModal from '../components/ModelChatModal.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -227,6 +228,7 @@ export default function ModelMonitor() {
   const [attachTarget, setAttachTarget] = useState<ModelRow | null>(null);
   const [attachModelName, setAttachModelName] = useState('');
   const [attachBusy, setAttachBusy] = useState(false);
+  const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);
   const [forwardNames, setForwardNames] = useState<string[]>([]);
   const [forwardNamesLoaded, setForwardNamesLoaded] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -672,15 +674,26 @@ export default function ModelMonitor() {
               {formatModelPrice(model) ? (
                 <div className="model-monitor-card-price">{formatModelPrice(model)}</div>
               ) : null}
-              <button
-                type="button"
-                className="btn btn-link"
-                style={{ fontSize: 11.5, padding: 0, alignSelf: 'flex-start' }}
-                title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
-                onClick={() => void openAttach(model)}
-              >
-                {tr('挂到转发')}
-              </button>
+              <div className="model-monitor-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-link"
+                  style={{ fontSize: 11.5, padding: 0 }}
+                  title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
+                  onClick={() => setChatTarget(model)}
+                >
+                  {tr('对话')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-link"
+                  style={{ fontSize: 11.5, padding: 0 }}
+                  title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
+                  onClick={() => void openAttach(model)}
+                >
+                  {tr('挂到转发')}
+                </button>
+              </div>
             </div>
             );
           })}
@@ -735,15 +748,26 @@ export default function ModelMonitor() {
                   <td className="model-monitor-price">{formatModelPrice(model) || '—'}</td>
                   <td title={formatTimestamp(model.fetchedAt)}>{formatRelative(model.fetchedAt)}</td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn btn-link"
-                      style={{ fontSize: 12, padding: 0 }}
-                      title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
-                      onClick={() => void openAttach(model)}
-                    >
-                      {tr('挂到转发')}
-                    </button>
+                    <div className="model-monitor-row-actions">
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        style={{ fontSize: 12, padding: 0 }}
+                        title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
+                        onClick={() => setChatTarget(model)}
+                      >
+                        {tr('对话')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        style={{ fontSize: 12, padding: 0 }}
+                        title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
+                        onClick={() => void openAttach(model)}
+                      >
+                        {tr('挂到转发')}
+                      </button>
+                    </div>
                   </td>
                 </tr>
                 );
@@ -762,6 +786,17 @@ export default function ModelMonitor() {
           <i className="model-monitor-bar is-unknown" /> {tr('无采样')}
         </span>
       </div>
+
+      <ModelChatModal
+        open={chatTarget !== null}
+        target={chatTarget ? {
+          modelName: chatTarget.modelName,
+          siteId: chatTarget.siteId,
+          siteName: chatTarget.siteName,
+          siteUrl: chatTarget.siteUrl,
+        } : null}
+        onClose={() => setChatTarget(null)}
+      />
 
       <CenteredModal
         open={attachTarget !== null}

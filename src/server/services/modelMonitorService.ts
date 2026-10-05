@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
+import { matchesModelPattern } from './tokenRouter.js';
 import { getAdapter } from './platforms/index.js';
 import { isReadyAccountToken } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
@@ -886,6 +887,74 @@ export function __resetModelMonitorStateForTests(): void {
   monitorLastRunFinishedAtIso = null;
   monitorSkippedRuns = 0;
   modelMonitorPricingLoader = fetchModelPricingCatalog;
+}
+
+/**
+ * 「对话」用的可固定通道：某站点下、能接这个模型（按路由 pattern 或对外显示名
+ * 命中）且启用的通道。返回空数组时页面只提供「自动路由」。
+ */
+export type ModelMonitorChatChannel = {
+  channelId: number;
+  routeId: number;
+  routeName: string;
+  sourceModel: string | null;
+  accountName: string;
+  /** 通道实际会请求的上游模型名：转发通道用自己的 source_model，否则用路由暴露的名字。 */
+  upstreamModel: string;
+};
+
+export async function listChatChannelsForSiteModel(
+  siteId: number,
+  modelName: string,
+): Promise<ModelMonitorChatChannel[]> {
+  const model = String(modelName || '').trim();
+  if (!Number.isFinite(siteId) || siteId <= 0 || !model) return [];
+
+  const rows: Array<{
+    channelId: number;
+    routeId: number;
+    routeModel: string | null;
+    routeName: string | null;
+    routeMode: string | null;
+    channelEnabled: boolean | null;
+    sourceModel: string | null;
+    accountName: string | null;
+    accountTokenName: string | null;
+  }> = await db.select({
+    channelId: schema.routeChannels.id,
+    routeId: schema.tokenRoutes.id,
+    routeModel: schema.tokenRoutes.modelPattern,
+    routeName: schema.tokenRoutes.displayName,
+    routeMode: schema.tokenRoutes.routeMode,
+    channelEnabled: schema.routeChannels.enabled,
+    sourceModel: schema.routeChannels.sourceModel,
+    accountName: schema.accounts.username,
+  })
+    .from(schema.routeChannels)
+    .innerJoin(schema.tokenRoutes, eq(schema.tokenRoutes.id, schema.routeChannels.routeId))
+    .innerJoin(schema.accounts, eq(schema.accounts.id, schema.routeChannels.accountId))
+    .where(and(
+      eq(schema.accounts.siteId, siteId),
+      eq(schema.routeChannels.enabled, true),
+    ))
+    .orderBy(asc(schema.routeChannels.priority), asc(schema.routeChannels.id))
+    .all();
+
+  const matched = rows.filter((row) => {
+    const pattern = String(row.routeModel || '');
+    const displayName = String(row.routeName || '').trim();
+    // 转发路由的暴露名在 display_name 上（model_pattern 是 forward:<名字>）。
+    return matchesModelPattern(model, pattern) || displayName === model;
+  });
+
+  return matched.map((row) => ({
+    channelId: row.channelId,
+    routeId: row.routeId,
+    routeName: String(row.routeName || '').trim() || String(row.routeModel || ''),
+    sourceModel: row.sourceModel ? String(row.sourceModel) : null,
+    accountName: String(row.accountName || '') || `#${row.channelId}`,
+    upstreamModel: row.sourceModel ? String(row.sourceModel) : (String(row.routeModel || '').trim() || model),
+  }));
 }
 
 export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}): Promise<ModelMonitorOverview> {
