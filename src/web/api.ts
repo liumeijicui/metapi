@@ -1448,6 +1448,60 @@ export const api = {
   refreshModelMonitor: () =>
     request("/api/model-monitor/refresh", { method: "POST" }),
 
+  // 提示词管理：题库（suite）+ 题目（case），题目可带标准答案或评分要点
+  getPromptSuites: () =>
+    request<{ success: boolean; suites: any[] }>("/api/prompt-suites", {
+      timeoutMs: 30_000,
+    }),
+  getPromptSuiteCases: (suiteId: number) =>
+    request<{ success: boolean; cases: any[] }>(
+      `/api/prompt-suites/${suiteId}/cases`,
+      { timeoutMs: 30_000 },
+    ),
+  createPromptSuite: (payload: Record<string, unknown>) =>
+    request("/api/prompt-suites", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
+  updatePromptSuite: (suiteId: number, payload: Record<string, unknown>) =>
+    request(`/api/prompt-suites/${suiteId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
+  deletePromptSuite: (suiteId: number) =>
+    request(`/api/prompt-suites/${suiteId}`, {
+      method: "DELETE",
+      timeoutMs: 30_000,
+    }),
+  createPromptCase: (payload: Record<string, unknown>) =>
+    request("/api/prompt-cases", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
+  updatePromptCase: (caseId: number, payload: Record<string, unknown>) =>
+    request(`/api/prompt-cases/${caseId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
+  deletePromptCase: (caseId: number) =>
+    request(`/api/prompt-cases/${caseId}`, {
+      method: "DELETE",
+      timeoutMs: 30_000,
+    }),
+  getPromptPresets: () =>
+    request<{ success: boolean; presets: any[] }>("/api/prompt-presets", {
+      timeoutMs: 30_000,
+    }),
+  importPromptPreset: (slug: string) =>
+    request(`/api/prompt-presets/${encodeURIComponent(slug)}/import`, {
+      method: "POST",
+      timeoutMs: 30_000,
+    }),
+
   // Assisted login (managed browser session reused for community-site sign-in)
   getAssistedLoginProviders: () =>
     request("/api/assisted-login/providers", { timeoutMs: 30_000 }),

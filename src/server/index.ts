@@ -27,6 +27,7 @@ import {
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
+import { promptLibraryRoutes } from './routes/api/promptLibrary.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
@@ -230,6 +231,7 @@ await app.register(accountTokensRoutes);
 await app.register(searchRoutes);
 await app.register(eventsRoutes);
 await app.register(siteAnnouncementsRoutes);
+await app.register(promptLibraryRoutes);
 await app.register(updateCenterRoutes);
 await app.register(taskRoutes);
 await app.register(testRoutes);

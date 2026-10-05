@@ -1,3 +1,19 @@
+### 51. 新增「提示词管理」：题库 + 题目 + 标准答案/评分要点，内置鹈鹕测试与糖果测试
+
+- **类型**：新功能（评测提示词登记）
+- **需求来源**：本会话（用户：「帮我加个提示词管理的效果，有鹈鹕测试，糖果测试等等测试提示词，然后可能有些题目是有答案的，也一并登记」）
+- **数据模型**：新增两张表 `prompt_suites`（题库）与 `prompt_cases`（题目），迁移 `drizzle/0030_perfect_firebird.sql`。题目字段里 `expected_answer` 可空——主观题只登记 `answer_notes`（评分清单），`judge_mode` 取 `exact` / `contains` / `regex` / `manual`，默认 `manual`；题库按 `slug` 唯一，题目按 `(suite_id, title)` 唯一，删题库级联删题。
+- **内置题库（预设，不硬编码进库，一键导入才落表）**：
+  - **鹈鹕测试**（Pelican Benchmark，出处 Simon Willison 2024-08）：原版 SVG 题 + 动画/无背景变体 + 中文指令变体，共 3 题；视觉主观题，没有唯一答案，登记的是评分要点（必须是可渲染 SVG、车轮/车架/车把/脚踏齐全、鹈鹕大喙与喉囊可辨、脚踩脚踏等）。
+  - **糖果测试**：图中共 21 颗（9 圆 + 12 星），题目带**标准答案** `21`（`exact`），另一题只数圆形糖果答案 `9`，并写明常见错误答案 24/18/30、必须配图。
+  - **经典推理测试**：strawberry 里几个 r（3）、9.11 与 9.9 哪个大（9.9）、一公斤棉花与一公斤铁（一样重），都带标准答案。
+  - 导入幂等：按 `slug` 复用题库、按 `(suiteId,title)` 跳过已存在题目，**不覆盖用户改动**；已导入的题库再点一次只会「补齐缺失题目」。
+- **后端**：`src/server/services/promptLibraryService.ts`（题库/题目 CRUD、标签归一化、判定方式校验、内置预设与幂等导入、`PromptLibraryError`）、`src/server/routes/api/promptLibrary.ts`（`/api/prompt-suites*`、`/api/prompt-cases*`、`/api/prompt-presets`、`/api/prompt-presets/:slug/import`），并在 `src/server/index.ts` 注册；两张新表加进 `TABLES_WITH_NUMERIC_ID`，保证 MySQL/Postgres 下插入能拿到自增 id。
+- **前端**：新增页面 `/prompts`「提示词管理」（侧边栏排在「模型监控」之后）。按仓库分层要求，顶层 `src/web/pages/PromptLibrary.tsx` 只做编排，编辑弹窗/表格拆到 `src/web/pages/prompt-library/`（`SuiteEditorModal` / `CaseEditorModal` / `PresetImportModal` / `CaseTable` / `types`）。功能：题库下拉（可搜索）、题目关键字过滤、题库与题目的增删改、题目启用/禁用、一键复制提示词、导入内置题库弹窗；移动端题目以卡片呈现。
+- **测试与门禁**：新增 `promptLibraryService.test.ts`（6 例：标签/判定归一化、重复拦截、导入幂等与补齐、鹈鹕全为主观题、级联删除、未知预设报错）、`routes/api/promptLibrary.test.ts`（4 例：增改查、非法入参 400、预设导入幂等、删除级联）、`web/pages/promptLibrary.architecture.test.ts`（5 例：分层、答案可空、四种判定方式、预设导入接线、路由/侧边栏/API 接线）。`test:schema:unit` 15 例通过，server/web 两道 `tsc` 通过，`build:server` 与 `vite build` 通过，已 `systemctl restart metapi` 并确认 `prompt_suites` / `prompt_cases` 在生产库建出。
+- **主要文件**：`src/server/db/schema.ts`、`drizzle/0030_perfect_firebird.sql`、`src/server/services/promptLibraryService.ts`、`src/server/routes/api/promptLibrary.ts`、`src/server/index.ts`、`src/web/pages/PromptLibrary.tsx`、`src/web/pages/prompt-library/*`、`src/web/App.tsx`、`src/web/api.ts`、`src/web/index.css`
+- **状态**：已完成（题库/题目 CRUD、内置题库导入、页面与接口均已上线；如需删除题库请在页面上操作，删除会连带清掉题目）
+
 ### 50. Sub2API 会话保活补齐：登录不再丢 refresh token，续期失败会接着走重登
 
 - **类型**：缺陷修复（凭据持久化 + 续期兜底）

@@ -612,3 +612,42 @@ export const events = sqliteTable('events', {
   typeCreatedIdx: index('events_type_created_at_idx').on(table.type, table.createdAt),
   createdAtIdx: index('events_created_at_idx').on(table.createdAt),
 }));
+
+// 提示词管理：把「鹈鹕测试」「糖果测试」这类用于评测模型的提示词按题库
+// （suite）归档，题目（case）可以带标准答案或评分要点。答案不是必需的，
+// 视觉/主观类题目只登记评分清单，用 judge_mode='manual' 表示需要人工判分。
+export const promptSuites = sqliteTable('prompt_suites', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  description: text('description'),
+  category: text('category'),
+  sourceUrl: text('source_url'),
+  tags: text('tags'), // JSON: string[]
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  slugUnique: uniqueIndex('prompt_suites_slug_unique').on(table.slug),
+  categoryIdx: index('prompt_suites_category_idx').on(table.category),
+}));
+
+export const promptCases = sqliteTable('prompt_cases', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  suiteId: integer('suite_id').notNull().references(() => promptSuites.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  prompt: text('prompt').notNull(),
+  // 标准答案/参考答案，可空（主观题只给评分要点）。
+  expectedAnswer: text('expected_answer'),
+  answerNotes: text('answer_notes'),
+  judgeMode: text('judge_mode').notNull().default('manual'), // 'exact' | 'contains' | 'regex' | 'manual'
+  tags: text('tags'), // JSON: string[]
+  sortOrder: integer('sort_order').notNull().default(0),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  suiteTitleUnique: uniqueIndex('prompt_cases_suite_title_unique').on(table.suiteId, table.title),
+  suiteIdIdx: index('prompt_cases_suite_id_idx').on(table.suiteId),
+  enabledIdx: index('prompt_cases_enabled_idx').on(table.enabled),
+}));

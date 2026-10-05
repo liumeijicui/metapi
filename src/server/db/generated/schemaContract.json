@@ -872,6 +872,146 @@
         }
       }
     },
+    "prompt_cases": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "suite_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "title": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "prompt": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "expected_answer": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "answer_notes": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "judge_mode": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'manual'",
+          "primaryKey": false
+        },
+        "tags": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "sort_order": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "enabled": {
+          "logicalType": "boolean",
+          "notNull": true,
+          "defaultValue": "true",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "prompt_suites": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "slug": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "description": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "category": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source_url": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "tags": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "sort_order": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "proxy_debug_attempts": {
       "columns": {
         "id": {
@@ -2751,6 +2891,47 @@
       "unique": false
     },
     {
+      "name": "prompt_cases_enabled_idx",
+      "table": "prompt_cases",
+      "columns": [
+        "enabled"
+      ],
+      "unique": false
+    },
+    {
+      "name": "prompt_cases_suite_id_idx",
+      "table": "prompt_cases",
+      "columns": [
+        "suite_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "prompt_cases_suite_title_unique",
+      "table": "prompt_cases",
+      "columns": [
+        "suite_id",
+        "title"
+      ],
+      "unique": true
+    },
+    {
+      "name": "prompt_suites_category_idx",
+      "table": "prompt_suites",
+      "columns": [
+        "category"
+      ],
+      "unique": false
+    },
+    {
+      "name": "prompt_suites_slug_unique",
+      "table": "prompt_suites",
+      "columns": [
+        "slug"
+      ],
+      "unique": true
+    },
+    {
       "name": "proxy_debug_attempts_trace_attempt_unique",
       "table": "proxy_debug_attempts",
       "columns": [
@@ -3253,6 +3434,21 @@
       ]
     },
     {
+      "name": "prompt_cases_suite_title_unique",
+      "table": "prompt_cases",
+      "columns": [
+        "suite_id",
+        "title"
+      ]
+    },
+    {
+      "name": "prompt_suites_slug_unique",
+      "table": "prompt_suites",
+      "columns": [
+        "slug"
+      ]
+    },
+    {
       "name": "proxy_debug_attempts_trace_attempt_unique",
       "table": "proxy_debug_attempts",
       "columns": [
@@ -3438,6 +3634,17 @@
         "site_id"
       ],
       "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "prompt_cases",
+      "columns": [
+        "suite_id"
+      ],
+      "referencedTable": "prompt_suites",
       "referencedColumns": [
         "id"
       ],

@@ -211,6 +211,13 @@
       "when": 1791103349500,
       "tag": "0029_square_hydra",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1791185892976,
+      "tag": "0030_perfect_firebird",
+      "breakpoints": true
     }
   ]
 }
