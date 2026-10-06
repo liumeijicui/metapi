@@ -617,6 +617,113 @@ export type BuiltinPromptPresetView = BuiltinPromptPreset & {
   suiteId: number | null;
 };
 
+/**
+ * 简化版提示词管理的默认题库。
+ *
+ * 页面只暴露一个平铺列表（题目名称 / 题目描述 / 答案），不再让用户先建题库
+ * 再进题库加题。但底层的 prompt_suites 结构保留：内置题库导入的题目依旧
+ * 留在各自的题库里，只是和用户手动加的题一起平铺展示，按 id 区分。
+ */
+export const DEFAULT_PROMPT_SUITE_SLUG = 'my-prompts';
+const DEFAULT_PROMPT_SUITE_NAME = '我的题目';
+
+export async function ensureDefaultPromptSuite(): Promise<number> {
+  const existing = await db
+    .select()
+    .from(schema.promptSuites)
+    .where(eq(schema.promptSuites.slug, DEFAULT_PROMPT_SUITE_SLUG))
+    .get();
+  if (existing) return Number(existing.id);
+
+  const inserted = await db
+    .insert(schema.promptSuites)
+    .values({
+      name: DEFAULT_PROMPT_SUITE_NAME,
+      slug: DEFAULT_PROMPT_SUITE_SLUG,
+      description: '在提示词管理里直接添加的题目。',
+      sortOrder: -100,
+    })
+    .run();
+  return requireInsertedRowId(inserted, '创建默认题库失败');
+}
+
+/** 平铺列表里的一行：只有名称、描述、答案。 */
+export type SimplePromptCase = {
+  id: number;
+  title: string;
+  description: string;
+  answer: string | null;
+  updatedAt: string | null;
+};
+
+export type SimplePromptCaseInput = {
+  title?: unknown;
+  description?: unknown;
+  answer?: unknown;
+};
+
+/**
+ * 答案只有一个字段。内置题库把评分要点写在 answer_notes 里，历史数据里
+ * expected_answer 也可能是空的，所以读取时按 expected_answer → answer_notes
+ * 兜底；写入时统一落到 expected_answer，并把 answer_notes 清空，避免两份答案。
+ */
+function toSimplePromptCase(row: PromptCaseRow): SimplePromptCase {
+  const answer = toOptionalText(row.expectedAnswer) ?? toOptionalText(row.answerNotes);
+  return {
+    id: Number(row.id),
+    title: row.title,
+    description: row.prompt,
+    answer,
+    updatedAt: row.updatedAt ?? null,
+  };
+}
+
+export async function listSimplePromptCases(): Promise<SimplePromptCase[]> {
+  const rows = await db
+    .select()
+    .from(schema.promptCases)
+    .orderBy(asc(schema.promptCases.sortOrder), asc(schema.promptCases.id))
+    .all();
+  return rows.map((row) => toSimplePromptCase(toCaseRow(row)));
+}
+
+export async function createSimplePromptCase(input: SimplePromptCaseInput): Promise<SimplePromptCase> {
+  const suiteId = await ensureDefaultPromptSuite();
+  const title = toOptionalText(input?.title);
+  const description = toOptionalText(input?.description);
+  if (!title) throw new PromptLibraryError('题目名称不能为空');
+  if (!description) throw new PromptLibraryError('题目描述不能为空');
+
+  const created = await createPromptCase({
+    suiteId,
+    title,
+    prompt: description,
+    expectedAnswer: toOptionalText(input?.answer),
+    answerNotes: null,
+    judgeMode: 'manual',
+  });
+  return toSimplePromptCase(created);
+}
+
+export async function updateSimplePromptCase(
+  id: unknown,
+  input: SimplePromptCaseInput,
+): Promise<SimplePromptCase> {
+  const patch: Partial<PromptCaseInput> = {};
+  if (input?.title !== undefined) patch.title = toOptionalText(input.title) ?? '';
+  if (input?.description !== undefined) {
+    const description = toOptionalText(input.description);
+    if (!description) throw new PromptLibraryError('题目描述不能为空');
+    patch.prompt = description;
+  }
+  if (input?.answer !== undefined) {
+    patch.expectedAnswer = toOptionalText(input.answer);
+    patch.answerNotes = null;
+  }
+  const updated = await updatePromptCase(id, patch);
+  return toSimplePromptCase(updated);
+}
+
 export async function listBuiltinPromptPresets(): Promise<BuiltinPromptPresetView[]> {
   const existing = await db.select().from(schema.promptSuites).all();
   const bySlug = new Map<string, number>();

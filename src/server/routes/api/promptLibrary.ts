@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyReply } from 'fastify';
 import {
   PromptLibraryError,
+  createSimplePromptCase,
   createPromptCase,
   createPromptSuite,
   deletePromptCase,
@@ -11,8 +12,11 @@ import {
   listEnabledPromptCasesWithSuite,
   listPromptCases,
   listPromptSuites,
+  listSimplePromptCases,
+  updateSimplePromptCase,
   updatePromptCase,
   updatePromptSuite,
+  type SimplePromptCaseInput,
   type PromptCaseInput,
   type PromptSuiteInput,
 } from '../../services/promptLibraryService.js';
@@ -110,6 +114,33 @@ export async function promptLibraryRoutes(app: FastifyInstance) {
     const cases = await listEnabledPromptCasesWithSuite();
     return { success: true, cases };
   });
+
+  // 简化版提示词管理：一个平铺列表，只有题目名称 / 描述 / 答案。
+  app.get('/api/prompt-library/cases', async () => {
+    const cases = await listSimplePromptCases();
+    return { success: true, cases };
+  });
+
+  app.post<{ Body: SimplePromptCaseInput }>('/api/prompt-library/cases', async (request, reply) => {
+    try {
+      const promptCase = await createSimplePromptCase(request.body ?? {});
+      return reply.code(201).send({ success: true, case: promptCase });
+    } catch (error) {
+      return sendPromptLibraryError(reply, error);
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: SimplePromptCaseInput }>(
+    '/api/prompt-library/cases/:id',
+    async (request, reply) => {
+      try {
+        const promptCase = await updateSimplePromptCase(request.params.id, request.body ?? {});
+        return { success: true, case: promptCase };
+      } catch (error) {
+        return sendPromptLibraryError(reply, error);
+      }
+    },
+  );
 
   app.get('/api/prompt-presets', async () => {
     const presets = await listBuiltinPromptPresets();

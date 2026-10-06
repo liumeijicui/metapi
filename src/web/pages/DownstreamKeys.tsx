@@ -476,6 +476,9 @@ export default function DownstreamKeys() {
   const [searchInput, setSearchInput] = useState('');
   const deferredSearch = useDeferredValue(searchInput.trim());
   const [groupFilter, setGroupFilter] = useState('__all__');
+  const [routeFilter, setRouteFilter] = useState<'all' | 'bound' | 'unbound'>('all');
+  const [modelFilter, setModelFilter] = useState<'all' | 'restricted' | 'unrestricted'>('all');
+  const [expireFilter, setExpireFilter] = useState<'all' | 'expired' | 'soon' | 'none'>('all');
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMatchMode, setTagMatchMode] = useState<TagMatchMode>('any');
   const [summaryItems, setSummaryItems] = useState<SummaryItem[]>([]);
@@ -681,6 +684,17 @@ export default function DownstreamKeys() {
     if (status === 'disabled' && item.enabled) return false;
     if (groupFilter === '__ungrouped__' && item.groupName) return false;
     if (groupFilter !== '__all__' && groupFilter !== '__ungrouped__' && item.groupName !== groupFilter) return false;
+    if (routeFilter === 'bound' && (item.allowedRouteIds || []).length === 0) return false;
+    if (routeFilter === 'unbound' && (item.allowedRouteIds || []).length > 0) return false;
+    if (modelFilter === 'restricted' && (item.supportedModels || []).length === 0) return false;
+    if (modelFilter === 'unrestricted' && (item.supportedModels || []).length > 0) return false;
+    if (expireFilter !== 'all') {
+      const expiresTs = item.expiresAt ? Date.parse(item.expiresAt) : NaN;
+      const hasExpiry = Number.isFinite(expiresTs);
+      if (expireFilter === 'none' && hasExpiry) return false;
+      if (expireFilter === 'expired' && (!hasExpiry || expiresTs > Date.now())) return false;
+      if (expireFilter === 'soon' && (!hasExpiry || expiresTs <= Date.now() || expiresTs > Date.now() + 7 * 86400000)) return false;
+    }
     if (activeTagFilters.length > 0) {
       const itemTags = new Set((item.tags || []).map((tag) => tag.toLowerCase()));
       const matches = tagMatchMode === 'all'
@@ -705,7 +719,7 @@ export default function DownstreamKeys() {
     const lastB = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
     if (lastA !== lastB) return lastB - lastA;
     return a.name.localeCompare(b.name);
-  }), [activeTagFilters, groupFilter, managedItems, routeMap, searchMatcher, status, tagMatchMode]);
+  }), [activeTagFilters, expireFilter, groupFilter, managedItems, modelFilter, routeFilter, routeMap, searchMatcher, status, tagMatchMode]);
 
   const visibleIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
   const selectedVisibleCount = useMemo(() => selectedIds.filter((id) => visibleIds.includes(id)).length, [selectedIds, visibleIds]);
@@ -1027,7 +1041,41 @@ export default function DownstreamKeys() {
         <div style={{ minWidth: 170 }}>
           <ModernSelect value={groupFilter} onChange={(value) => setGroupFilter(String(value || '__all__'))} options={groupFilterOptions} />
         </div>
-        <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { setSearchInput(''); setStatus('all'); setGroupFilter('__all__'); setSelectedTags([]); setTagMatchMode('any'); }}>
+        <div style={{ minWidth: 170 }}>
+          <ModernSelect
+            value={routeFilter}
+            onChange={(value) => setRouteFilter((value as 'all' | 'bound' | 'unbound') || 'all')}
+            options={[
+              { value: 'all', label: '全部群组范围' },
+              { value: 'bound', label: '已绑定群组' },
+              { value: 'unbound', label: '未限制群组' },
+            ]}
+          />
+        </div>
+        <div style={{ minWidth: 170 }}>
+          <ModernSelect
+            value={modelFilter}
+            onChange={(value) => setModelFilter((value as 'all' | 'restricted' | 'unrestricted') || 'all')}
+            options={[
+              { value: 'all', label: '全部模型范围' },
+              { value: 'restricted', label: '限制模型白名单' },
+              { value: 'unrestricted', label: '不限模型' },
+            ]}
+          />
+        </div>
+        <div style={{ minWidth: 170 }}>
+          <ModernSelect
+            value={expireFilter}
+            onChange={(value) => setExpireFilter((value as 'all' | 'expired' | 'soon' | 'none') || 'all')}
+            options={[
+              { value: 'all', label: '全部有效期' },
+              { value: 'expired', label: '已过期' },
+              { value: 'soon', label: '7 天内到期' },
+              { value: 'none', label: '永久有效' },
+            ]}
+          />
+        </div>
+        <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { setSearchInput(''); setStatus('all'); setGroupFilter('__all__'); setRouteFilter('all'); setModelFilter('all'); setExpireFilter('all'); setSelectedTags([]); setTagMatchMode('any'); }}>
           重置筛选
         </button>
       </div>
@@ -1133,7 +1181,7 @@ export default function DownstreamKeys() {
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>筛选与列表</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>按名称、状态、主分组和标签快速定位下游密钥。</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>按名称、状态、主分组、标签、群组范围、模型范围与有效期快速定位下游密钥。</div>
             </div>
             {isMobile && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>

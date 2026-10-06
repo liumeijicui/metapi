@@ -314,6 +314,10 @@ export default function Sites() {
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [siteSearch, setSiteSearch] = useState('');
+  const [platformFilter, setPlatformFilter] = useState('all');
+  const [checkinFilter, setCheckinFilter] = useState<'all' | 'checked' | 'unchecked'>('all');
+  const [balanceFilter, setBalanceFilter] = useState<'all' | 'has' | 'none'>('all');
   const [highlightSiteId, setHighlightSiteId] = useState<number | null>(null);
   const [editor, setEditor] = useState<SiteEditorState | null>(null);
   const apiEndpointDraftIdRef = useRef(0);
@@ -478,9 +482,42 @@ export default function Sites() {
     load();
   }, []);
 
+  const sitePlatformFilterOptions = useMemo(() => {
+    const seen = new Set<string>();
+    sites.forEach((site) => {
+      const platform = (site.platform || '').trim();
+      if (platform) seen.add(platform);
+    });
+    return Array.from(seen).sort().map((platform) => ({ value: platform, label: platform }));
+  }, [sites]);
+
+  const filteredSites = useMemo(() => {
+    const keyword = siteSearch.trim().toLowerCase();
+    return sites.filter((site) => {
+      if (keyword) {
+        const haystack = `${site.name || ''} ${site.url || ''} ${site.platform || ''}`.toLowerCase();
+        if (!haystack.includes(keyword)) return false;
+      }
+      if (platformFilter !== 'all' && (site.platform || '').trim() !== platformFilter) return false;
+      if (checkinFilter === 'checked' && !site.todayCheckedIn) return false;
+      if (checkinFilter === 'unchecked' && site.todayCheckedIn) return false;
+      const balance = Number(site.totalBalance) || 0;
+      if (balanceFilter === 'has' && balance <= 0) return false;
+      if (balanceFilter === 'none' && balance > 0) return false;
+      return true;
+    });
+  }, [sites, siteSearch, platformFilter, checkinFilter, balanceFilter]);
+
+  const activeSiteFilterCount = useMemo(() => (
+    (siteSearch.trim() ? 1 : 0)
+    + (platformFilter !== 'all' ? 1 : 0)
+    + (checkinFilter !== 'all' ? 1 : 0)
+    + (balanceFilter !== 'all' ? 1 : 0)
+  ), [siteSearch, platformFilter, checkinFilter, balanceFilter]);
+
   const sortedSites = useMemo(
-    () => sortItemsForDisplay(sites, sortMode, (site) => site.totalBalance || 0),
-    [sites, sortMode],
+    () => sortItemsForDisplay(filteredSites, sortMode, (site) => site.totalBalance || 0),
+    [filteredSites, sortMode],
   );
   const allVisibleSitesSelected = sortedSites.length > 0 && sortedSites.every((site) => selectedSiteIds.includes(site.id));
 
@@ -1308,6 +1345,79 @@ export default function Sites() {
     toggleSiteSelection(siteId, !isSelected);
   };
 
+  const resetSiteFilters = () => {
+    setSiteSearch('');
+    setPlatformFilter('all');
+    setCheckinFilter('all');
+    setBalanceFilter('all');
+  };
+
+  const renderSiteFilterFields = (stacked: boolean) => (
+    <>
+      <input
+        data-testid="sites-filter-search"
+        type="search"
+        value={siteSearch}
+        onChange={(event) => setSiteSearch(event.target.value)}
+        placeholder="搜索站点名称 / 地址 / 平台"
+        style={{
+          minWidth: stacked ? undefined : 220,
+          flex: stacked ? undefined : 1,
+          padding: '7px 10px',
+          borderRadius: 8,
+          border: '1px solid var(--color-border)',
+          background: 'var(--color-bg)',
+          color: 'var(--color-text)',
+          fontSize: 13,
+        }}
+      />
+      <div style={{ minWidth: stacked ? undefined : 150 }}>
+        <ModernSelect
+          size="sm"
+          value={platformFilter}
+          onChange={(nextValue) => setPlatformFilter(nextValue)}
+          options={[{ value: 'all', label: '全部平台' }, ...sitePlatformFilterOptions]}
+          placeholder="全部平台"
+        />
+      </div>
+      <div style={{ minWidth: stacked ? undefined : 140 }}>
+        <ModernSelect
+          size="sm"
+          value={checkinFilter}
+          onChange={(nextValue) => setCheckinFilter(nextValue as 'all' | 'checked' | 'unchecked')}
+          options={[
+            { value: 'all', label: '全部签到状态' },
+            { value: 'checked', label: '今日已签到' },
+            { value: 'unchecked', label: '今日未签到' },
+          ]}
+          placeholder="全部签到状态"
+        />
+      </div>
+      <div style={{ minWidth: stacked ? undefined : 130 }}>
+        <ModernSelect
+          size="sm"
+          value={balanceFilter}
+          onChange={(nextValue) => setBalanceFilter(nextValue as 'all' | 'has' | 'none')}
+          options={[
+            { value: 'all', label: '全部余额' },
+            { value: 'has', label: '有余额' },
+            { value: 'none', label: '余额为 0' },
+          ]}
+          placeholder="全部余额"
+        />
+      </div>
+      <button
+        type="button"
+        onClick={resetSiteFilters}
+        disabled={activeSiteFilterCount === 0}
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}
+      >
+        重置筛选
+      </button>
+    </>
+  );
+
   return (
     <div className="animate-fade-in">
       <div className="page-header">
@@ -1321,7 +1431,7 @@ export default function Sites() {
                 className="btn btn-ghost"
                 style={{ border: '1px solid var(--color-border)' }}
               >
-                排序与操作
+                筛选与操作{activeSiteFilterCount > 0 ? ` (${activeSiteFilterCount})` : ''}
               </button>
               <button
                 type="button"
@@ -1380,9 +1490,25 @@ export default function Sites() {
         isMobile={isMobile}
         mobileOpen={showMobileTools}
         onMobileClose={() => setShowMobileTools(false)}
-        mobileTitle="站点排序与操作"
+        mobileTitle="站点筛选与操作"
+        desktopContent={(
+          <div
+            className="card"
+            data-testid="sites-filter-panel"
+            style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}
+          >
+            {renderSiteFilterFields(false)}
+            <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+              共 {sortedSites.length} / {sites.length} 个站点
+            </div>
+          </div>
+        )}
         mobileContent={(
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>筛选</div>
+              {renderSiteFilterFields(true)}
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>排序方式</div>
               <ModernSelect

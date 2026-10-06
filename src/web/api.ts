@@ -1540,6 +1540,23 @@ export const api = {
     request<{ success: boolean; cases: any[] }>("/api/prompt-cases", {
       timeoutMs: 30_000,
     }),
+  // 简化版提示词管理：平铺列表，只有题目名称 / 描述 / 答案
+  getSimplePromptCases: () =>
+    request<{ success: boolean; cases: any[] }>("/api/prompt-library/cases", {
+      timeoutMs: 30_000,
+    }),
+  createSimplePromptCase: (payload: Record<string, unknown>) =>
+    request("/api/prompt-library/cases", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
+  updateSimplePromptCase: (caseId: number, payload: Record<string, unknown>) =>
+    request(`/api/prompt-library/cases/${caseId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
   getPromptPresets: () =>
     request<{ success: boolean; presets: any[] }>("/api/prompt-presets", {
       timeoutMs: 30_000,

@@ -148,6 +148,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   const [selectedTokenIds, setSelectedTokenIds] = useState<number[]>([]);
   const [expandedTokenIds, setExpandedTokenIds] = useState<number[]>([]);
   const [showMobileTools, setShowMobileTools] = useState(false);
+  const [tokenSearch, setTokenSearch] = useState('');
+  const [tokenSiteFilter, setTokenSiteFilter] = useState('all');
+  const [tokenStatusFilter, setTokenStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'pending'>('all');
+  const [tokenGroupFilter, setTokenGroupFilter] = useState('all');
   const [batchActionLoading, setBatchActionLoading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
@@ -296,12 +300,56 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     };
   }, [editingToken?.id, editingToken?.accountId]);
 
+  const tokenSiteFilterOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    tokens.forEach((token: any) => {
+      const name = String(token?.site?.name || '').trim();
+      if (name && !seen.has(name)) seen.set(name, name);
+    });
+    return Array.from(seen.values()).sort().map((name) => ({ value: name, label: name }));
+  }, [tokens]);
+
+  const tokenGroupFilterOptions = useMemo(() => {
+    const seen = new Set<string>();
+    tokens.forEach((token: any) => {
+      const group = String(token?.tokenGroup || '').trim() || 'default';
+      seen.add(group);
+    });
+    return Array.from(seen).sort().map((group) => ({ value: group, label: group }));
+  }, [tokens]);
+
+  const filteredTokens = useMemo(() => {
+    const keyword = tokenSearch.trim().toLowerCase();
+    return tokens.filter((token: any) => {
+      if (tokenSiteFilter !== 'all' && String(token?.site?.name || '').trim() !== tokenSiteFilter) return false;
+      const group = String(token?.tokenGroup || '').trim() || 'default';
+      if (tokenGroupFilter !== 'all' && group !== tokenGroupFilter) return false;
+      if (tokenStatusFilter !== 'all') {
+        const pending = isMaskedPendingToken(token);
+        const enabled = token?.enabled !== false;
+        if (tokenStatusFilter === 'pending' && !pending) return false;
+        if (tokenStatusFilter === 'enabled' && (pending || !enabled)) return false;
+        if (tokenStatusFilter === 'disabled' && (pending || enabled)) return false;
+      }
+      if (keyword) {
+        const haystack = [
+          String(token?.name || ''),
+          String(token?.account?.username || ''),
+          String(token?.site?.name || ''),
+          group,
+        ].join(' ').toLowerCase();
+        if (!haystack.includes(keyword)) return false;
+      }
+      return true;
+    });
+  }, [tokenGroupFilter, tokenSearch, tokenSiteFilter, tokenStatusFilter, tokens]);
+
   const accountClusteredTokens = useMemo(() => {
     const accountLabel = (token: any) => String(token?.account?.username || `account-${token?.accountId || 0}`).toLowerCase();
     const siteLabel = (token: any) => String(token?.site?.name || '').toLowerCase();
     const tokenName = (token: any) => String(token?.name || '').toLowerCase();
 
-    return [...tokens].sort((left, right) => {
+    return [...filteredTokens].sort((left, right) => {
       const accountCmp = accountLabel(left).localeCompare(accountLabel(right));
       if (accountCmp !== 0) return accountCmp;
       const siteCmp = siteLabel(left).localeCompare(siteLabel(right));
@@ -310,7 +358,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       if (nameCmp !== 0) return nameCmp;
       return Number(left?.id || 0) - Number(right?.id || 0);
     });
-  }, [tokens]);
+  }, [filteredTokens]);
   const allVisibleTokensSelected = accountClusteredTokens.length > 0
     && accountClusteredTokens.every((token) => selectedTokenIds.includes(token.id));
 
@@ -775,6 +823,13 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     color: 'var(--color-text-primary)',
   };
 
+  const tokenFilterActiveCount = (
+    (tokenSearch.trim() ? 1 : 0)
+    + (tokenSiteFilter !== 'all' ? 1 : 0)
+    + (tokenStatusFilter !== 'all' ? 1 : 0)
+    + (tokenGroupFilter !== 'all' ? 1 : 0)
+  );
+
   const headerActions = useMemo(() => (
     <div className={`page-actions ${embedded ? 'accounts-page-actions' : ''}`.trim()}>
       {isMobile ? (
@@ -785,7 +840,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
             className="btn btn-ghost"
             style={{ border: '1px solid var(--color-border)' }}
           >
-            同步与筛选
+            {tr('同步与筛选')}{tokenFilterActiveCount > 0 ? ` (${tokenFilterActiveCount})` : ''}
           </button>
           <button
             type="button"
@@ -838,7 +893,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         {showAdd ? '取消' : '+ 新增令牌'}
       </button>
     </div>
-  ), [activeAccountSelectOptions, activeAccounts.length, allVisibleTokensSelected, embedded, handleSync, handleSyncAll, handleToggleAdd, isMobile, showAdd, syncing, syncingAccountId, syncingAll]);
+  ), [activeAccountSelectOptions, activeAccounts.length, allVisibleTokensSelected, embedded, handleSync, handleSyncAll, handleToggleAdd, isMobile, showAdd, syncing, syncingAccountId, syncingAll, tokenFilterActiveCount]);
 
   useEffect(() => {
     if (!embedded || !onEmbeddedActionsChange) return;
@@ -847,6 +902,78 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       onEmbeddedActionsChange(null);
     };
   }, [embedded, headerActions, onEmbeddedActionsChange]);
+
+  const resetTokenFilters = () => {
+    setTokenSearch('');
+    setTokenSiteFilter('all');
+    setTokenStatusFilter('all');
+    setTokenGroupFilter('all');
+  };
+
+  const renderTokenFilterFields = (stacked: boolean) => (
+    <>
+      <input
+        data-testid="tokens-filter-search"
+        type="search"
+        value={tokenSearch}
+        onChange={(event) => setTokenSearch(event.target.value)}
+        placeholder={tr('搜索令牌名称 / 账号 / 站点 / 分组')}
+        style={{
+          minWidth: stacked ? undefined : 220,
+          flex: stacked ? undefined : 1,
+          padding: '7px 10px',
+          borderRadius: 8,
+          border: '1px solid var(--color-border)',
+          background: 'var(--color-bg)',
+          color: 'var(--color-text)',
+          fontSize: 13,
+        }}
+      />
+      <div style={{ minWidth: stacked ? undefined : 150 }}>
+        <ModernSelect
+          size="sm"
+          value={tokenSiteFilter}
+          onChange={(nextValue) => setTokenSiteFilter(nextValue)}
+          options={[{ value: 'all', label: tr('全部站点') }, ...tokenSiteFilterOptions]}
+          placeholder={tr('全部站点')}
+          searchable
+        />
+      </div>
+      <div style={{ minWidth: stacked ? undefined : 130 }}>
+        <ModernSelect
+          size="sm"
+          value={tokenGroupFilter}
+          onChange={(nextValue) => setTokenGroupFilter(nextValue)}
+          options={[{ value: 'all', label: tr('全部分组') }, ...tokenGroupFilterOptions]}
+          placeholder={tr('全部分组')}
+          searchable
+        />
+      </div>
+      <div style={{ minWidth: stacked ? undefined : 130 }}>
+        <ModernSelect
+          size="sm"
+          value={tokenStatusFilter}
+          onChange={(nextValue) => setTokenStatusFilter((nextValue as 'all' | 'enabled' | 'disabled' | 'pending') || 'all')}
+          options={[
+            { value: 'all', label: tr('全部状态') },
+            { value: 'enabled', label: tr('启用') },
+            { value: 'disabled', label: tr('禁用') },
+            { value: 'pending', label: tr('待补全') },
+          ]}
+          placeholder={tr('全部状态')}
+        />
+      </div>
+      <button
+        type="button"
+        onClick={resetTokenFilters}
+        disabled={tokenFilterActiveCount === 0}
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}
+      >
+        {tr('重置筛选')}
+      </button>
+    </>
+  );
 
   return (
     <div className={embedded ? '' : 'animate-fade-in'}>
@@ -862,8 +989,24 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         mobileOpen={showMobileTools}
         onMobileClose={() => setShowMobileTools(false)}
         mobileTitle="令牌同步与筛选"
+        desktopContent={(
+          <div
+            className="card"
+            data-testid="tokens-filter-panel"
+            style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}
+          >
+            {renderTokenFilterFields(false)}
+            <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+              共 {accountClusteredTokens.length} / {tokens.length} 个令牌
+            </div>
+          </div>
+        )}
         mobileContent={(
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>筛选</div>
+              {renderTokenFilterFields(true)}
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>同步账号</div>
               <ModernSelect

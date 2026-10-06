@@ -31,7 +31,10 @@ describe('ModelMonitor 对话按钮', () => {
   });
 
   it('对话时可以快捷选提示词或手动输入', () => {
-    expect(modal).toContain('api.getPromptCases()');
+    expect(modal).toContain('api.getSimplePromptCases()');
+    // 选中题目名称后应把题目描述填进输入框
+    expect(modal).toContain("prompt: String(item?.description || '')");
+    expect(modal).toContain('setInput(item.prompt)');
     expect(modal).toContain("tr('快捷提示词')");
     expect(modal).toContain('applyPrompt');
     expect(modal).toContain('filteredPrompts.map');

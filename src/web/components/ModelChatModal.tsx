@@ -38,9 +38,7 @@ type PromptCaseOption = {
   id: number;
   title: string;
   prompt: string;
-  suiteName: string;
-  expectedAnswer: string | null;
-  answerNotes: string | null;
+  answer: string | null;
 };
 
 const parseSseBlock = (block: string): { event: string; data: string | null } => {
@@ -150,19 +148,17 @@ export default function ModelChatModal({
     return () => { cancelled = true; };
   }, [open, target?.siteId, target?.modelName, target]);
 
-  // 快捷提示词：题库里的启用题目。
+  // 快捷提示词：提示词管理里的题目（图名称 → 描述）。
   useEffect(() => {
     if (!open || promptCases.length) return;
-    void api.getPromptCases()
+    void api.getSimplePromptCases()
       .then((res) => {
         const list: PromptCaseOption[] = (Array.isArray(res?.cases) ? res.cases : [])
           .map((item: any) => ({
             id: Number(item?.id),
             title: String(item?.title || ''),
-            prompt: String(item?.prompt || ''),
-            suiteName: String(item?.suiteName || ''),
-            expectedAnswer: item?.expectedAnswer ?? null,
-            answerNotes: item?.answerNotes ?? null,
+            prompt: String(item?.description || ''),
+            answer: item?.answer == null || item?.answer === '' ? null : String(item.answer),
           }))
           .filter((item: PromptCaseOption) => item.prompt);
         setPromptCases(list);
@@ -180,7 +176,6 @@ export default function ModelChatModal({
     if (!query) return promptCases;
     return promptCases.filter((item) => (
       item.title.toLowerCase().includes(query)
-      || item.suiteName.toLowerCase().includes(query)
       || item.prompt.toLowerCase().includes(query)
     ));
   }, [promptCases, promptQuery]);
@@ -394,7 +389,7 @@ export default function ModelChatModal({
             </div>
             <div className="model-chat-prompt-list">
               {filteredPrompts.length === 0 ? (
-                <div className="model-chat-prompt-empty">{tr('提示词管理里还没有启用的题目')}</div>
+                <div className="model-chat-prompt-empty">{tr('提示词管理里还没有题目')}</div>
               ) : filteredPrompts.map((item) => (
                 <button
                   key={item.id}
@@ -404,9 +399,8 @@ export default function ModelChatModal({
                   title={item.prompt}
                 >
                   <span className="model-chat-prompt-title">{item.title}</span>
-                  <span className="model-chat-prompt-suite">{item.suiteName}</span>
-                  {item.expectedAnswer ? (
-                    <span className="model-chat-prompt-answer">{tr('答案')} {item.expectedAnswer}</span>
+                  {item.answer ? (
+                    <span className="model-chat-prompt-answer">{tr('答案')} {item.answer}</span>
                   ) : null}
                 </button>
               ))}
