@@ -5,6 +5,7 @@ import { insertProxyLog } from '../../services/proxyLogStore.js';
 import {
   listSiteDirectChatTargets,
   requestSiteDirectChat,
+  toClientFacingDirectChatFailure,
 } from '../../services/siteDirectChatService.js';
 import {
   isModelMonitorRunning,
@@ -105,6 +106,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       tokenId?: number | null;
       model?: string;
       messages?: Array<{ role?: string; content?: unknown }>;
+      reasoningEffort?: string;
     };
   }>('/api/model-monitor/chat/stream', async (request, reply) => {
     const body = request.body || {};
@@ -119,6 +121,13 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         role: String(item?.role || 'user'),
         content: typeof item?.content === 'string' ? item.content : '',
       }));
+    // 思考强度：白名单校验后原样放进 OpenAI 协议请求体（reasoning_effort）。
+    // 上游不认这个字段的会忽略，认的就按选的档位思考。
+    const reasoningEffort = String(body.reasoningEffort || '').trim().toLowerCase();
+    const allowedReasoningEfforts = ['minimal', 'low', 'medium', 'high', 'max'];
+    if (reasoningEffort && !allowedReasoningEfforts.includes(reasoningEffort)) {
+      return reply.code(400).send({ error: { message: `思考强度不合法：${reasoningEffort}` } });
+    }
     if (siteId <= 0 || accountId <= 0 || !model) {
       return reply.code(400).send({ error: { message: 'siteId / accountId / model 不能为空' } });
     }
@@ -134,10 +143,21 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model,
       messages,
       stream: true,
-      timeoutMs: config.modelMonitorTimeoutMs,
+      // 总时长上限 + 空闲上限：流式对话只要上游还在吐字就不会被判超时。
+      timeoutMs: config.modelMonitorChatTimeoutMs,
+      idleTimeoutMs: config.modelMonitorChatIdleTimeoutMs,
+      extraBody: reasoningEffort ? { reasoning_effort: reasoningEffort } : null,
     });
 
     if (!outcome.ok) {
+      // 上游回 401/403 是「这个站点拒绝了这次调用」，不是 Metapi 自己的登录失效：
+      // 前端会把 401/403 当作本系统会话过期（清 token + 刷新回登录页），
+      // 表现就是「和这个站一对话就被退出登录」。改写逻辑见
+      // toClientFacingDirectChatFailure（上游真实状态码写进文案，日志仍记真实值）。
+      const failure = toClientFacingDirectChatFailure({
+        status: outcome.status,
+        message: outcome.message,
+      });
       // 直连失败也留一条日志，方便在「使用日志」里看到真实原因。
       await recordDirectChatLog({
         accountId,
@@ -145,9 +165,9 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         startedAt,
         status: 'failed',
         httpStatus: outcome.status,
-        errorMessage: outcome.message,
+        errorMessage: failure.message,
       }).catch(() => undefined);
-      return reply.code(outcome.status).send({ error: { message: outcome.message } });
+      return reply.code(failure.status).send({ error: { message: failure.message } });
     }
 
     const upstream = outcome.response;
@@ -163,18 +183,34 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     try {
       if (upstream.body) {
         for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
+          // 每收到一块数据就把「空闲超时」往后推，避免推理模型憋半天被判超时。
+          outcome.touch();
           bytes += chunk?.length || 0;
           reply.raw.write(chunk);
         }
       }
     } catch (error) {
+      // 已经吐了一部分才被掐断（空闲 / 总时长超限）：把真实原因用 SSE error 事件
+      // 补发给页面，让用户看到的是「上游 X 秒没有新数据」而不是莫名中断。
+      const timeoutReason = outcome.timeoutReason();
+      const failureMessage = timeoutReason
+        || (error instanceof Error ? error.message : '流式读取失败');
+      if (timeoutReason) {
+        try {
+          reply.raw.write(`data: ${JSON.stringify({ error: { message: timeoutReason } })}\n\n`);
+        } catch {
+          // 连接已经没了就算了，日志里仍然记录真实原因。
+        }
+      }
       await recordDirectChatLog({
         accountId,
         model,
         startedAt,
         status: 'failed',
         httpStatus: 0,
-        errorMessage: error instanceof Error ? error.message : '流式读取失败',
+        errorMessage: bytes > 0
+          ? `${failureMessage}（已输出 ${bytes} 字节后中断）`
+          : failureMessage,
       }).catch(() => undefined);
       reply.raw.end();
       return reply;

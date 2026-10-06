@@ -66,3 +66,64 @@ export function siteUrlRequiresSystemProxy(rawUrl: string | null | undefined): b
     return false;
   }
 }
+
+/**
+ * Inference-endpoint client fingerprint requirement.
+ *
+ * agentrouter.org gates its **inference** API (`/v1/models`, `/v1/chat/completions`,
+ * `/v1/messages`) by client identity: anything that does not look like its accepted
+ * Claude Code CLI gets `401 unauthorized client detected`, no matter how valid the key
+ * is. Its **console** API (`/api/status`, `/api/log/self`, `/api/user/self`) does not
+ * care, which is why check-in and login work while chat does not.
+ *
+ * Measured against the live site (proxied, same key):
+ *   - no User-Agent / browser UA / `Claude-Code/1.0.0` -> 401
+ *   - `claude-cli/2.0.0` .. `claude-cli/2.1.50`        -> 200
+ *   - `claude-cli/2.1.63` (the newest we knew of)      -> 403
+ * So the accepted set is a version window, not a single exact string; pick one in the
+ * middle and let the site's own custom headers override it if it ever drifts again.
+ */
+const SITE_INFERENCE_USER_AGENTS: ReadonlyArray<{ host: string; userAgent: string }> = [
+  { host: 'agentrouter.org', userAgent: 'claude-cli/2.0.30 (external, cli)' },
+];
+
+/**
+ * The User-Agent an inference request must carry, or null when the site does not
+ * fingerprint clients.
+ *
+ * `requireInferencePath` 默认开启，只有 `/v1/*` 才算推理接口 —— 控制台接口
+ * （`/api/status`、`/api/log/self`、`/api/user/self`）本来就不卡指纹，签到和登录
+ * 必须保持原样。调用方如果拿到的只是站点根地址（例如上游请求构造器只知道
+ * `site.url`，路径是后面才拼的），可以传 `requireInferencePath: false`：那个调用点
+ * 本身就只用来发推理请求。
+ */
+export function resolveSiteInferenceUserAgent(
+  rawUrl: string | null | undefined,
+  options?: { requireInferencePath?: boolean },
+): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(rawUrl || ''));
+  } catch {
+    return null;
+  }
+  if (options?.requireInferencePath !== false && !parsed.pathname.startsWith('/v1/')) return null;
+  const host = normalizeHost(parsed.host);
+  const match = SITE_INFERENCE_USER_AGENTS.find(
+    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+  );
+  return match ? match.userAgent : null;
+}
+
+/** True when the request already carries a User-Agent we must not overwrite. */
+export function hasExplicitUserAgent(headers: unknown): boolean {
+  if (!headers || typeof headers !== 'object') return false;
+  // undici 的 Headers 实例；按鸭子类型判断，避免在非 DOM 环境里引用全局类型。
+  const maybeHeaders = headers as { has?: (name: string) => boolean; keys?: () => Iterable<string> };
+  if (typeof maybeHeaders.has === 'function' && typeof maybeHeaders.keys === 'function') {
+    return maybeHeaders.has('user-agent');
+  }
+  return Object.keys(headers as Record<string, unknown>).some(
+    (key) => key.trim().toLowerCase() === 'user-agent',
+  );
+}

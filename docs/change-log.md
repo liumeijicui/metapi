@@ -1,3 +1,103 @@
+### 70. agentrouter 对话一发起就被退出登录：两处修复（上游 401 被当成自己登录失效 + 站点按客户端指纹卡推理接口）
+
+- **类型**：缺陷修复
+- **需求来源**：本会话（用户：「为啥和agentroute站一对话就退出登陆了。看看是不是有啥bug，这个站模型拉取啥的接口可能未开放」
+  以及「结束后看看为啥对话不行，我正常使用这个站是可以的，看是没有配置代理还是什么其他原因？」）
+
+#### 问题一：上游 401 被前端当成「本系统会话过期」
+- 前端 `fetchAuthenticatedResponse` 对任何 401/403 都会 `clearAuthSession` 并刷新回登录页。
+- agentrouter 的凭据被拒时正好回 401（`unauthorized client detected`），于是「和这个站一对话就被踢下线」。
+- 改成：代上游发请求的接口（`directChatStream`）显式关掉这个处理（`clearSessionOnAuthError: false`），
+  服务端同时把上游 401/403 改写成 502，并把真实状态码写进文案
+  （`上游站点拒绝了这次调用（HTTP 401）：...`），日志里仍记上游真实状态码。
+
+#### 问题二：站点按「客户端指纹」卡推理接口（这才是对话打不通的根因）
+- **不是代理问题**：`agentrouter.org` 早就在 `SITES_REQUIRING_SYSTEM_PROXY` 里，直连超时、走系统代理正常，
+  `/api/status` 200 就是证据。
+- 真正的原因是站点对**推理接口**做了客户端指纹校验，实测（都走代理、同一把密钥）：
+  | 请求 | 结果 |
+  | --- | --- |
+  | `GET /v1/models`，无 UA / 浏览器 UA / `Claude-Code/1.0.0` | 401 `unauthorized client detected` |
+  | `GET /v1/models`，`claude-cli/2.0.0` ~ `2.1.50` | 200 |
+  | `GET /v1/models`，`claude-cli/2.1.63` | 403 |
+  | `POST /v1/chat/completions`，无 UA | 401 |
+  | `POST /v1/chat/completions`，`claude-cli/2.0.30` | 200（`deepseek-v4-flash` 正常返回） |
+  | `GET /api/status`、`/api/log/self`、`/api/user/self` | 两种 UA 都是 200（控制台接口不卡指纹） |
+- 所以「我正常使用这个站是可以的」——用户走的是 Claude Code 之类的客户端，UA 本来就被站点接受；
+  而我们这条链路发的是 undici 默认标识，必然被拦。这也解释了为什么签到/登录一直正常，只有对话和模型列表不行。
+- 修复：把「站点要求的推理客户端标识」登记成站点事实（`siteProfiles.ts` 的
+  `SITE_INFERENCE_USER_AGENTS`），默认 `claude-cli/2.0.30 (external, cli)`，在两个入口自动补齐：
+  - `upstreamRequestBuilder`：网关（新/老路由）与直连对话共用的请求构造；
+  - `siteProxy.withSiteProxyRequestInit`：用密钥读 `/v1/models` 这类 `fetchJson` 路径。
+- 三处安全边界：
+  - **只作用于 `/v1/*`**：`/api/*` 控制台接口一律不动，签到与登录流程保持原样。
+  - **调用方显式带了 User-Agent 就不覆盖**（透传白名单里本来就有 `user-agent`，
+    真实 Claude Code 客户端靠它过闸），站点自定义头也仍可覆盖 —— 站点将来改指纹时有兜底手段。
+  - 已踩到的坑：`buildUpstreamEndpointRequest` 拿到的只是站点根地址（`site.url` 的 pathname 是 `/`），
+    按 `/v1/` 判定会返回 null，表现为「加了 UA 还是 401」。该调用点改用
+    `resolveSiteInferenceUserAgent(url, { requireInferencePath: false })`，因为构造器本身只发推理请求。
+
+#### 顺带确认的账号侧事实（与代码无关，供排查参考）
+- 同一把密钥下 `deepseek-v4-flash` 可用；`claude-opus-4-8` / `claude-opus-5` / `gpt-6-astra`
+  回 402 `Budget pool quota has been exhausted`，是该账号这两个池子的额度用尽，不是链路问题。
+
+#### 测试与实测
+- 新增 `siteProfiles.test.ts` 5 例：推理路径才注入、控制台路径不注入、根地址 + `requireInferencePath: false`
+  能注入（复现上述坑）、未知站点不注入、已有显式 UA 时不覆盖、`agentrouter` 仍走系统代理。
+- `upstreamRequestBuilder.test.ts` 增 3 例：agentrouter 自动带 UA、下游自带 UA 时不覆盖、其它站点不受影响。
+- `siteDirectChatService.test.ts` 增 1 例、`modelMonitor.test.ts` 增 2 例（上游 401 → 回 502 且文案带真实状态码；
+  503 原样返回）、`api.test.ts` 增 2 例（直连对话收到 401/502 都不清本地登录态）。
+- 三道 `tsc` 通过；相关套件全绿；`build:server` 通过并重启。
+- **生产实测（修复后）**：`POST /api/model-monitor/chat/stream`（site 35 / `deepseek-v4-flash`）**200**，
+  正常流出 SSE；`/v1/models` 经 `withSiteProxyRequestInit` 200；网关注请求构造出的
+  `POST /v1/chat/completions` 头里也带上了该 UA；`/api/status` 确认未被注入。
+
+### 69. 模型监控「对话」超时改成按空闲算：流式输出慢可以，不该被掐断
+
+- **类型**：缺陷修复 / 体验优化
+- **需求来源**：本会话（用户：「direct chat timeout 模型监控里报错这个，我们的对话是流式的吧，还有思考强度能不能选择？」
+  以及「我其实是想让他流失输出，慢可以，但是不至于超时，你再检查检查」）
+
+#### 问题
+- 对话本来是流式的，但服务端把 `config.modelMonitorTimeoutMs`（模型监控**采集**用的 30s）
+  直接当成了「整轮对话的总时长上限」：推理模型想久一点、回答长一点，30 秒到点就 abort，
+  页面报 `direct chat timeout`。日志里可见 `id=146 / latency=30002 / error=direct chat timeout`。
+- 这既不符合流式语义（在吐字就不该算超时），也和 nginx 那侧对不上：nginx `proxy_read_timeout`
+  只有 300s，而我们自己的阈值反而更小，先掐断的是我们，报出来的原因也不是真实原因。
+
+#### 改了什么
+- **超时拆成两个独立预算**，都可通过环境变量覆盖：
+  - `MODEL_MONITOR_CHAT_IDLE_TIMEOUT_MS`（默认 10 分钟）：多久**没有收到新数据**才算卡死。
+  - `MODEL_MONITOR_CHAT_TIMEOUT_MS`（默认 30 分钟）：总时长兜底，防「一直有数据但永不结束」。
+  - 采集用的 `MODEL_MONITOR_TIMEOUT_MS`（30s）保持不动，只服务于模型清单拉取，不再管对话。
+- **每读到一块流数据就重置空闲计时**（`outcome.touch()`），所以只要上游还在吐字，
+  无论多慢都不会被判超时；首字预算同样按空闲算（不再要求 N 秒内必须出第一个字）。
+- **中断时报真实原因**：我方因空闲 / 总时长掐断时，会把 `上游 600 秒没有返回任何新数据（空闲超时）`
+  这类原因通过 SSE error 事件补发给页面，并在日志里记成
+  `...（已输出 N 字节后中断）`，不再是莫名其妙的断流；用户主动点停止则记为「已停止（用户中断）」。
+- **新增「思考强度」选择**（弹窗下拉，默认「站点默认」）：`minimal / low / medium / high / max`，
+  以 OpenAI 协议的 `reasoning_effort` 字段原样透传给源站；站点不认这个字段会被忽略，
+  所以默认留空、不塞字段。服务端对取值做白名单校验，非法值直接 400。
+- **浏览器侧超时同步放宽**：`api.directChatStream` 的 `timeoutMs` 10 → 30 分钟。它只覆盖
+  「等上游响应头」这一段（拿到响应头后计时器即清、不会截断流），调到比服务端阈值更大是为了
+  保证先报错的一定是服务端那句带原因的提示，而不是客户端一句模糊的「请求超时（600s）」。
+- **nginx 同步放宽**：`proxy_read_timeout / proxy_send_timeout` 300s → 1800s
+  （`meta.doger.icu.conf` / `meta-port81.conf`），保证空闲上限（10 分钟）先于 nginx 生效，
+  错误信息始终由我们给出。
+
+#### 测试与实测
+- `siteDirectChatService.test.ts` 增加 3 例（共 7 例）：思考强度原样透传且固定打
+  `/v1/chat/completions`、不传时不凭空造 `reasoning_effort`、流式中每 55s 有一次
+  `touch` 就不会被空闲超时打断、真卡死超过空闲上限才断且原因里带「没有返回任何新数据」。
+- 前端架构测试增加「对话支持选择思考强度，并按 reasoning_effort 透传」。
+- 三道 `tsc` 通过；相关套件 18 例通过；`build:server` + `vite build` 通过并重启服务。
+- **生产实测**：
+  - 4000 直连：首个数据块 2.37s 到达、总耗时 44.95s、成功（说明是**边生成边流出**，不是憋到最后一起返回）。
+  - 经 nginx（81 端口）：首个数据块 3.19s、总 62.21s、779832 字节、成功，`proxy_buffering off` 生效。
+  - 长回答：3000 字 → 83s / 705155 字节成功；4000 字 → 75.6s / 781021 字节成功；
+    再次复测 63.7s / 620437 字节成功，都不再触发 30s 老限制。日志 `id=148~153` 全部
+    `success`、`latency_ms` 如实记录，思考内容（`reasoning` 增量）也随流透传。
+
 ### 68. 模型监控的「对话」改为按站点凭据直连：有账号或 sk 就能聊
 
 - **类型**：缺陷修复

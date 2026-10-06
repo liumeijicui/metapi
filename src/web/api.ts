@@ -9,6 +9,14 @@ const nodeBuffer = (globalThis as typeof globalThis & { Buffer?: BufferLike })
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
+  /**
+   * 收到 401 / 403 时是否按「本系统会话过期」处理（清 token + 刷新回登录页）。
+   *
+   * 默认开启，因为绝大多数接口的 401 确实来自 authMiddleware。但「代上游发请求」的接口
+   * 必须关掉：上游站点自己回 401（例如 agentrouter 的 unauthorized client detected）
+   * 不是我们的登录失效，原样处理会把用户无故踢下线。
+   */
+  clearSessionOnAuthError?: boolean;
 };
 
 function requireAuthToken(): string {
@@ -94,6 +102,7 @@ async function fetchAuthenticatedResponse(
   const {
     timeoutMs = 30_000,
     signal: externalSignal,
+    clearSessionOnAuthError = true,
     ...fetchOptions
   } = options;
   const controller = new AbortController();
@@ -126,7 +135,7 @@ async function fetchAuthenticatedResponse(
       signal: controller.signal,
       headers,
     });
-    if (res.status === 401 || res.status === 403) {
+    if (clearSessionOnAuthError && (res.status === 401 || res.status === 403)) {
       const hadToken = !!getAuthToken(localStorage);
       clearAuthSession(localStorage);
       if (
@@ -321,15 +330,23 @@ async function directChatStreamRequest(
     tokenId?: number | null;
     model: string;
     messages: Array<{ role: string; content: string }>;
+    /** 思考强度（reasoning_effort）；留空表示按站点默认。 */
+    reasoningEffort?: string;
   },
   signal?: AbortSignal,
 ) {
-  // 直连上游：不经网关路由，所以单独走一个接口，超时给足（对话可能很长）。
+  // 直连上游：不经网关路由，所以单独走一个接口。
+  // 注意这里的 timeoutMs 只覆盖「等到上游响应头」这一段（拿到响应头后计时器就清了，
+  // 不会截断后面的流），真正的超时策略在服务端按「空闲」判定；
+  // 这里给 30 分钟，保证先开口报错的一定是服务端那句有原因的话，而不是模糊的客户端超时。
   return fetchAuthenticatedResponse("/api/model-monitor/chat/stream", {
     method: "POST",
     signal,
     body: JSON.stringify(data),
-    timeoutMs: 10 * 60_000,
+    timeoutMs: 30 * 60_000,
+    // 上游站点自己的 401（凭据被拒、风控等）不能当成我们的登录失效，
+    // 否则一对话就被踢回登录页。真实状态码由服务端写进错误文案。
+    clearSessionOnAuthError: false,
   });
 }
 

@@ -8,6 +8,7 @@ import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { SocksClient } from 'socks';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
 import { Agent as UndiciAgent, ProxyAgent } from 'undici';
+import { hasExplicitUserAgent, resolveSiteInferenceUserAgent } from './siteProfiles.js';
 import { mergeHeadersWithSiteCustomHeaders, type SiteCustomHeadersMergePriority } from './siteCustomHeaders.js';
 import { resolveProxyUrlFromExtraConfig } from './accountExtraConfig.js';
 import { stripTrailingSlashes } from './urlNormalization.js';
@@ -492,6 +493,17 @@ export async function withSiteProxyRequestInit(
   });
   if (mergedHeaders) {
     nextOptions.headers = mergedHeaders;
+  }
+
+  // 站点要求的推理接口客户端指纹（见 siteProfiles）。放在这里是为了覆盖所有走
+  // fetchJson 的路径（例如用密钥读 /v1/models），网关与直连对话那条路在
+  // upstreamRequestBuilder 里已经加过；两边都先看有没有显式 UA，不覆盖已有的。
+  const inferenceUserAgent = resolveSiteInferenceUserAgent(requestUrl);
+  if (inferenceUserAgent && !hasExplicitUserAgent(nextOptions.headers)) {
+    nextOptions.headers = {
+      ...(nextOptions.headers as Record<string, string> | undefined),
+      'User-Agent': inferenceUserAgent,
+    };
   }
 
   const alsOverride = accountProxyOverride.getStore();

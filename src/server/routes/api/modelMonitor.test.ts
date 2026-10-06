@@ -1,5 +1,13 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const requestSiteDirectChatMock = vi.hoisted(() => vi.fn());
+
+// 只替换「发请求」那一步：凭据解析等仍走真实实现。
+vi.mock('../../services/siteDirectChatService.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/siteDirectChatService.js')>();
+  return { ...actual, requestSiteDirectChat: requestSiteDirectChatMock };
+});
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -211,6 +219,79 @@ describe('model monitor routes', () => {
     expect(body.requestedModel).toBe('deepseek-v4.1-flash');
     expect(JSON.stringify(body)).not.toContain('gpt-6-astra');
     expect(body.channels).toEqual([]);
+  });
+
+  it('上游回 401 时，接口回 502 而不是 401（否则前端会把用户踢下线）', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'agentrouter-like',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'EPejiq-not-a-real-secret',
+      valueStatus: 'ready',
+      enabled: true,
+    }).returning().get();
+
+    requestSiteDirectChatMock.mockReset();
+    requestSiteDirectChatMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      message: '{"error":{"message":"unauthorized client detected"}}',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/chat/stream',
+      payload: {
+        siteId: site.id,
+        accountId: account.id,
+        tokenId: null,
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    // 关键：绝不能是 401/403 —— 前端对这两个码会 clearAuthSession + reload。
+    expect(response.statusCode).toBe(502);
+    const body = response.json();
+    expect(body.error.message).toContain('HTTP 401');
+    expect(body.error.message).toContain('unauthorized client detected');
+  });
+
+  it('普通上游错误（如 503）原样返回，方便看到真实原因', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'busy-site',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+
+    requestSiteDirectChatMock.mockReset();
+    requestSiteDirectChatMock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      message: 'No available channel for model gpt-5 under group default',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/chat/stream',
+      payload: {
+        siteId: site.id,
+        accountId: account.id,
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error.message).toContain('No available channel');
   });
 
   it('queues a collection run when refresh is requested', async () => {

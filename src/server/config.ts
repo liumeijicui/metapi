@@ -156,6 +156,13 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     modelMonitorEnabled: parseBoolean(env.MODEL_MONITOR_ENABLED, true),
     modelMonitorIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_MONITOR_INTERVAL_MS, 15 * 60 * 1000))),
     modelMonitorTimeoutMs: Math.max(5_000, Math.trunc(parseNumber(env.MODEL_MONITOR_TIMEOUT_MS, 30_000))),
+    // 模型监控的「对话」是流式输出：慢没关系，只要上游还在吐字就不该被判超时。
+    // 所以超时按「空闲」算 —— 多久没有收到新数据才算卡死；总时长上限只是为了
+    // 兜住「一直有数据但永远不结束」的极端情况，默认给得很宽。
+    // 注意：nginx 的 proxy_read_timeout 必须大于这里的空闲上限，否则会是 nginx 先断、
+    // 错误信息也变成没头没尾的 504（当前 nginx 侧配的是 1800s）。
+    modelMonitorChatTimeoutMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_MONITOR_CHAT_TIMEOUT_MS, 30 * 60 * 1000))),
+    modelMonitorChatIdleTimeoutMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_MONITOR_CHAT_IDLE_TIMEOUT_MS, 10 * 60 * 1000))),
     modelMonitorWindowStartHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_START_HOUR, 7)))),
     modelMonitorWindowEndHour: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_END_HOUR, 23)))),
     // 没有监控接口、只能用密钥列模型的站点（models_only），模型列表变化很少，

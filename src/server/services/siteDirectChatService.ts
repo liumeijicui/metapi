@@ -125,7 +125,12 @@ export type SiteDirectChatInput = {
   model: string;
   messages: Array<{ role: string; content: string }>;
   stream?: boolean;
+  /** 总时长上限（毫秒）。到点必断，防止连接一直挂着。 */
   timeoutMs: number;
+  /** 空闲上限（毫秒）：多久没有收到新数据才算卡死。推理模型首字很慢，所以单独给一份预算。 */
+  idleTimeoutMs?: number;
+  /** 额外的 OpenAI 协议字段（例如 reasoning_effort），原样透传给上游。 */
+  extraBody?: Record<string, unknown> | null;
   signal?: AbortSignal;
 };
 
@@ -184,8 +189,39 @@ export async function resolveSiteDirectChat(input: {
 
 /** 直连的结果：拿到底层 Response 交给调用方直接 pipe，或带上一句失败原因。 */
 export type SiteDirectChatOutcome =
-  | { ok: true; response: Awaited<ReturnType<typeof globalThis.fetch>>; latencyMs: number }
+  | {
+    ok: true;
+    response: Awaited<ReturnType<typeof globalThis.fetch>>;
+    latencyMs: number;
+    /** 每读到一块流数据就调用一次，用来把「空闲计时」往后推。 */
+    touch: () => void;
+    /** 我方主动掐断时（空闲 / 总时长超限）的真实原因；没掐断时返回 null。 */
+    timeoutReason: () => string | null;
+  }
   | { ok: false; status: number; message: string };
+
+/**
+ * 把「上游失败」翻译成可以安全回给浏览器的状态码与文案。
+ *
+ * 关键点：上游站点自己回 401/403（凭据被拒、风控拦截等）**绝不能原样转发**。
+ * 前端的 `fetchAuthenticatedResponse` 把 401/403 一律当作「本系统会话过期」，
+ * 会清掉本地 token 并刷新回登录页 —— 表现就是「和这个站一对话就被退出登录」，
+ * agentrouter 的 `unauthorized client detected` 就是这么把用户踢下线的。
+ * 这里统一改写成 502（网关侧失败），并把真实状态码写进文案，便于排查。
+ */
+export function toClientFacingDirectChatFailure(input: {
+  status: number;
+  message: string;
+}): { status: number; message: string } {
+  const upstreamAuthRejected = input.status === 401 || input.status === 403;
+  const status = upstreamAuthRejected ? 502 : input.status;
+  return {
+    status: Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502,
+    message: upstreamAuthRejected
+      ? `上游站点拒绝了这次调用（HTTP ${input.status}）：${input.message}`
+      : input.message,
+  };
+}
 
 /**
  * 直连上游发起一轮对话。**不查路由、不选通道、不改写模型名**：
@@ -197,20 +233,44 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
   const { site, account, tokenValue } = resolved;
 
   const stream = input.stream !== false;
+  // 页面选中的思考强度之类的字段，原样透传（openai 协议下就是 chat/completions 的顶层字段）。
+  const extraBody = input.extraBody && typeof input.extraBody === 'object' ? input.extraBody : {};
   const openaiBody: Record<string, unknown> = {
+    ...extraBody,
     model: input.model,
     messages: input.messages,
     stream,
   };
 
-  const deadlineAtMs = Date.now() + Math.max(1, input.timeoutMs);
+  const totalMs = Math.max(1, input.timeoutMs);
+  const idleMs = Math.max(1, Math.min(input.idleTimeoutMs ?? totalMs, totalMs));
   const abortController = new AbortController();
   const onAbort = () => abortController.abort(new Error('direct chat aborted'));
   input.signal?.addEventListener('abort', onAbort, { once: true });
-  const abortTimer = setTimeout(() => {
-    abortController.abort(new Error('direct chat timeout'));
-  }, Math.max(1, input.timeoutMs));
-  abortTimer.unref?.();
+
+  // 流式对话：只要上游还在吐字就不算超时（推理模型首字可能等 1-2 分钟），
+  // 但两条硬线仍在 —— 空闲太久（卡死）和总时长超上限（挂死不动）。
+  let timeoutMessage = `直连对话超过 ${Math.round(totalMs / 1000)} 秒上限`;
+  let abortedByUs = false;
+  const timeoutReason = () => (abortedByUs ? timeoutMessage : null);
+  const abortWithReason = (reason: string) => {
+    abortedByUs = true;
+    timeoutMessage = reason;
+    abortController.abort(new Error(reason));
+  };
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const armIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      abortWithReason(`上游 ${Math.round(idleMs / 1000)} 秒没有返回任何新数据（空闲超时）`);
+    }, idleMs);
+    idleTimer.unref?.();
+  };
+  const totalTimer = setTimeout(() => {
+    abortWithReason(`对话总时长超过 ${Math.round(totalMs / 1000)} 秒上限`);
+  }, totalMs);
+  totalTimer.unref?.();
+  armIdleTimer();
 
   const startedAt = Date.now();
   try {
@@ -277,7 +337,8 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
         );
         return fetch(targetUrl, init as never) as never;
       },
-      firstByteTimeoutMs: Math.max(1, deadlineAtMs - Date.now()),
+      // 首字预算同样按「空闲」算：这段时间内没有任何响应头/数据就判失败。
+      firstByteTimeoutMs: idleMs,
     });
 
     if (!result.ok) {
@@ -287,15 +348,29 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
         message: String(result.rawErrText || result.errText || '上游请求失败').trim(),
       };
     }
-    return { ok: true, response: result.upstream as never, latencyMs: Date.now() - startedAt };
+    return {
+      ok: true,
+      response: result.upstream as never,
+      latencyMs: Date.now() - startedAt,
+      touch: armIdleTimer,
+      timeoutReason,
+    };
   } catch (error) {
+    if (input.signal?.aborted) {
+      return { ok: false, status: 499, message: '已停止（用户中断）' };
+    }
+    if (abortedByUs) {
+      return { ok: false, status: 504, message: timeoutMessage };
+    }
+    const raw = error instanceof Error ? error.message : String(error || '');
     return {
       ok: false,
       status: 502,
-      message: error instanceof Error ? error.message : '直连上游失败',
+      message: raw && raw !== 'direct chat timeout' ? raw : '直连上游失败',
     };
   } finally {
     input.signal?.removeEventListener('abort', onAbort);
-    clearTimeout(abortTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
   }
 }

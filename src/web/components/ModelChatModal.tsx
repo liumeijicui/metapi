@@ -126,6 +126,9 @@ export default function ModelChatModal({
   // 完全不走网关的新路由 / 老路由，所以和「有没有配路由」无关。
   const [credentials, setCredentials] = useState<DirectCredentialOption[]>([]);
   const [credentialKey, setCredentialKey] = useState('');
+  // 思考强度：直接作为 OpenAI 协议的 reasoning_effort 字段透传给上游。
+  // 上游不支持时会忽略这个字段，所以默认留空（按站点默认）。
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [promptCases, setPromptCases] = useState<PromptCaseOption[]>([]);
   const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [promptQuery, setPromptQuery] = useState('');
@@ -250,6 +253,7 @@ export default function ModelChatModal({
           tokenId: credential.tokenId,
           model: target.modelName,
           messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
         },
         controller.signal,
       );
@@ -367,11 +371,27 @@ export default function ModelChatModal({
           ) : (
             <span className="model-chat-route-hint">{tr('该站点没有可用于直连的账号或密钥')}</span>
           )}
+          <label className="model-chat-route">
+            <span>{tr('思考强度')}</span>
+            <select
+              value={reasoningEffort}
+              onChange={(event) => setReasoningEffort(event.target.value)}
+              disabled={sending}
+              title={tr('作为 reasoning_effort 透传给上游；上游不支持时会被忽略')}
+            >
+              <option value="">{tr('站点默认')}</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="max">max</option>
+            </select>
+          </label>
         </div>
 
         <div className="model-chat-route-note">
           {activeCredential ? (
-            <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}</>
+            <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}{reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}</>
           ) : (
             <>{tr('该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。')}</>
           )}

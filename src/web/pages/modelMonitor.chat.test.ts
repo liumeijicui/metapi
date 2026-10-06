@@ -36,6 +36,16 @@ describe('ModelMonitor 对话按钮', () => {
     expect(modal).toContain('不经过新路由 / 老路由，也不会转发到其它站点。');
   });
 
+  it('对话支持选择思考强度，并按 reasoning_effort 透传', () => {
+    expect(modal).toContain("tr('思考强度')");
+    expect(modal).toContain("setReasoningEffort(event.target.value)");
+    // 留空 = 站点默认，不往请求里塞字段。
+    expect(modal).toContain('...(reasoningEffort ? { reasoningEffort } : {}),');
+    for (const level of ['minimal', 'low', 'medium', 'high', 'max']) {
+      expect(modal).toContain(`<option value="${level}">${level}</option>`);
+    }
+  });
+
   it('日志里会标明是测试流量', () => {
     expect(modal).toContain("tr('直连目标站点；日志里标记为「模型测试」')");
   });

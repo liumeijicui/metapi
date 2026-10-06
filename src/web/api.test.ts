@@ -45,6 +45,46 @@ describe('api proxy test timeout handling', () => {
     vi.restoreAllMocks();
   });
 
+  it('直连对话收到上游 401 时不会清掉本地登录态（否则一对话就被踢下线）', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: '上游站点拒绝了这次调用（HTTP 401）：unauthorized client detected' } }),
+      { status: 502, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await api.directChatStream({
+      siteId: 35,
+      accountId: 19,
+      tokenId: 13,
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(response.status).toBe(502);
+    // 关键：请求必须带着「别按会话过期处理」的开关，cookie/token 要还在。
+    expect(globalThis.localStorage.getItem('auth_token')).toBe('token-1');
+  });
+
+  it('直连对话把上游 401 真实回传时，也不会把自己当作会话过期清 token', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: 'unauthorized client detected' } }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await api.directChatStream({
+      siteId: 35,
+      accountId: 19,
+      tokenId: 13,
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    // 服务端已经改成 502；万一以后这里又漏出 401，前端也不能把用户踢下线。
+    expect(response.status).toBe(401);
+    expect(globalThis.localStorage.getItem('auth_token')).toBe('token-1');
+  });
+
   it('keeps image generation proxy tests alive past the default 30 second timeout', async () => {
     installPendingFetch();
 

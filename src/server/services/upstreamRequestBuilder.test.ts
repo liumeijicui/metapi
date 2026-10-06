@@ -6,6 +6,59 @@ import {
 } from './upstreamRequestBuilder.js';
 
 describe('upstreamRequestBuilder', () => {
+  it('agentrouter 的推理请求会自动带上它要求的客户端标识', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'deepseek-v4-flash',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'agentrouter',
+      siteUrl: 'https://agentrouter.org',
+      openaiBody: { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {},
+    });
+
+    // 缺了这个 UA，站点会回 401 unauthorized client detected。
+    expect(request.headers['User-Agent']).toBe('claude-cli/2.0.30 (external, cli)');
+    expect(request.path).toBe('/v1/chat/completions');
+  });
+
+  it('下游的 User-Agent 照旧被安全策略拦掉，用的是站点要求的那一个', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'deepseek-v4-flash',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'agentrouter',
+      siteUrl: 'https://agentrouter.org',
+      openaiBody: { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      downstreamFormat: 'openai',
+      downstreamHeaders: { 'user-agent': 'my-own-client/9.9' },
+    });
+
+    // user-agent 是白名单里允许透传的头（真实 Claude Code 客户端就是靠这个过闸），
+    // 所以调用方自己带了就尊重调用方的，不强行替换成我们内置的那个。
+    expect(request.headers['user-agent']).toBe('my-own-client/9.9');
+    expect(request.headers['User-Agent']).toBeUndefined();
+  });
+
+  it('其它站点不会被注入客户端标识', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'kimi-k3',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://happycoding.xyz',
+      openaiBody: { model: 'kimi-k3', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {},
+    });
+
+    expect(request.headers['User-Agent']).toBeUndefined();
+  });
+
   it('routes Gemini official chat tool history through native generateContent with signed functionCall parts', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
