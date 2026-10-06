@@ -53,6 +53,10 @@ import {
   stopModelMonitorScheduler,
 } from './services/modelMonitorService.js';
 import {
+  startXApiKeyScheduler,
+  stopXApiKeyScheduler,
+} from './services/xapiKeyService.js';
+import {
   startChannelRecoveryProbeScheduler,
   stopChannelRecoveryProbeScheduler,
 } from './services/channelRecoveryProbeService.js';
@@ -289,6 +293,7 @@ try {
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startModelMonitorScheduler();
+startXApiKeyScheduler();
 startChannelRecoveryProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
 startAssistedLoginWatchSchedulers();
@@ -309,6 +314,7 @@ app.addHook('onClose', async () => {
   stopProxyLogRetentionService();
   stopModelAvailabilityProbeScheduler();
   stopModelMonitorScheduler();
+  stopXApiKeyScheduler();
   stopChannelRecoveryProbeScheduler();
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();

@@ -161,6 +161,11 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // 没有监控接口、只能用密钥列模型的站点（models_only），模型列表变化很少，
     // 不跟着 15 分钟轮次跑，只在每天这个小时之后刷一次。
     modelMonitorModelListRefreshHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_MODEL_LIST_REFRESH_HOUR, 7)))),
+    // X-API 的对话密钥会因闲置被站点自动作废，且明文只在签发时出现一次，
+    // 所以由受管浏览器每天自动重新签发一次并回写账号（站点只允许 1 个有效 Key，
+    // 签发前会先作废旧 Key）。站点被删除/改平台后没有可刷目标，任务自动空转。
+    xapiKeyEnabled: parseBoolean(env.XAPI_KEY_ENABLED, true),
+    xapiKeyRefreshHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.XAPI_KEY_REFRESH_HOUR, 5)))),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),
