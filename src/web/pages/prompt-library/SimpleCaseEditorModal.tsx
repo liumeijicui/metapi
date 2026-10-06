@@ -20,6 +20,20 @@ export type SimpleCaseDraft = {
   answer: string | null;
 };
 
+const FIELD_STYLE = { display: 'flex', flexDirection: 'column', gap: 6 } as const;
+const LABEL_STYLE = { fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' } as const;
+const INPUT_STYLE = {
+  width: '100%',
+  padding: '10px 14px',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-sm)',
+  fontSize: 13,
+  outline: 'none',
+  background: 'var(--color-bg-card)',
+  color: 'var(--color-text-primary)',
+  fontFamily: 'inherit',
+} as const;
+
 type SimpleCaseEditorModalProps = {
   open: boolean;
   promptCase: SimpleCaseDraft | null;
@@ -90,12 +104,12 @@ export default function SimpleCaseEditorModal({
         </>
       )}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div className="form-group">
-          <label className="form-label" htmlFor="prompt-simple-title">题目名称</label>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={FIELD_STYLE}>
+          <label style={LABEL_STYLE} htmlFor="prompt-simple-title">题目名称</label>
           <input
             id="prompt-simple-title"
-            className="input"
+            style={INPUT_STYLE}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="例如：鹈鹕骑自行车"
@@ -103,24 +117,26 @@ export default function SimpleCaseEditorModal({
           />
         </div>
 
-        <div className="form-group">
-          <label className="form-label" htmlFor="prompt-simple-description">题目描述</label>
+        <div style={FIELD_STYLE}>
+          <label style={LABEL_STYLE} htmlFor="prompt-simple-description">题目描述</label>
           <textarea
             id="prompt-simple-description"
-            className="input"
+            style={{ ...INPUT_STYLE, resize: 'vertical', lineHeight: 1.6 }}
             rows={7}
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             placeholder="测试时选这道题，就会把这段描述发给模型"
           />
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>测试时选中该题目名称，会自动把这段描述填进对话框。</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>
+            测试时选中该题目名称，会自动把这段描述填进对话框。
+          </div>
         </div>
 
-        <div className="form-group">
-          <label className="form-label" htmlFor="prompt-simple-answer">答案（可选）</label>
+        <div style={FIELD_STYLE}>
+          <label style={LABEL_STYLE} htmlFor="prompt-simple-answer">答案（可选）</label>
           <textarea
             id="prompt-simple-answer"
-            className="input"
+            style={{ ...INPUT_STYLE, resize: 'vertical', lineHeight: 1.6 }}
             rows={4}
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}

@@ -51,13 +51,39 @@ describe('ModelForwarding 模型转发页', () => {
     expect(page).toContain("tr('置顶')");
     expect(page).toContain("tr('上移')");
     expect(page).toContain("tr('下移')");
-    expect(page).toContain("tr('目标')");
+    expect(page).toContain("tr('顺序')");
     expect(page).toContain('handleMoveTarget');
     expect(page).toContain('handleToggleTarget');
     expect(page).toContain('api.moveModelForwardTarget');
     expect(page).toContain('api.setModelForwardTargetEnabled');
     expect(api).toContain('/targets/${targetId}/move');
     expect(api).toContain('/targets/${targetId}/enabled');
+  });
+
+  it('置顶 / 上移 / 下移对每一行都可点，不再按首尾位置禁用', () => {
+    for (const action of ['top', 'up', 'down']) {
+      expect(page).toContain(`data-testid={\`forward-target-${action}-$\{target.id}\`}`);
+    }
+    // 三个按钮只在本行操作进行中禁用，不再白按 isFirst / isLast 灰掉。
+    expect(page).not.toContain('disabled={targetBusy || isFirst}');
+    expect(page).not.toContain('disabled={targetBusy || isLast}');
+    expect(page).not.toContain('const isFirst = index === 0;');
+    expect(page).not.toContain('const isLast = index === rule.targets.length - 1;');
+  });
+
+  it('页面明确告知「顺序即默认调用顺序」', () => {
+    expect(page).toContain('forward-target-order-hint-');
+    expect(page).toContain('顺序即默认调用顺序');
+    expect(page).toContain('调用顺序：数字越小越先被调用');
+  });
+
+  it('调整顺序后立即丢掉路由器进程内缓存，新顺序立即生效', () => {
+    expect(service).toContain("import { invalidateTokenRouterCache } from './tokenRouter.js';");
+    // syncModelForwardRule（含移动 / 启停用 / 新增删除）收尾都要失效缓存。
+    const syncBody = service.slice(service.indexOf('export async function syncModelForwardRule'), service.indexOf('export async function createModelForwardRule'));
+    expect(syncBody).toContain('invalidateTokenRouterCache();');
+    const deleteBody = service.slice(service.indexOf('export async function deleteModelForwardRule'));
+    expect(deleteBody).toContain('invalidateTokenRouterCache();');
   });
 
   it('对外模型名大小写不敏感查重，顺序同步为通道优先级', () => {

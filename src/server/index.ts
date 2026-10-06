@@ -283,9 +283,12 @@ await reloadBackupWebdavScheduler();
 try {
   // 内置题库（鹈鹕测试 / 糖果测试 / 时钟 / 六边形弹跳球…）幂等补齐，
   // 换库或新装后不用手动去提示词管理里点导入。
-  const { imported } = await ensureBuiltinPromptPresets();
+  const { imported, translated } = await ensureBuiltinPromptPresets();
   if (imported.length) {
     console.log(`[PromptLibrary] imported builtin presets: ${imported.join(', ')}`);
+  }
+  if (translated > 0) {
+    console.log(`[PromptLibrary] translated ${translated} legacy builtin prompt(s) to Chinese`);
   }
 } catch (error) {
   console.warn(`Failed to ensure builtin prompt presets: ${(error as Error)?.message || 'unknown error'}`);

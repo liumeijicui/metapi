@@ -112,6 +112,71 @@ describe('TokenRouter runtime cache', () => {
     expect(refreshedSelection).toBeNull();
   });
 
+  it('模型转发调整顺序后立即改变调用目标，不等缓存 TTL', async () => {
+    // 两个独立站点，便于区分调用到底落在谁身上。
+    const mkSite = async (label: string) => {
+      const site = await db.insert(schema.sites).values({
+        name: `转发-${label}`,
+        url: `https://${label}.example.com`,
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: `${label}-user`,
+        accessToken: `${label}-access-token`,
+        apiToken: `${label}-api-token`,
+        status: 'active',
+      }).returning().get();
+      const token = await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: `${label}-token`,
+        token: `sk-${label}-token`,
+        enabled: true,
+        isDefault: true,
+        valueStatus: 'ready',
+      }).returning().get();
+      return { site, account, token };
+    };
+
+    const first = await mkSite('first');
+    const second = await mkSite('second');
+
+    const forwardService = await import('./modelForwardService.js');
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'fwd-order-probe',
+      targets: [
+        { siteId: first.site.id, accountId: first.account.id, upstreamModel: 'model-first' },
+        { siteId: second.site.id, accountId: second.account.id, upstreamModel: 'model-second' },
+      ],
+    });
+    const firstTarget = rule.targets.find((t) => t.upstreamModel === 'model-first')!;
+    const secondTarget = rule.targets.find((t) => t.upstreamModel === 'model-second')!;
+
+    const router = new TokenRouter();
+    const before = await router.selectChannel('fwd-order-probe');
+    expect(before?.account.id).toBe(first.account.id);
+    expect(before?.channel.sourceModel).toBe('model-first');
+
+    // 置顶：把第二个目标移到最前（TTL 设成了 60s，只有显式失效才能立刻生效）
+    await forwardService.moveModelForwardTarget(rule.id, secondTarget.id, 'top');
+
+    const after = await router.selectChannel('fwd-order-probe');
+    expect(after?.account.id).toBe(second.account.id);
+    expect(after?.channel.sourceModel).toBe('model-second');
+
+    // 再下移回去，调用目标也跟着回去。
+    await forwardService.moveModelForwardTarget(rule.id, secondTarget.id, 'down');
+    const restored = await router.selectChannel('fwd-order-probe');
+    expect(restored?.account.id).toBe(first.account.id);
+    expect(restored?.channel.sourceModel).toBe('model-first');
+
+    // 置顶在首行也能点：对已经在最前的目标重复置顶不报错。
+    await forwardService.moveModelForwardTarget(rule.id, firstTarget.id, 'top');
+    const stillFirst = await router.selectChannel('fwd-order-probe');
+    expect(stillFirst?.account.id).toBe(first.account.id);
+  });
+
   it('uses fibonacci-style cooldown across repeated failures', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'cooldown-site',

@@ -270,8 +270,6 @@ export default function ModelForwarding() {
                         : tr('待命');
                   const stateClass = !target.enabled || cooling ? 'badge-warning' : 'badge-success';
                   const targetBusy = busyTargetKey === `${rule.id}:${target.id}`;
-                  const isFirst = index === 0;
-                  const isLast = index === rule.targets.length - 1;
                   return (
                     <div
                       key={target.id}
@@ -286,8 +284,13 @@ export default function ModelForwarding() {
                         opacity: target.enabled ? 1 : 0.6,
                       }}
                     >
-                      <span className="badge badge-muted" style={{ fontSize: 10.5, minWidth: 34, justifyContent: 'center' }}>
-                        {tr('目标')}{index + 1}
+                      <span
+                        className="badge badge-muted"
+                        style={{ fontSize: 10.5, minWidth: 34, justifyContent: 'center' }}
+                        title={tr('调用顺序：数字越小越先被调用')}
+                        data-testid={`forward-target-order-${target.id}`}
+                      >
+                        {tr('顺序')}{index + 1}
                       </span>
                       <span style={{ fontSize: 12.5, fontWeight: 500 }}>
                         {target.siteName || `#${target.siteId}`}
@@ -310,8 +313,9 @@ export default function ModelForwarding() {
                         type="button"
                         className="btn btn-link"
                         style={{ fontSize: 11.5, padding: '0 4px' }}
-                        title={tr('置顶')}
-                        disabled={targetBusy || isFirst}
+                        title={tr('置顶（移到最前，最先被调用）')}
+                        disabled={targetBusy}
+                        data-testid={`forward-target-top-${target.id}`}
                         onClick={() => void handleMoveTarget(rule, target, 'top')}
                       >
                         {tr('置顶')}
@@ -320,8 +324,9 @@ export default function ModelForwarding() {
                         type="button"
                         className="btn btn-link"
                         style={{ fontSize: 11.5, padding: '0 4px' }}
-                        title={tr('上移')}
-                        disabled={targetBusy || isFirst}
+                        title={tr('上移（更靠前调用）')}
+                        disabled={targetBusy}
+                        data-testid={`forward-target-up-${target.id}`}
                         onClick={() => void handleMoveTarget(rule, target, 'up')}
                       >
                         ↑ {tr('上移')}
@@ -330,8 +335,9 @@ export default function ModelForwarding() {
                         type="button"
                         className="btn btn-link"
                         style={{ fontSize: 11.5, padding: '0 4px' }}
-                        title={tr('下移')}
-                        disabled={targetBusy || isLast}
+                        title={tr('下移（更靠后调用）')}
+                        disabled={targetBusy}
+                        data-testid={`forward-target-down-${target.id}`}
                         onClick={() => void handleMoveTarget(rule, target, 'down')}
                       >
                         ↓ {tr('下移')}
@@ -348,6 +354,13 @@ export default function ModelForwarding() {
                     </div>
                   );
                 })}
+              </div>
+
+              <div
+                data-testid={`forward-target-order-hint-${rule.id}`}
+                style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}
+              >
+                {tr('顺序即默认调用顺序：排在前面的目标优先被调用，该目标停用 / 冷却 / 连续失败时才自动落到下一个。')}
               </div>
 
               <div style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>

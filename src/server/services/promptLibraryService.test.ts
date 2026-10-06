@@ -109,6 +109,35 @@ describe('promptLibraryService', () => {
     }
   });
 
+  it('会把历史遗留的英文题目描述纠正成中文，但不动用户改过的描述', async () => {
+    const result = await service.importBuiltinPromptPreset('pelican-benchmark');
+    const cases = await service.listPromptCases(result.suiteId);
+    const original = cases.find((item) => item.title === '鹈鹕骑自行车（原版）');
+    expect(original).toBeTruthy();
+    const customized = cases.find((item) => item.title === '鹈鹕骑自行车（中文指令）');
+    expect(customized).toBeTruthy();
+
+    // 模拟升级前的旧数据：原版题目描述还是英文，另一条是用户自己改过的描述。
+    await service.updatePromptCase(original!.id, {
+      prompt: 'Generate an SVG of a pelican riding a bicycle',
+    });
+    await service.updatePromptCase(customized!.id, { prompt: '请画一只骑自行车的鹈鹕（我自己改的）' });
+
+    const ensured = await service.ensureBuiltinPromptPresets();
+    expect(ensured.translated).toBeGreaterThanOrEqual(1);
+
+    const after = await service.listPromptCases(result.suiteId);
+    const translated = after.find((item) => item.id === original!.id);
+    expect(translated?.prompt).toBe('请用 SVG 画一只骑自行车的鹈鹕');
+
+    const untouched = after.find((item) => item.id === customized!.id);
+    expect(untouched?.prompt).toBe('请画一只骑自行车的鹈鹕（我自己改的）');
+
+    // 幂等：再跑一次不会重复改任何东西。
+    const second = await service.ensureBuiltinPromptPresets();
+    expect(second.translated).toBe(0);
+  });
+
   it('删除题库会连带删除其下题目', async () => {
     const result = await service.importBuiltinPromptPreset('classic-reasoning');
     expect((await service.listPromptCases(result.suiteId)).length).toBeGreaterThan(0);

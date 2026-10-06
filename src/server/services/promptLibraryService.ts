@@ -102,7 +102,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
     cases: [
       {
         title: '鹈鹕骑自行车（原版）',
-        prompt: 'Generate an SVG of a pelican riding a bicycle',
+        prompt: '请用 SVG 画一只骑自行车的鹈鹕',
         expectedAnswer: null,
         answerNotes:
           '主观视觉题，无唯一答案。评分要点：①输出为可直接渲染的 <svg> 代码，而不是文字描述、Markdown 图片链接或 base64 图片；②自行车结构成立（两个车轮、辐条、车架、车把、脚踏/链条）；③鹈鹕特征可辨认（大喙、喉囊、身体、翅膀）；④鹈鹕与自行车正确结合（脚踩在脚踏上、翅/鳍扶车把均可）；⑤图形比例不过分离谱。',
@@ -112,7 +112,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
       },
       {
         title: '鹈鹕骑自行车（动画 / 无背景）',
-        prompt: 'Draw a pelican riding a bicycle as an SVG, animated, no background',
+        prompt: '请用 SVG 画一只骑自行车的鹈鹕，要带动画，并且不要背景',
         expectedAnswer: null,
         answerNotes:
           '在原版基础上增加两条硬性要求：①包含动画（<animate>/<animateTransform> 或 CSS 动画，车轮转动、场景位移等均可）；②无背景（不画天空/地面/背景色矩形）。其余评分要点同原版。常见失败：只画静态图、加了背景矩形、用文字说明代替代码。',
@@ -144,7 +144,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
     cases: [
       {
         title: '糖果一共有多少颗',
-        prompt: 'How many candies are in the image?',
+        prompt: '这张图片里一共有多少颗糖果？',
         expectedAnswer: '21',
         answerNotes:
           '需配合题目配图使用：图中 9 个圆形糖果 + 12 个五角星形糖果，共 21 个。模型常见错误答案是 24 / 18 / 30。若只发文字不附图，模型无法作答，判为无效样本。',
@@ -154,7 +154,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
       },
       {
         title: '圆形糖果有多少颗',
-        prompt: 'How many round candies are in the image?',
+        prompt: '这张图片里有多少颗圆形糖果？',
         expectedAnswer: '9',
         answerNotes: '同一张配图，只数圆形糖果：9 颗。用来确认模型是「数错」还是「把五角星也算进去了」。',
         judgeMode: 'exact',
@@ -175,7 +175,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
     cases: [
       {
         title: 'strawberry 里有几个字母 r',
-        prompt: "How many 'r' letters are in the word 'strawberry'?",
+        prompt: '单词 strawberry 里有几个字母 r？',
         expectedAnswer: '3',
         answerNotes: "s-t-r-a-w-b-e-r-r-y，共 3 个 r。常见错误答案：2。",
         judgeMode: 'contains',
@@ -216,7 +216,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
     cases: [
       {
         title: 'SVG 时钟指向 10:10',
-        prompt: 'Generate an SVG of an analog clock showing the time 10:10',
+        prompt: '请画一个指向 10:10 的 SVG 模拟时钟',
         expectedAnswer: null,
         answerNotes:
           '主观视觉题，无唯一答案。评分要点：①输出可直接渲染的 <svg>（不是文字描述或图片链接）；②12 个时刻刻度齐全，数字或刻度线位置正确；③时针指向 10 与 11 之间偏 10（10:10 时时针约在 10 点的 1/6 处，不是正对 10）、分针正对 2；④时针比分针短；⑤中心有转轴。常见失败：指针角度反了（画成 1:50）、两根指针一样长、刻度缺失。',
@@ -239,7 +239,7 @@ export const BUILTIN_PROMPT_PRESETS: BuiltinPromptPreset[] = [
       {
         title: '旋转六边形里的弹跳球（单文件）',
         prompt:
-          'Write a single HTML file with JavaScript that renders a ball bouncing inside a rotating hexagon. The ball must obey the laws of physics (gravity, no energy loss on wall collisions, correct collision detection against the rotating walls). Include the drawing code as well.',
+          '请写一个单文件 HTML（内联 JavaScript），在一个不断旋转的六边形里画一个弹跳的小球。小球要遵守物理规律：受重力、撞到墙面不损失能量，并且能正确检测与旋转墙面的碰撞。绘制代码也要一并写上。',
         expectedAnswer: null,
         answerNotes:
           '主观代码题，无唯一答案。评分要点：①是可独立运行的单文件（内联 <script>/<canvas>，不需要外部依赖）；②六边形在持续旋转；③小球受重力、会随时间下落到下壁；④与旋转的边做碰撞检测（把球速变换到墙面坐标系处理），碰壁后速度方向正确、速率基本守恒；⑤球不会穿墙或卡住；⑥能实际跑起来。常见失败：六边形不转、球穿墙、把碰撞写成「碰到屏幕边缘反弹」、需要外部库导致跑不起来。',
@@ -736,8 +736,50 @@ export async function listBuiltinPromptPresets(): Promise<BuiltinPromptPresetVie
   });
 }
 
+/**
+ * 内置题库里早期版本用英文写「题目描述」，在中文界面上很割裂。这里做一次纠正：
+ * 只把「描述仍然一字不差等于旧英文原文」的行改成中文，用户自己改过的描述不动。
+ * 幂等：纠正之后再启动就匹配不到旧值了。
+ */
+const LEGACY_HEXAGON_PROMPT_TEXT =
+  'Write a single HTML file with JavaScript that renders a ball bouncing inside a rotating hexagon. '
+  + 'The ball must obey the laws of physics (gravity, no energy loss on wall collisions, '
+  + 'correct collision detection against the rotating walls). Include the drawing code as well.';
+
+const LEGACY_BUILTIN_PROMPT_TEXT: Record<string, string> = {
+  'Generate an SVG of a pelican riding a bicycle': '请用 SVG 画一只骑自行车的鹈鹕',
+  'Draw a pelican riding a bicycle as an SVG, animated, no background':
+    '请用 SVG 画一只骑自行车的鹈鹕，要带动画，并且不要背景',
+  'How many candies are in the image?': '这张图片里一共有多少颗糖果？',
+  'How many round candies are in the image?': '这张图片里有多少颗圆形糖果？',
+  "How many 'r' letters are in the word 'strawberry'?": '单词 strawberry 里有几个字母 r？',
+  'Generate an SVG of an analog clock showing the time 10:10': '请画一个指向 10:10 的 SVG 模拟时钟',
+  [LEGACY_HEXAGON_PROMPT_TEXT]:
+    '请写一个单文件 HTML（内联 JavaScript），在一个不断旋转的六边形里画一个弹跳的小球。'
+    + '小球要遵守物理规律：受重力、撞到墙面不损失能量，并且能正确检测与旋转墙面的碰撞。绘制代码也要一并写上。',
+};
+
+async function refreshLegacyBuiltinPromptTexts(): Promise<number> {
+  const rows = await db
+    .select({ id: schema.promptCases.id, prompt: schema.promptCases.prompt })
+    .from(schema.promptCases)
+    .all();
+  let translated = 0;
+  for (const row of rows) {
+    const next = LEGACY_BUILTIN_PROMPT_TEXT[String(row.prompt)];
+    if (!next || next === row.prompt) continue;
+    await db
+      .update(schema.promptCases)
+      .set({ prompt: next })
+      .where(eq(schema.promptCases.id, row.id))
+      .run();
+    translated += 1;
+  }
+  return translated;
+}
+
 /** 启动时用：把所有内置题库补齐，已存在（按 slug）的跳过，不覆盖用户改动。 */
-export async function ensureBuiltinPromptPresets(): Promise<{ imported: string[] }> {
+export async function ensureBuiltinPromptPresets(): Promise<{ imported: string[]; translated: number }> {
   const existing = await db
     .select({ slug: schema.promptSuites.slug })
     .from(schema.promptSuites)
@@ -749,7 +791,8 @@ export async function ensureBuiltinPromptPresets(): Promise<{ imported: string[]
     await importBuiltinPromptPreset(preset.slug);
     imported.push(preset.slug);
   }
-  return { imported };
+  const translated = await refreshLegacyBuiltinPromptTexts();
+  return { imported, translated };
 }
 
 /** 对话弹窗的「快捷提示词」用：一次性取出所有启用题目，带题库名。 */

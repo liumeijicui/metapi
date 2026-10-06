@@ -1,3 +1,89 @@
+### 67. 提示词管理：样式归位、题面中文化、快捷提示词回填输入框
+
+- **类型**：缺陷修复 + 文案调整
+- **需求来源**：本会话（用户：「提示词管理做的还是太差了，样式啥的都乱了，而且提示次详情不要英文，并且不满意，我要的是对话选择提示词的时候，提示词详情直接粘贴到对应的框里面，你目前不知道是不是」）
+
+#### 复核结论（先量后改）
+- 先说第 3 点：**「选中题目名称 → 描述自动填进对话框」本来就是生效的**，之前只是没人实测过。这次用无头 Chromium 真实点了一遍：打开「模型监控 → 对话 → 快捷提示词」，点第一项「鹈鹕骑自行车（原版）」，输入框 `textarea.value` 立刻变成 `请用 SVG 画一只骑自行车的鹈鹕`，选择面板同时收起。逻辑无需改动。
+- 样式确实是坏的，量出来三条硬证据：
+  - 表格写的是 `className="table prompt-library-table"`，但仓库里根本没有 `.table`（约定是 `.data-table`）→ 表头 padding `0px`、无分隔线。
+  - 搜索框写的是 `className="form-label"` / `className="input"`，这两个 class 在 `index.css` 里也不存在 → 输入框 padding `0px`、只剩浏览器默认边框。
+  - 编辑弹窗同样用了不存在的 `form-group` / `form-label` / `input`。
+- 题目描述是英文的根因：内置题库常量里 7 条 `prompt` 直接用英文原文写的，而且**已经按英文形态落库**（`prompt_cases.prompt`），只改源码常量不会更新已有行。
+
+#### 改了什么
+- **表格**：`table` → `data-table`，并补 `table-layout: fixed` + `td { white-space: normal }`。`.data-table td` 自带的 `white-space: nowrap` 会把长文本撑到 2372px、行高被拉到 123px，加上这两条后表格回到 1098px、行高 75px，列宽稳定、行内不再错位。
+- **搜索框**：换成仓库标准写法 `.toolbar` + `.toolbar-search`（带放大镜图标、`padding: 8px 12px 8px 36px`、聚焦高亮），和「模型」等页面完全一致。
+- **编辑弹窗**：改用页面内联样式常量（`FIELD_STYLE` / `LABEL_STYLE` / `INPUT_STYLE`，与模型转发弹窗同款：`padding 10px 14px`、`1px solid var(--color-border)`、`border-radius 8px`）。
+- **操作列**：三颗按钮从竖排改回横排（`flex-wrap: wrap`），只在窄屏（≤768px）才竖排，避免每行被按钮撑高。
+- **题面中文化**：内置题库 7 条英文 `prompt` 改成中文（骑自行车鹈鹕 / 糖果计数 / 字母 r / 10:10 时钟 / 旋转六边形弹跳球）；`9.11 vs 9.9`、`棉花与铁`、`中文指令版鹈鹕` 原本就是中文，不动。
+- **历史数据一并纠正**：新增 `refreshLegacyBuiltinPromptTexts()`，在启动流程 `ensureBuiltinPromptPresets()` 里执行——只把「描述仍一字不差等于旧英文原文」的行改成中文，**用户自己改过的描述不动**；幂等，第二次启动匹配不到旧值。首次启动日志：`translated 7 legacy builtin prompt(s) to Chinese`。
+- **清掉死代码**：`CaseTable.tsx` / `SuiteEditorModal.tsx` / `CaseEditorModal.tsx` 三个旧版组件已无任何引用（全仓 grep 确认），删除；`index.css` 里对应的 `.prompt-library-suite-*` / `-tags` / `-status*` / `-mono` / `-switch` / `-hint` / `-case-list` / `-case-meta` / `-toolbar*` / `-answer` 一并移除，`-preset-*`、`-chip`、`-btn-sm`、`-muted` 仍在用，保留。
+
+#### 测试与实测
+- 新增服务用例「会把历史遗留的英文题目描述纠正成中文，但不动用户改过的描述」：导入鹈鹕题库 → 把一条改回旧英文、把另一条改成自定义中文 → 跑 `ensureBuiltinPromptPresets()` → 第一条变中文、第二条保持自定义、再跑一次 `translated === 0`（幂等）。
+- 相关套件 52 例通过：`promptLibrary.architecture.test.ts`、`promptLibraryService.test.ts`、`promptLibrary.test.ts`（路由）、`modelMonitor.chat.test.ts`、`listFilters.architecture.test.ts`、`modelForwarding.architecture.test.ts`、`tokenRouter.cache.test.ts`；三道 `tsc` 通过（server / web / web.test）。
+- 真实浏览器复验（无头 Chromium，1400×1000）：表头 padding `10px 14px`、`border-bottom 1px`，搜索框 padding `8px 12px 8px 36px`、圆角 `8px`，弹窗输入框 padding `10px 14px`、边框 `solid 1px`；表头文案为「题目名称 / 题目描述 / 答案 / 操作」；全库 10 条题目描述均为中文；点「快捷提示词」第 1 项后 `textarea.value` 等于该题描述。
+- **主要文件**：`src/web/pages/PromptLibrary.tsx`、`src/web/pages/prompt-library/SimpleCaseEditorModal.tsx`、`src/server/services/promptLibraryService.ts`、`src/server/index.ts`、`src/web/index.css`、`src/server/services/promptLibraryService.test.ts`
+- **状态**：已完成
+
+### 66. 模型转发：顺序按钮全部可点，改动立即作用于真实调用顺序
+
+- **类型**：缺陷修复 + 交互调整
+- **需求来源**：本会话（用户：「模型转发那感觉做的不怎么对，置顶是所有都能点，只是置顶相当于顺序最靠前，而且上移，下移也是改的默认调用的顺序，而不是只是显示用的，改完帮我测试几条，改变模型顺序后，调用的模型也跟着改变」）
+
+#### 复核结论（先量后改）
+- 先按用户描述逐项实测，结论是**排序本身已经同步到真实优先级**：`sort_order` 会写进 `route_channels.priority`，路由器按 P0→P1 分层，只在前一层停用 / 冷却 / 连续失败时才落到下一层。
+- 但实测中确实翻出两个问题：
+  1. **改动不是立即生效**：`syncModelForwardRule` 只写库，没有失效 tokenRouter 的进程内路由缓存（`routeMatchCache`，TTL 1.5s）。窗口内仍按旧优先级派发，看起来就像「只改了显示」。
+  2. **置顶在第一行被禁用**：`disabled={targetBusy || isFirst}`，用户想点却发现点不动；上移 / 下移同样按首尾位置置灰。
+
+#### 改了什么
+- **立即生效**：`syncModelForwardRule` 收尾统一调 `invalidateTokenRouterCache()`，覆盖新增 / 编辑 / 移动 / 启停 / 删除目标；`deleteModelForwardRule` 删完通道也一并失效，避免残留快照指向已删通道。
+- **按钮全部可点**：置顶 / 上移 / 下移 只在「本行操作进行中」禁用，不再因是否首行 / 末行置灰；置顶对首行是幂等操作（不报错）。三个按钮补 `data-testid`。
+- **语义写清楚**：目标徽标从「目标N」改成「顺序N」（悬停提示「调用顺序：数字越小越先被调用」），列表下方加说明「顺序即默认调用顺序：排在前面的目标优先被调用，该目标停用 / 冷却 / 连续失败时才自动落到下一个。」
+
+#### 测试与实测
+- 新增回归用例（`tokenRouter.cache.test.ts`）「模型转发调整顺序后立即改变调用目标，不等缓存 TTL」：把 TTL 调到 60s（只有显式失效才能立即生效），建一条双目标转发规则 → 选通道命中第 1 个 → 置顶第 2 个 → 再选命中第 2 个 → 下移还原 → 命中回到第 1 个 → 对首行重复置顶不报错。**故意摘掉 `invalidateTokenRouterCache()` 复跑，该用例转红**（`expected 2 to be 3`），确认它真能拦住这个回归。
+- 架构测试同步更新：断言三个按钮的 `data-testid`、不再存在 `disabled={targetBusy || isFirst/isLast}`、顺序提示文案、以及 `syncModelForwardRule` / `deleteModelForwardRule` 都带缓存失效。
+- 相关套件 86 例通过（forward 服务 / 路由 API / tokenRouter 选择与缓存 / pattern 同步 / 转发页架构），两道 `tsc` 通过。
+- **生产实测（真实调用，非单测）**：对外模型 `gpt-6-astra` 绑两个目标（glm-5.3-flash、deepseek-v4.1-flash），走 `/api/test/proxy/stream` 自动路由，逐条核对 `proxy_logs` 落到的通道：
+  | 操作 | 顺序（order/prio） | 实际调用通道 |
+  |------|------------------|--------------|
+  | 基准 | glm P0 / deepseek P1 | glm-5.3-flash（ch 1146） |
+  | 置顶 deepseek | deepseek P0 / glm P1 | deepseek-v4.1-flash（ch 1128） |
+  | 上移 glm | glm P0 / deepseek P1 | glm-5.3-flash（ch 1146） |
+  | 下移 glm | deepseek P0 / glm P1 | deepseek-v4.1-flash（ch 1128） |
+  | 首行重复置顶 | 不变 | deepseek-v4.1-flash（幂等，无报错） |
+  每一步都是 0.5~2.4s 内立即换目标，最后一次调用后已把顺序还原成「glm 在前」。
+- **主要文件**：`src/server/services/modelForwardService.ts`、`src/web/pages/ModelForwarding.tsx`、`src/server/services/tokenRouter.cache.test.ts`、`src/web/pages/modelForwarding.architecture.test.ts`
+- **状态**：已完成
+
+### 65. 英文站点名回填为站点官方中文名
+
+- **类型**：配置调整（无代码改动）
+- **需求来源**：本会话需求（“现在很多站点显示的是英文名，但是他的首页titel或者保存标签的时候是有站点的中文名的，没有的就保持原状。帮我更新目前英文站点看有没有对应的中文名吧”）
+
+#### 做法
+- 对全部 41 个站点逐个取「站点自己声明的名字」：`GET {url}/api/status` 的 `data.system_name`（new-api 系前端就是用这个渲染站点名与浏览器标题），并辅以 HTML `<title>` 兜底。
+- JS 挑战页（Any Router）、Cloudflare 拦截页（KKtoken / SeekAi）、SPA 站点（sub2api 系 / SOTA / Agent Router / X-API 等）静态抓取拿不到名字，改用无头 Chromium 真实渲染后再读 `document.title` 与页头可见文案；被墙或需要过盾的再挂系统代理跑一遍。渲染结果与静态结果一致，未发现额外中文名。
+- 只在「站点确实自称中文名」时才改，纯英文品牌名（happycoding / SeekAi / TOM&JERRY / HongShi API / SOTA Model / l0veyou / motomoto / X-API 等）保持原状；`l0veyou - 你的 AI 智能助手`、`MotoMoto · 公益 API` 这类标题里的中文只是品牌后缀/标语，不算站点名，同样保持原状。
+
+#### 更新结果
+| 站点 | 原名称 | 新名称 | 来源 |
+|------|--------|--------|------|
+| #18 | ultrarouter | 艺の公益站 | `system_name = Ultra Router - 艺の公益站` |
+| #21 | grok-heavy | GN公益站 | `system_name = GN公益站` |
+| #29 | fuka | 芙卡卡の小食堂 | `system_name = 芙卡卡の小食堂` |
+| #31 | llmpm | 南梁 API | `system_name = 南梁 API` |
+
+#### 验证
+- 4 条更新均走 `PUT /api/sites/:id`，返回 200；回查 `GET /api/sites` 与库内 `hex(name)` 确认是合法 UTF-8，无乱码残留。
+- 其余 37 个站点名称未改动。
+- **踩坑**：第一次用 `python3 -c ... "$name"` 拼 JSON 时，因 shell 环境 `LC_ALL` 失效、Python 3.6 按 ASCII + surrogateescape 解析 argv，写入的汉字变成了 CESU-8 代理对（`ED B3 A8 …`）。改为「Python 先写好 UTF-8 的 JSON 文件，再 `curl --data-binary @file`」后正常；以后往接口写中文一律走文件，不要走命令行参数。
+- **主要文件**：仅数据库登记（变更日志除外）。
+- **状态**：已完成
+
 ### 64. 登记「小鸡毛公益API站」（api.ark717.com）
 
 - **类型**：站点登记（无代码改动）

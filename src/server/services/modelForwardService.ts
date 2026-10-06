@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY, isUsableAccountToken } from './accountTokenService.js';
+import { invalidateTokenRouterCache } from './tokenRouter.js';
 
 export class ModelForwardError extends Error {
   constructor(message: string) {
@@ -296,6 +297,10 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
     if (!channel.manualOverride) continue;
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
   }
+
+  // 顺序即调用顺序：刚改完 priority / 启停用就要立即生效，
+  // 不能等路由器那份 1.5s 的进程内缓存自己过期。
+  invalidateTokenRouterCache();
 }
 
 export async function listModelForwardRules(): Promise<ModelForwardRuleRow[]> {
@@ -684,6 +689,8 @@ export async function deleteModelForwardRule(id: number): Promise<void> {
       await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).run();
     }
   }
+  // 通道被删掉了，进程内的路由快照也必须一并丢。
+  invalidateTokenRouterCache();
 }
 
 /** 站点下的账号与可用模型，供新页面下拉选择。 */
