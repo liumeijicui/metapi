@@ -6,6 +6,7 @@ import {
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
 } from '../db/index.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
@@ -272,7 +273,9 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     estimatedCost: input.estimatedCost ?? 0,
     errorMessage: input.errorMessage ?? null,
     retryCount: input.retryCount ?? 0,
-    createdAt: input.createdAt ?? null,
+    // 日志列表按 created_at 倒序分页；漏写时间戳会让这条日志排到列表最末尾，
+    // 看起来就像「没进日志」。这里统一兜底成当前 UTC 时间。
+    createdAt: input.createdAt ?? formatUtcSqlDateTime(new Date()),
   };
   const serializedBillingDetails = input.billingDetails == null
     ? null

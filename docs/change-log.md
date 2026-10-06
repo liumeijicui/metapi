@@ -29,6 +29,10 @@
   一条凭据都没有时才禁止发送，提示语改成「该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。」
 - 直连对话同样写一条使用日志（`route_id` / `channel_id` 留空，`client_app_name = 模型测试`），
   失败也记，方便在「使用日志」里看到真实原因。
+- 顺带修掉一个「日志写了但看不见」的坑：`insertProxyLog` 以前是
+  `createdAt: input.createdAt ?? null`，调用方漏传就真写 NULL；而「使用日志」是按 `created_at`
+  倒序分页的，NULL 会被排到整张表最后，表现就是「这条日志没进日志」。现在统一兜底成
+  当前 UTC 时间（与其它调用方 `formatUtcSqlDateTime(new Date())` 一致），并把库里历史 NULL 行补齐。
 - **线路行为固定为「sk 密钥 + OpenAI 协议直接打源站」**，并显式关掉回退：
   `executeEndpointFlow({ disableCrossProtocolFallback: true })`，只发候选表里第一个端点
   （openai 协议下即 `/v1/chat/completions`），失败不换协议、不换端点。实测线上抓到的报文是：
@@ -55,6 +59,9 @@
     `3145215575 · metapi`；用它发起对话，上游如实回 503 `No available channel for model
     deepseek-v4-flash under group default` —— 说明请求**真的打到站点**了，站点侧没有可用通道是
     站点自己的问题，不再是本地一句「没有可直连的通道」把用户挡在外面。
+- 修复后复测：再发一次直连对话，`/api/stats/proxy-logs?limit=5` 首条即
+  `id=145 / created_at=2026-10-06 14:05:30 / kimi-k3 / success / 模型测试 / happycoding / route_id=NULL`，
+  确认直连日志已经正常出现在「使用日志」列表顶部。
 - 界面复验（无头 Chromium）：happycoding 的 `deepseek-v4.1-flash` 卡片点「对话」，下拉显示
   「直连凭据：3145215575 · default」，状态行「直连目标站点 happycoding，用「3145215575 · default」
   的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。」

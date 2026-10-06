@@ -197,6 +197,27 @@ describe('proxyLogStore', () => {
     });
   });
 
+  it('fills created_at when the caller does not pass one', async () => {
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      accountId: 7,
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    const values = dbInsertValuesMock.mock.calls[0][0];
+    expect(values.modelRequested).toBe('gpt-5');
+    expect(values.createdAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('keeps an explicit created_at from the caller', async () => {
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      createdAt: '2026-10-06 04:00:00',
+    });
+
+    expect(dbInsertValuesMock.mock.calls[0][0].createdAt).toBe('2026-10-06 04:00:00');
+  });
+
   it('preserves null token fields instead of coercing unknown usage to zero', async () => {
     await insertProxyLog({
       modelRequested: 'gpt-5',
