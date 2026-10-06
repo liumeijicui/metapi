@@ -314,6 +314,25 @@ function proxyTestRequest(data: ProxyTestRequestEnvelope) {
   });
 }
 
+async function directChatStreamRequest(
+  data: {
+    siteId: number;
+    accountId: number;
+    tokenId?: number | null;
+    model: string;
+    messages: Array<{ role: string; content: string }>;
+  },
+  signal?: AbortSignal,
+) {
+  // 直连上游：不经网关路由，所以单独走一个接口，超时给足（对话可能很长）。
+  return fetchAuthenticatedResponse("/api/model-monitor/chat/stream", {
+    method: "POST",
+    signal,
+    body: JSON.stringify(data),
+    timeoutMs: 10 * 60_000,
+  });
+}
+
 async function proxyTestStreamRequest(
   data: ProxyTestRequestEnvelope,
   signal?: AbortSignal,
@@ -1486,7 +1505,20 @@ export const api = {
   refreshModelMonitor: () =>
     request("/api/model-monitor/refresh", { method: "POST" }),
   getModelMonitorChatChannels: (siteId: number, model: string) =>
-    request<{ success: boolean; channels: any[] }>(
+    request<{
+      success: boolean;
+      channels: any[];
+      credentials?: Array<{
+        accountId: number;
+        tokenId: number | null;
+        accountName: string;
+        tokenName: string | null;
+        label: string;
+        credential: 'account' | 'api_token';
+      }>;
+      requestedModel?: string;
+      direct?: boolean;
+    }>(
       `/api/model-monitor/chat-channels?siteId=${encodeURIComponent(String(siteId))}&model=${encodeURIComponent(model)}`,
       { timeoutMs: 30_000 },
     ),
@@ -1765,6 +1797,7 @@ export const api = {
   proxyTest: proxyTestRequest,
   testChat: (data: TestChatRequestPayload) =>
     request("/api/test/chat", { method: "POST", body: JSON.stringify(data) }),
+  directChatStream: directChatStreamRequest,
   testProxyStream: proxyTestStreamRequest,
   proxyTestStream: proxyTestStreamRequest,
   testChatStream: async (

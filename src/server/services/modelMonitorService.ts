@@ -957,6 +957,32 @@ export async function listChatChannelsForSiteModel(
   }));
 }
 
+/**
+ * 对话弹窗只做「直连」：固定到这个站点自己的通道，直接打到目标站，不参与网关选路。
+ *
+ * 注意别被 `model_forward_targets` 影响：对外模型转发是给真实流量用的，
+ * 模型监控里的对话要的是「点哪个站的哪个模型，就直连那个站」，所以这里既不给
+ * 对外模型名，也不做任何新路由 / 老路由转发。返回的通道仅用于在同一站点的
+ * 多个账号之间切换，仍然都是直连。
+ */
+export type ModelMonitorChatTarget = {
+  /** 请求体里的模型名：就是页面上点中的那个模型，用来命中该站点的直连通道。 */
+  requestedModel: string;
+  /** 可直连的通道（该站点自己的账号）；为空表示这个站点没配可直连的账号。 */
+  channels: ModelMonitorChatChannel[];
+};
+
+export async function resolveChatTargetForSiteModel(
+  siteId: number,
+  modelName: string,
+): Promise<ModelMonitorChatTarget> {
+  const model = String(modelName || '').trim();
+  if (!Number.isFinite(siteId) || siteId <= 0 || !model) {
+    return { requestedModel: model, channels: [] };
+  }
+  return { requestedModel: model, channels: await listChatChannelsForSiteModel(siteId, model) };
+}
+
 export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}): Promise<ModelMonitorOverview> {
   // 站点的模型清单要「跟着站点/成功率筛，但不跟着模型名筛」：选中某个模型后
   // 如果清单只剩它自己，下拉里就没法换别的模型了。

@@ -34,6 +34,16 @@ type ChatMessage = {
   error?: boolean;
 };
 
+/** 一条可按直连的凭据：站点账号自己的 JWT，或账号下的 sk- 令牌。 */
+type DirectCredentialOption = {
+  accountId: number;
+  tokenId: number | null;
+  label: string;
+  accountName: string;
+  tokenName: string | null;
+  credential: 'account' | 'api_token';
+};
+
 type PromptCaseOption = {
   id: number;
   title: string;
@@ -54,6 +64,11 @@ const parseSseBlock = (block: string): { event: string; data: string | null } =>
   }
   return { event, data: dataLines.length > 0 ? dataLines.join('\n') : null };
 };
+
+/** 凭据在下拉里的唯一键：账号 ID + 令牌 ID。 */
+export function buildCredentialKey(credential: { accountId: number; tokenId: number | null }): string {
+  return `${credential.accountId}:${credential.tokenId ?? 0}`;
+}
 
 /** 从一帧 SSE JSON 里取增量文本。这里只处理 OpenAI 风格的 chunk。 */
 function readOpenAiDelta(payload: any): { content?: string; reasoning?: string; done?: boolean } {
@@ -107,8 +122,10 @@ export default function ModelChatModal({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [channels, setChannels] = useState<ModelChatChannelOption[]>([]);
-  const [forcedChannelId, setForcedChannelId] = useState<number | null>(null);
+  // 直连凭据：站点自己的账号 / sk- 令牌。选一条就直接打目标站，
+  // 完全不走网关的新路由 / 老路由，所以和「有没有配路由」无关。
+  const [credentials, setCredentials] = useState<DirectCredentialOption[]>([]);
+  const [credentialKey, setCredentialKey] = useState('');
   const [promptCases, setPromptCases] = useState<PromptCaseOption[]>([]);
   const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [promptQuery, setPromptQuery] = useState('');
@@ -129,21 +146,33 @@ export default function ModelChatModal({
     abortRef.current = null;
   }, [open, modelName, target?.siteId]);
 
-  // 打开时拉这个站点下可固定的通道：默认固定到当前站点，失败才落回自动路由。
+  // 打开时拉这个站点可用于直连的凭据，默认选第一条。
   useEffect(() => {
     if (!open || !target) return;
     let cancelled = false;
-    setChannels([]);
-    setForcedChannelId(null);
+    setCredentials([]);
+    setCredentialKey('');
     void api.getModelMonitorChatChannels(target.siteId, target.modelName)
       .then((res) => {
         if (cancelled) return;
-        const list: ModelChatChannelOption[] = Array.isArray(res?.channels) ? res.channels : [];
-        setChannels(list);
-        setForcedChannelId(list.length ? list[0].channelId : null);
+        const list: DirectCredentialOption[] = (Array.isArray(res?.credentials) ? res.credentials : [])
+          .map((item: any): DirectCredentialOption => ({
+            accountId: Number(item?.accountId),
+            tokenId: item?.tokenId == null ? null : Number(item.tokenId),
+            label: String(item?.label || ''),
+            accountName: String(item?.accountName || ''),
+            tokenName: item?.tokenName == null ? null : String(item.tokenName),
+            credential: item?.credential === 'api_token' ? 'api_token' : 'account',
+          }))
+          .filter((item: DirectCredentialOption) => Number.isFinite(item.accountId) && item.accountId > 0) as DirectCredentialOption[];
+        setCredentials(list);
+        setCredentialKey(list.length ? buildCredentialKey(list[0]) : '');
       })
       .catch(() => {
-        if (!cancelled) setChannels([]);
+        if (!cancelled) {
+          setCredentials([]);
+          setCredentialKey('');
+        }
       });
     return () => { cancelled = true; };
   }, [open, target?.siteId, target?.modelName, target]);
@@ -183,6 +212,11 @@ export default function ModelChatModal({
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || sending || !target) return;
+    const credential = credentials.find((item) => buildCredentialKey(item) === credentialKey);
+    if (!credential) {
+      toast.error(tr('该站点没有可用于直连的账号或密钥，无法发起对话'));
+      return;
+    }
 
     const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: text }];
     setMessages([...nextMessages, { role: 'assistant', content: '' }]);
@@ -207,21 +241,15 @@ export default function ModelChatModal({
     };
 
     try {
-      // forcedChannelId 只走信封层（后端据此注入固定通道头），不要塞进请求体。
-      const body: Record<string, unknown> = {
-        model: target.modelName,
-        messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
-        stream: true,
-      };
-
-      const response = await api.proxyTestStream(
+      // 直连接口：站点 + 账号 + 凭据直接打上游，和路由配置无关；
+      // 模型名就是页面上点中的那个，不做任何改写。
+      const response = await api.directChatStream(
         {
-          method: 'POST',
-          path: '/v1/chat/completions',
-          requestKind: 'json',
-          stream: true,
-          forcedChannelId: forcedChannelId,
-          jsonBody: body,
+          siteId: target.siteId,
+          accountId: credential.accountId,
+          tokenId: credential.tokenId,
+          model: target.modelName,
+          messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
         },
         controller.signal,
       );
@@ -271,7 +299,7 @@ export default function ModelChatModal({
       abortRef.current = null;
       setSending(false);
     }
-  }, [input, sending, target, messages, forcedChannelId, toast]);
+  }, [input, sending, target, messages, credentials, credentialKey, toast]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -285,7 +313,7 @@ export default function ModelChatModal({
     setPromptQuery('');
   }, []);
 
-  const activeChannel = channels.find((item) => item.channelId === forcedChannelId) || null;
+  const activeCredential = credentials.find((item) => buildCredentialKey(item) === credentialKey) || null;
 
   return (
     <CenteredModal
@@ -297,7 +325,7 @@ export default function ModelChatModal({
       footer={(
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, width: '100%' }}>
           <span style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
-            {tr('测试流量，日志里标记为「模型测试」')}
+            {tr('直连目标站点；日志里标记为「模型测试」')}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             {sending ? (
@@ -321,27 +349,31 @@ export default function ModelChatModal({
             <strong>{target?.modelName || ''}</strong>
             <span className="model-chat-target-site">{target?.siteName || ''}</span>
           </div>
-          {channels.length ? (
+          {credentials.length ? (
             <label className="model-chat-route">
-              <span>{tr('路由')}</span>
+              <span>{tr('直连凭据')}</span>
               <select
-                value={forcedChannelId === null ? '__auto__' : String(forcedChannelId)}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setForcedChannelId(value === '__auto__' ? null : Number.parseInt(value, 10));
-                }}
+                value={credentialKey}
+                onChange={(event) => setCredentialKey(event.target.value)}
                 disabled={sending}
               >
-                <option value="__auto__">{tr('自动路由')}</option>
-                {channels.map((item) => (
-                  <option key={item.channelId} value={item.channelId}>
-                    {item.routeName}{item.accountName ? ` · ${item.accountName}` : ''}
+                {credentials.map((item) => (
+                  <option key={buildCredentialKey(item)} value={buildCredentialKey(item)}>
+                    {item.label}{item.credential === 'api_token' ? '' : '（账号）'}
                   </option>
                 ))}
               </select>
             </label>
           ) : (
-            <span className="model-chat-route-hint">{tr('该站点没有可固定的通道，走自动路由')}</span>
+            <span className="model-chat-route-hint">{tr('该站点没有可用于直连的账号或密钥')}</span>
+          )}
+        </div>
+
+        <div className="model-chat-route-note">
+          {activeCredential ? (
+            <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}</>
+          ) : (
+            <>{tr('该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。')}</>
           )}
         </div>
 
@@ -349,10 +381,9 @@ export default function ModelChatModal({
           {messages.length === 0 ? (
             <div className="model-chat-empty">
               {tr('发一条消息试试这个模型；也可以从下方快捷选一条测试提示词。')}
-              {activeChannel ? (
+              {activeCredential ? (
                 <div className="model-chat-empty-hint">
-                  {tr('当前固定到')} {activeChannel.routeName}
-                  {activeChannel.sourceModel ? ` → ${activeChannel.sourceModel}` : ''}
+                  {tr('直连')} {target?.siteName || ''} · {activeCredential.label}
                 </div>
               ) : null}
             </div>
@@ -434,7 +465,7 @@ export default function ModelChatModal({
               type="button"
               className="btn btn-primary"
               onClick={() => void send()}
-              disabled={sending || !input.trim()}
+              disabled={sending || !input.trim() || !activeCredential}
             >
               {sending ? tr('生成中…') : tr('发送')}
             </button>

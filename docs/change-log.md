@@ -1,3 +1,69 @@
+### 68. 模型监控的「对话」改为按站点凭据直连：有账号或 sk 就能聊
+
+- **类型**：缺陷修复
+- **需求来源**：本会话（用户：「为啥还会出现这个提醒啊：该站点没有可直连的通道 有源站点和源站点的sk不就能直接调用吗？」）
+
+#### 复核结论（先量后改）
+- 提示不是空穴来风，但也确实是实现选错了凭据来源。原实现要求对话必须固定到一条 `route_channels`，
+  而 `route_channels` 是**模型路由**配置的产物：站点有账号、有 sk，但没给这个模型配路由
+  （比如 `lzhiyuu` / `LLM AI` / `Lucky` / `Kimi` 这类只有模型清单的站点），列表就是空的，
+  于是弹「该站点没有可直连的通道」。
+- 关键点：直连本来应该只依赖「站点 + 账号 + 凭据」，跟路由配置毫无关系。用路由通道来代表
+  「可直连」是错的。
+- 过程中还踩到一个真 bug：给 `executeEndpointFlow` 传 `proxyUrl` 会让请求打到
+  `http://127.0.0.1:7890/v1/chat/completions`（把代理地址当成了 API base），上游回 400。
+
+#### 改了什么
+- **新增 `siteDirectChatService`**：直接按「站点 + 账号 + 凭据」发起对话，完全不查路由。
+  - `listSiteDirectChatTargets(siteId)`：列出该站点可用凭据 —— 账号下就绪的 sk- 令牌优先，
+    没有令牌的账号退回账号凭据（非 oauth 账号用 `api_token`，oauth 账号用 `access_token`）。
+  - `resolveSiteDirectChat()`：校验站点 / 账号 / 令牌归属，给出可展示的失败原因；只返回令牌 ID，
+    绝不把密钥明文带出接口。
+  - `requestSiteDirectChat()`：复用现有的端点推导与请求构造（`resolveUpstreamEndpointCandidates`
+    + `buildUpstreamEndpointRequest`，所以 Claude / Gemini / codex 等非 openai 平台同样适配），
+    只发一次请求，失败就把上游原因原样返回，不做跨协议降级重试。
+  - 站点代理只在 `dispatchRequest` 里通过 `withSiteRecordProxyRequestInit` 生效，不再误传 `proxyUrl`。
+- **新增 `POST /api/model-monitor/chat/stream`**：直连对话，请求体里的 `model` 就是页面点中的那个，
+  不做任何模型名改写；`/chat-channels` 额外返回 `credentials`（accountId / tokenId / label / 类型）。
+- **弹窗**：下拉从「直连通道」改成「直连凭据」（例如 `3145215575 · default`），默认选第一条；
+  一条凭据都没有时才禁止发送，提示语改成「该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。」
+- 直连对话同样写一条使用日志（`route_id` / `channel_id` 留空，`client_app_name = 模型测试`），
+  失败也记，方便在「使用日志」里看到真实原因。
+- **线路行为固定为「sk 密钥 + OpenAI 协议直接打源站」**，并显式关掉回退：
+  `executeEndpointFlow({ disableCrossProtocolFallback: true })`，只发候选表里第一个端点
+  （openai 协议下即 `/v1/chat/completions`），失败不换协议、不换端点。实测线上抓到的报文是：
+  - `site.url = https://happycoding.xyz`（platform `new-api`）
+  - 凭据 = 账号下的 sk- 令牌（`valueStatus = ready`），请求头 `Authorization: Bearer sk-...`
+  - 最终 URL = `https://happycoding.xyz/v1/chat/completions`
+  - `body.model` = 页面点中的模型名（`kimi-k3`），无改写
+  - 该请求不命中任何 `route_channels`，日志 `route_id / channel_id` 均为 `NULL`
+
+#### 测试与实测
+- 新增 `siteDirectChatService.test.ts` 4 例：完全无路由也能直连、无 sk 时退回账号凭据、
+  令牌未就绪时不当作可用凭据也不带出明文、跨站点取账号被拒。
+- 路由用例新增「对话只依赖站点自己的凭据，没有路由也能直连」：不建任何 `token_routes` /
+  `route_channels`，`chat-channels` 仍返回 `credentials`，且响应里不出现密钥明文。
+- 前端架构测试改成正向断言：走 `api.directChatStream()`、带 `accountId / tokenId`、
+  不再出现 `api.proxyTestStream(` / `forcedChannelId` / `__auto__`。
+- 相关套件 61 例通过（直连服务 / modelMonitor 路由与服务 / 对话弹窗架构 / api / proxy 测试），
+  三道 `tsc` 通过。
+- **生产实测（真实调用）**：
+  - happycoding 的 `kimi-k3`：`POST /api/model-monitor/chat/stream` 返回 200 并流出
+    `moonshotai/kimi-k3` 的 SSE 内容，日志 `route_id=NULL / channel_id=NULL / account_id=7 /
+    model_requested=kimi-k3 / status=success / client_app_name=模型测试`。
+  - 南梁 API（`route_channels = 0`，之前必然弹「没有可直连的通道」）：现在返回可用凭据
+    `3145215575 · metapi`；用它发起对话，上游如实回 503 `No available channel for model
+    deepseek-v4-flash under group default` —— 说明请求**真的打到站点**了，站点侧没有可用通道是
+    站点自己的问题，不再是本地一句「没有可直连的通道」把用户挡在外面。
+- 界面复验（无头 Chromium）：happycoding 的 `deepseek-v4.1-flash` 卡片点「对话」，下拉显示
+  「直连凭据：3145215575 · default」，状态行「直连目标站点 happycoding，用「3145215575 · default」
+  的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。」
+- **主要文件**：`src/server/services/siteDirectChatService.ts`（新增）、
+  `src/server/services/siteDirectChatService.test.ts`（新增）、`src/server/routes/api/modelMonitor.ts`、
+  `src/web/api.ts`、`src/web/components/ModelChatModal.tsx`、`src/server/routes/api/modelMonitor.test.ts`、
+  `src/web/pages/modelMonitor.chat.test.ts`
+- **状态**：已完成
+
 ### 67. 提示词管理：样式归位、题面中文化、快捷提示词回填输入框
 
 - **类型**：缺陷修复 + 文案调整
