@@ -1,3 +1,25 @@
+### 64. 登记「小鸡毛公益API站」（api.ark717.com）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“帮我登记这个网站：https://api.ark717.com/security 用户名密码：3145215575/liyaodong7238508 登录秘钥：jDnn351BCYN9Ygj1aosulXxIHN7FXA== 有签到”）
+- **站点事实（实测）**：
+  - `https://api.ark717.com`，`system_name = 小鸡毛的公益API站`，`version = v1.0.0-rc.34-ark717.20260907.1`（New API 定制分支，`/security` 只是站内安全设置页，不是盾）；`checkin_enabled = true`、`turnstile_check = false`、`linuxdo_oauth = true`（`linuxdo_minimum_trust_level = 0`）、`github_oauth = true`。
+  - **直连可用**（无 Cloudflare 盾），未开系统代理、未写 customHeaders。
+  - 签到奖励 `min_quota 500000 ~ max_quota 1000000`（约 $1~$2/天），`grant_duration_days = 0`（不设过期）；账号已完成 55 次签到、今日已签（+997155 ≈ $1.99）。
+  - 分组：`default`（倍率 1、限速 15RPM）与 `【GPT】降智号池`（倍率 0.05）两个。
+  - 站上已有一个现成密钥 `li`（id 191、unlimited、default 分组），metapi 直接接管复用，**未新建**（上游 token 总数仍是 1）。
+- **登记结果（本机）**：
+  - 站点 **`#57 小鸡毛公益API站`**（`new-api`，未开系统代理）。
+  - 账号 **`#43`**（用户名 `3145215575`、`display_name 柳眉积翠`、`platformUserId 76`、`linux_do_id 367936` 与本机 Linux.do 账号一致、`credentialMode: session`、`status=active`、**`checkinEnabled: true`**、密码已加密存为 `autoRelogin`）。
+  - 走 `/api/accounts/login` 登记时自动做了会话清理（`sessionHygiene: {outcome: pruned, removed: 1, kept: 1}`），登录后轮转出的 `new_api_refresh=…` 会话已回写。
+  - 令牌 **`account_tokens #103`**（`default` 分组、`ready`、默认令牌，源自上游同步）；模型 **32 个**全部探测可用，对应建出 32 条路由通道。
+- **验证**：
+  - 余额同步：`balance $85.30 / used $684.01 / quota $769.30`，与站点 `/api/user/self` 一致；`POST /api/accounts/43/balance` 二次刷新仍正常。
+  - 签到：`POST /api/checkin/trigger/43` → `{"success":true,"message":"今日已签到"}`（站点侧今日已签，不会重复发放），`checkin_logs #3931` 落库。
+  - 真实调用：用同步到的上游密钥 `POST /v1/chat/completions`（`gemini-3.1-flash`）返回 200，内容「正常」（`deepseek-v4.1-flash` 首包较慢，90s 超时，属上游调度慢，非登记问题）。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 63. 提示词管理简化为三字段 + 站点/密钥列表补齐字段筛选
 
 - **类型**：功能调整
