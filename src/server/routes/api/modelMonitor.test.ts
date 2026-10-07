@@ -294,6 +294,89 @@ describe('model monitor routes', () => {
     expect(response.json().error.message).toContain('No available channel');
   });
 
+  /** 直连对话写进 proxy_logs 的那一行（按 client_app_name 认，避免误伤网关日志）。 */
+  async function latestDirectChatLog() {
+    const rows = await db.select().from(schema.proxyLogs).all();
+    return rows
+      .filter((row) => row.clientAppName === '模型测试')
+      .sort((a, b) => (a.id ?? 0) - (b.id ?? 0))
+      .at(-1);
+  }
+
+  it('成功对话的日志带上首字耗时', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'first-byte',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+
+    const sse = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+    requestSiteDirectChatMock.mockReset();
+    requestSiteDirectChatMock.mockResolvedValue({
+      ok: true,
+      response: new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+      latencyMs: 1234,
+      firstByteLatencyMs: 420,
+      touch: () => {},
+      timeoutReason: () => null,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/chat/stream',
+      payload: {
+        siteId: site.id,
+        accountId: account.id,
+        model: 'glm-4.5-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const log = await latestDirectChatLog();
+    expect(log).toMatchObject({
+      accountId: account.id,
+      modelRequested: 'glm-4.5-flash',
+      status: 'success',
+      isStream: true,
+      firstByteLatencyMs: 420,
+    });
+  });
+
+  it('上游失败（还没出字）时首字留空，不拿总耗时冒充', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'no-first-byte',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+
+    requestSiteDirectChatMock.mockReset();
+    requestSiteDirectChatMock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      message: 'No available channel',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/chat/stream',
+      payload: {
+        siteId: site.id,
+        accountId: account.id,
+        model: 'glm-4.5-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+    expect(response.statusCode).toBe(503);
+
+    const log = await latestDirectChatLog();
+    expect(log).toMatchObject({ status: 'failed', firstByteLatencyMs: null });
+  });
+
   it('queues a collection run when refresh is requested', async () => {
     const response = await app.inject({ method: 'POST', url: '/api/model-monitor/refresh' });
     expect(response.statusCode).toBe(200);

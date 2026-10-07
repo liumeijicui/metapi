@@ -25,6 +25,7 @@ const withExplicitProxyRequestInitMock = vi.fn(
 );
 
 vi.mock('./siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withExplicitProxyRequestInit: (...args: unknown[]) => withExplicitProxyRequestInitMock(...args),
 }));
 

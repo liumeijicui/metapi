@@ -19,6 +19,7 @@ vi.mock('undici', () => ({
 }));
 
 vi.mock('../../services/siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withSiteProxyRequestInit: (...args: unknown[]) => withSiteProxyRequestInitMock(...args),
 }));
 

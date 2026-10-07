@@ -7,7 +7,10 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
-import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import {
+  withSiteRecordProxyRequestInit,
+  UNLIMITED_BODY_TIMEOUT,
+} from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
@@ -87,7 +90,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
               },
               body: JSON.stringify(forwardBody),
               signal,
-            }, getProxyUrlFromExtraConfig(selected.account.extraConfig))),
+            }, getProxyUrlFromExtraConfig(selected.account.extraConfig), UNLIMITED_BODY_TIMEOUT)),
             {
               firstByteTimeoutMs,
               startedAtMs: attemptStartedAtMs,
@@ -291,7 +294,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
               body: cloneFormDataWithOverrides(multipartForm, {
                 model: upstreamModel,
               }) as any,
-            }, getProxyUrlFromExtraConfig(selected.account.extraConfig))
+            }, getProxyUrlFromExtraConfig(selected.account.extraConfig), UNLIMITED_BODY_TIMEOUT)
             : withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
               headers: {
@@ -302,7 +305,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
                 ...(jsonBody || {}),
                 model: upstreamModel,
               }),
-            }, getProxyUrlFromExtraConfig(selected.account.extraConfig));
+            }, getProxyUrlFromExtraConfig(selected.account.extraConfig), UNLIMITED_BODY_TIMEOUT);
           const response = await fetchWithObservedFirstByte(
             async (signal) => fetch(targetUrl, {
               ...requestInit,

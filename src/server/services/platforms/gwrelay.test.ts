@@ -18,6 +18,7 @@ const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 
 vi.mock('undici', () => ({ fetch: fetchMock }));
 vi.mock('../siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withSiteProxyRequestInit: async (_url: string, options: unknown) => options,
 }));
 

@@ -58,6 +58,7 @@ vi.mock('./downstreamPolicy.js', () => ({
   recordDownstreamCostUsage: vi.fn(),
 }));
 vi.mock('../../services/siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   resolveChannelProxyUrl: () => undefined,
   withSiteRecordProxyRequestInit: (_site: unknown, init: RequestInit) => init,
 }));

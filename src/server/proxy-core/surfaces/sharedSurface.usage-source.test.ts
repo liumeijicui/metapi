@@ -9,6 +9,7 @@ vi.mock('../../services/localTimeService.js', () => ({
 }));
 
 vi.mock('../../services/siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   resolveChannelProxyUrl: vi.fn(),
   withSiteRecordProxyRequestInit: vi.fn(),
 }));

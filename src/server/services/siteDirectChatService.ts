@@ -4,13 +4,14 @@ import { db, schema } from '../db/index.js';
 import { isReadyAccountToken } from './accountTokenService.js';
 import { buildOauthProviderHeaders } from './oauth/service.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit, UNLIMITED_BODY_TIMEOUT } from './siteProxy.js';
 import {
   buildUpstreamEndpointRequest,
   resolveUpstreamEndpointCandidates,
   type UpstreamEndpoint,
 } from './upstreamEndpointRuntime.js';
 import { executeEndpointFlow } from '../proxy-core/orchestration/endpointFlow.js';
+import { getObservedResponseMeta } from '../proxy-core/firstByteTimeout.js';
 
 /**
  * 模型监控的「对话」：用站点自己的账号 / 密钥直连上游，完全不经过网关路由。
@@ -118,6 +119,31 @@ function resolveAccountCredential(account: AccountRow): string {
   return value;
 }
 
+/**
+ * 把若干 AbortSignal 合成一个：任意一条触发，合成的这条就触发。
+ *
+ * 这一次直连同时受两条超时约束 —— 业务层的空闲 / 总时长预算（下面的
+ * armIdleTimer / totalTimer），以及 executeEndpointFlow 的首字预算。之前只接了
+ * 业务那一条，于是首字超时（本意是「这么久没有任何响应头 / 数据就判失败」）触发时
+ * 只是让 Promise.race 提前返回了一个 408，底层 fetch 还挂在 socket 上继续等，直到
+ * 上游自己收尾。两条都接进来，谁先到都能真正掐断连接。
+ */
+function mergeAbortSignals(signals: Array<AbortSignal | null | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => !!signal);
+  if (!active.length) return undefined;
+  if (active.length === 1) return active[0];
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(active);
+  const controller = new AbortController();
+  for (const signal of active) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+}
+
 export type SiteDirectChatInput = {
   siteId: number;
   accountId: number;
@@ -193,6 +219,14 @@ export type SiteDirectChatOutcome =
     ok: true;
     response: Awaited<ReturnType<typeof globalThis.fetch>>;
     latencyMs: number;
+    /**
+     * 上游第一个响应体的到达耗时（毫秒），拿不到时为 null。
+     *
+     * 这就是日志里要记的「首字」：由 `fetchWithObservedFirstByte` 在读到第一块
+     * 数据时打点，和网关路由记的是同一套口径（见 chatSurface 里的同名取值）。
+     * 响应对象上没带观测信息时（测试桩、非流式空 body 等）退回 null，不编造数字。
+     */
+    firstByteLatencyMs: number | null;
     /** 每读到一块流数据就调用一次，用来把「空闲计时」往后推。 */
     touch: () => void;
     /** 我方主动掐断时（空闲 / 总时长超限）的真实原因；没掐断时返回 null。 */
@@ -242,15 +276,22 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
     stream,
   };
 
-  const totalMs = Math.max(1, input.timeoutMs);
-  const idleMs = Math.max(1, Math.min(input.idleTimeoutMs ?? totalMs, totalMs));
+  // 0 = 不限制。放开之后真正能中断这轮对话的只剩「用户点停止 / 关掉页面」。
+  const totalMs = Math.max(0, Math.trunc(input.timeoutMs));
+  const idleMs = input.idleTimeoutMs == null
+    ? totalMs
+    : Math.max(0, Math.trunc(input.idleTimeoutMs));
+  // 两个都给了具体上限时，空闲预算不超过总预算（保持原本的收紧关系）。
+  const idleBudgetMs = totalMs > 0 && idleMs > 0 ? Math.min(idleMs, totalMs) : idleMs;
   const abortController = new AbortController();
   const onAbort = () => abortController.abort(new Error('direct chat aborted'));
   input.signal?.addEventListener('abort', onAbort, { once: true });
 
-  // 流式对话：只要上游还在吐字就不算超时（推理模型首字可能等 1-2 分钟），
-  // 但两条硬线仍在 —— 空闲太久（卡死）和总时长超上限（挂死不动）。
-  let timeoutMessage = `直连对话超过 ${Math.round(totalMs / 1000)} 秒上限`;
+  // 流式对话默认不设时间上限：只要上游还在吐字就一直等（推理模型首字可能等十几分钟）。
+  // 两个预算都为 0 时不会挂任何定时器；配成正数则恢复「空闲 / 总时长」两条硬线。
+  let timeoutMessage = totalMs > 0
+    ? `直连对话超过 ${Math.round(totalMs / 1000)} 秒上限`
+    : '直连对话已被中断';
   let abortedByUs = false;
   const timeoutReason = () => (abortedByUs ? timeoutMessage : null);
   const abortWithReason = (reason: string) => {
@@ -261,15 +302,18 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const armIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
+    if (idleBudgetMs <= 0) return;
     idleTimer = setTimeout(() => {
-      abortWithReason(`上游 ${Math.round(idleMs / 1000)} 秒没有返回任何新数据（空闲超时）`);
-    }, idleMs);
+      abortWithReason(`上游 ${Math.round(idleBudgetMs / 1000)} 秒没有返回任何新数据（空闲超时）`);
+    }, idleBudgetMs);
     idleTimer.unref?.();
   };
-  const totalTimer = setTimeout(() => {
-    abortWithReason(`对话总时长超过 ${Math.round(totalMs / 1000)} 秒上限`);
-  }, totalMs);
-  totalTimer.unref?.();
+  const totalTimer = totalMs > 0
+    ? setTimeout(() => {
+      abortWithReason(`对话总时长超过 ${Math.round(totalMs / 1000)} 秒上限`);
+    }, totalMs)
+    : null;
+  totalTimer?.unref?.();
   armIdleTimer();
 
   const startedAt = Date.now();
@@ -323,22 +367,28 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
       // 不能把代理地址当 proxyUrl 传给 executeEndpointFlow —— 那会把代理当成 API base。
       endpointCandidates,
       buildRequest,
-      dispatchRequest: async (request, targetUrl) => {
+      dispatchRequest: async (request, targetUrl, signal) => {
         // 直连：一次请求定胜负，失败就把上游原因原样带回去，不做跨协议降级重试。
-        const init = await withSiteRecordProxyRequestInit(
+        //
+        // 必须带 UNLIMITED_BODY_TIMEOUT：undici 默认 bodyTimeout 是 300s（响应体数据
+        // 之间的最大间隔），推理模型憋 5 分钟以上不吐字时会被底层直接掐断，报错是一句
+        // 看不出所以然的 terminated。关掉它之后，超时判定回到上面的空闲 / 总时长预算。
+        const init = withSiteRecordProxyRequestInit(
           site,
           {
             method: 'POST',
             headers: request.headers,
             body: JSON.stringify(request.body),
-            signal: abortController.signal,
+            signal: mergeAbortSignals([abortController.signal, signal]),
           },
           channelProxyUrl,
+          UNLIMITED_BODY_TIMEOUT,
         );
         return fetch(targetUrl, init as never) as never;
       },
       // 首字预算同样按「空闲」算：这段时间内没有任何响应头/数据就判失败。
-      firstByteTimeoutMs: idleMs,
+      // 0 = 不设首字预算（fetchWithObservedFirstByte 对 0 就是「不挂定时器」）。
+      firstByteTimeoutMs: idleBudgetMs,
     });
 
     if (!result.ok) {
@@ -352,6 +402,7 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
       ok: true,
       response: result.upstream as never,
       latencyMs: Date.now() - startedAt,
+      firstByteLatencyMs: getObservedResponseMeta(result.upstream as never)?.firstByteLatencyMs ?? null,
       touch: armIdleTimer,
       timeoutReason,
     };
@@ -371,6 +422,6 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
   } finally {
     input.signal?.removeEventListener('abort', onAbort);
     if (idleTimer) clearTimeout(idleTimer);
-    clearTimeout(totalTimer);
+    if (totalTimer) clearTimeout(totalTimer);
   }
 }

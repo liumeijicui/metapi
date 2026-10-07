@@ -21,6 +21,7 @@ vi.mock('./runtimeDispatch.js', () => ({
 }));
 
 vi.mock('./siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   resolveChannelProxyUrl: (...args: unknown[]) => resolveChannelProxyUrlMock(...args),
   withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
 }));

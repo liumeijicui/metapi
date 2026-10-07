@@ -221,22 +221,69 @@ async function getCachedSiteProxyRows(nowMs = Date.now()): Promise<SiteProxyRow[
   return siteProxyCache.rows;
 }
 
-function getDispatcherByProxyUrl(proxyUrl: string, skipCache = false): Dispatcher | undefined {
+/**
+ * 代理 dispatcher 的调优开关。
+ *
+ * `bodyTimeout` 是 undici 对「响应体数据之间的最大间隔」的硬超时，默认 300s：上游
+ * 只要 5 分钟没有吐出**任何新字节**，连接就被直接掐断，抛出来的还是一句看不出所以然
+ * 的 `terminated`（cause 是 UND_ERR_BODY_TIMEOUT，实测 300.8s 准时断）。AI 回答正好
+ * 是这种形态 —— 推理模型憋好几分钟才吐第一个字属于常态，于是「复杂问题」必然卡在
+ * 300 秒整断流，而业务层写的空闲 / 总时长预算都比 300s 宽，根本没机会生效。
+ *
+ * 所以 AI 生成的那条路传 `{ bodyTimeout: 0 }`（不限制），把超时判定完全交给业务层；
+ * 控制面请求（余额、定价、签到、模型列表…）**不要**传 —— 那些调用没有自己的超时，
+ * 去掉 undici 这层兜底会变成挂死。
+ */
+export type SiteProxyDispatchTuning = {
+  /** 响应体数据之间的最大间隔（毫秒）。0 = 不限制。不传则沿用 undici 默认 300s。 */
+  bodyTimeout?: number;
+};
+
+/** 放开 undici bodyTimeout 硬线：给 AI 生成（模型对话、转发的长回答）用。 */
+export const UNLIMITED_BODY_TIMEOUT: SiteProxyDispatchTuning = { bodyTimeout: 0 };
+
+function resolveBodyTimeout(tuning?: SiteProxyDispatchTuning): number | undefined {
+  const value = tuning?.bodyTimeout;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.trunc(value));
+}
+
+/** 不带代理时按 bodyTimeout 复用的 agent：默认沿用全局 dispatcher，不在这里建。 */
+const directDispatcherCache = new Map<number, Dispatcher>();
+
+function getDirectDispatcher(bodyTimeout: number): Dispatcher {
+  const cached = directDispatcherCache.get(bodyTimeout);
+  if (cached) return cached;
+  const dispatcher = new UndiciAgent({ bodyTimeout });
+  directDispatcherCache.set(bodyTimeout, dispatcher);
+  return dispatcher;
+}
+
+function getDispatcherByProxyUrl(
+  proxyUrl: string,
+  skipCache = false,
+  bodyTimeout?: number,
+): Dispatcher | undefined {
   const normalized = normalizeSiteProxyUrl(proxyUrl);
   if (!normalized) return undefined;
 
+  // 同一个代理地址在「默认」与「不限制」两种调优下要各留一份连接池。
+  const cacheKey = `${normalized}|${bodyTimeout ?? 'default'}`;
   if (!skipCache) {
-    const cached = dispatcherCache.get(normalized);
+    const cached = dispatcherCache.get(cacheKey);
     if (cached) return cached;
   }
 
   try {
     const parsedProxyUrl = new URL(normalized);
+    const agentOptions = bodyTimeout === undefined ? undefined : { bodyTimeout };
     const dispatcher = SOCKS_PROXY_PROTOCOLS.has(parsedProxyUrl.protocol.toLowerCase())
-      ? createSocksDispatcher(parsedProxyUrl)
-      : new ProxyAgent(normalized);
+      ? createSocksDispatcher(parsedProxyUrl, agentOptions)
+      : agentOptions
+        ? new ProxyAgent({ uri: normalized, ...agentOptions })
+        : new ProxyAgent(normalized);
     if (!skipCache) {
-      dispatcherCache.set(normalized, dispatcher);
+      dispatcherCache.set(cacheKey, dispatcher);
     }
     return dispatcher;
   } catch {
@@ -356,9 +403,10 @@ async function createSocksSocket(
   });
 }
 
-function createSocksDispatcher(proxyUrl: URL): Dispatcher {
+function createSocksDispatcher(proxyUrl: URL, agentOptions?: { bodyTimeout?: number }): Dispatcher {
   const socksProxy = parseSocksProxyUrl(proxyUrl);
   return new UndiciAgent({
+    ...(agentOptions || {}),
     connect: (connectOptions, callback) => {
       void createSocksSocket(connectOptions, socksProxy)
         .then((socket) => callback(null, socket))
@@ -483,6 +531,7 @@ export async function resolveSiteProxyUrlByRequestUrl(requestUrl: string): Promi
 export async function withSiteProxyRequestInit(
   requestUrl: string,
   options?: UndiciRequestInit,
+  tuning?: SiteProxyDispatchTuning,
 ): Promise<UndiciRequestInit> {
   const resolved = await resolveSiteRequestConfigByRequestUrl(requestUrl);
   const nextOptions: UndiciRequestInit = {
@@ -508,31 +557,24 @@ export async function withSiteProxyRequestInit(
 
   const alsOverride = accountProxyOverride.getStore();
   const proxyUrl = alsOverride ?? resolved.proxyUrl;
-
-  if (!proxyUrl) {
-    return nextOptions;
-  }
-
-  const dispatcher = getDispatcherByProxyUrl(proxyUrl, alsOverride != null);
-  if (!dispatcher) {
-    return nextOptions;
-  }
-
-  return {
-    ...nextOptions,
-    dispatcher,
-  };
+  return withExplicitProxyRequestInit(proxyUrl, nextOptions, alsOverride != null, tuning);
 }
 
 export function withExplicitProxyRequestInit(
   proxyUrl: string | null | undefined,
   options?: UndiciRequestInit,
   skipCache = false,
+  tuning?: SiteProxyDispatchTuning,
 ): UndiciRequestInit {
+  const bodyTimeout = resolveBodyTimeout(tuning);
   const normalized = normalizeSiteProxyUrl(proxyUrl);
-  if (!normalized) return options ?? {};
+  if (!normalized) {
+    // 没配代理时默认不动（继续用全局 dispatcher）；只有显式要求调优才挂自己的 agent。
+    if (bodyTimeout === undefined) return options ?? {};
+    return { ...(options || {}), dispatcher: getDirectDispatcher(bodyTimeout) };
+  }
 
-  const dispatcher = getDispatcherByProxyUrl(normalized, skipCache);
+  const dispatcher = getDispatcherByProxyUrl(normalized, skipCache, bodyTimeout);
   if (!dispatcher) return options ?? {};
 
   return {
@@ -554,11 +596,18 @@ export function resolveProxyUrlForSite(site: SiteProxyConfigLike | null | undefi
   return normalizeSiteProxyUrl(config.systemProxyUrl);
 }
 
-export function withSiteRecordProxyRequestInit(
+type SiteProxyRequestContext = {
+  nextOptions: UndiciRequestInit;
+  proxyUrl: string | null;
+  isAccountOverride: boolean;
+};
+
+/** 站点 + 账号各自可能带代理，这里是两者合一并顺带合并自定义请求头的唯一入口。 */
+function buildSiteProxyRequestContext(
   site: SiteProxyConfigLike | null | undefined,
-  options?: UndiciRequestInit,
-  accountProxyUrl?: string | null,
-): UndiciRequestInit {
+  options: UndiciRequestInit | undefined,
+  accountProxyUrl: string | null | undefined,
+): SiteProxyRequestContext {
   const nextOptions: UndiciRequestInit = {
     ...(options || {}),
   };
@@ -572,7 +621,17 @@ export function withSiteRecordProxyRequestInit(
   const siteProxyUrl = resolveProxyUrlForSite(site);
   const proxyUrl = accountNormalized || siteProxyUrl;
   const isAccountOverride = !!accountNormalized && accountNormalized !== siteProxyUrl;
-  return withExplicitProxyRequestInit(proxyUrl, nextOptions, isAccountOverride);
+  return { nextOptions, proxyUrl, isAccountOverride };
+}
+
+export function withSiteRecordProxyRequestInit(
+  site: SiteProxyConfigLike | null | undefined,
+  options?: UndiciRequestInit,
+  accountProxyUrl?: string | null,
+  tuning?: SiteProxyDispatchTuning,
+): UndiciRequestInit {
+  const { nextOptions, proxyUrl, isAccountOverride } = buildSiteProxyRequestContext(site, options, accountProxyUrl);
+  return withExplicitProxyRequestInit(proxyUrl, nextOptions, isAccountOverride, tuning);
 }
 
 export function resolveChannelProxyUrl(

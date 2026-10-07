@@ -4,6 +4,7 @@ import { AddressInfo } from 'node:net';
 import { ClaudeAdapter } from './claude.js';
 
 vi.mock('../siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withSiteProxyRequestInit: (_url: string, options: unknown) => options,
 }));
 

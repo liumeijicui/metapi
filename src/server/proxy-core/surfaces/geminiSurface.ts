@@ -11,7 +11,11 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromAccount } from '../../services/oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import {
+  resolveChannelProxyUrl,
+  withSiteRecordProxyRequestInit,
+  UNLIMITED_BODY_TIMEOUT,
+} from '../../services/siteProxy.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { getDownstreamRoutingPolicy } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
@@ -747,7 +751,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                       method: 'POST',
                       headers: requestForFetch.headers,
                       body: JSON.stringify(requestForFetch.body),
-                    }, channelProxyUrl),
+                    }, channelProxyUrl, UNLIMITED_BODY_TIMEOUT),
                   })
                   : fetch(targetUrl, {
                     method: 'POST',
@@ -1267,7 +1271,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               method: 'POST',
               headers: requestForFetch.headers,
               body: JSON.stringify(requestForFetch.body),
-            }, channelProxyUrl),
+            }, channelProxyUrl, UNLIMITED_BODY_TIMEOUT),
           })
         );
         const endpointStrategy = createChatEndpointStrategy({

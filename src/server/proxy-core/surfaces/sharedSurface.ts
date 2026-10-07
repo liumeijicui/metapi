@@ -1,5 +1,9 @@
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import {
+  resolveChannelProxyUrl,
+  withSiteRecordProxyRequestInit,
+  UNLIMITED_BODY_TIMEOUT,
+} from '../../services/siteProxy.js';
 import type { SiteProxyConfigLike } from '../../services/siteProxy.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
@@ -325,7 +329,11 @@ export function createSurfaceDispatchRequest(input: {
         method: 'POST',
         headers: requestForFetch.headers,
         body: JSON.stringify(requestForFetch.body),
-      }, channelProxyUrl),
+      },
+      channelProxyUrl,
+      // 这里是对话 / Responses 的转发出口：AI 回答可能长时间不吐新字节，
+      // 不能让 undici 默认那条 300s 的 bodyTimeout 硬线把它掐断。
+      UNLIMITED_BODY_TIMEOUT),
     })
   );
 }

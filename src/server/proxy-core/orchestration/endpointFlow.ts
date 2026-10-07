@@ -1,7 +1,7 @@
 import { fetch } from 'undici';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
-import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
+import { withSiteProxyRequestInit, UNLIMITED_BODY_TIMEOUT } from '../../services/siteProxy.js';
 import {
   buildUpstreamUrl,
   summarizeUpstreamError,
@@ -130,7 +130,10 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
             headers: request.headers,
             body: JSON.stringify(request.body),
             signal,
-          }))
+          },
+          // 转发的是 AI 回答，可能长时间不吐新字节（推理模型尤甚），不能让 undici
+          // 默认那条 300s 的 bodyTimeout 硬线把它掐断。
+          UNLIMITED_BODY_TIMEOUT))
       ),
       {
         firstByteTimeoutMs: input.firstByteTimeoutMs,

@@ -8,7 +8,10 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
-import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import {
+  withSiteRecordProxyRequestInit,
+  UNLIMITED_BODY_TIMEOUT,
+} from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
@@ -86,7 +89,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
               },
               body: JSON.stringify(forwardBody),
               signal,
-            }, getProxyUrlFromExtraConfig(selected.account.extraConfig))),
+            }, getProxyUrlFromExtraConfig(selected.account.extraConfig), UNLIMITED_BODY_TIMEOUT)),
             {
               firstByteTimeoutMs,
               startedAtMs: attemptStartedAtMs,

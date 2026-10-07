@@ -8,6 +8,7 @@ const { fetchMock, readSessionMock } = vi.hoisted(() => ({
 vi.mock('undici', () => ({ fetch: fetchMock }));
 vi.mock('../importedSession.js', () => ({ readImportedSession: readSessionMock }));
 vi.mock('../../siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withSiteProxyRequestInit: async (_url: string, options: unknown) => options,
   withExplicitProxyRequestInit: (_proxy: string, options: unknown) => options,
 }));

@@ -12,6 +12,7 @@ vi.mock('../assistedLogin/sites/agentRouter.js', () => ({
   loginAgentRouterWithLinuxDo: linuxdoLoginMock,
 }));
 vi.mock('../siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   withSiteProxyRequestInit: async (_url: string, options: unknown) => options,
 }));
 

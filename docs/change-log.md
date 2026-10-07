@@ -1,3 +1,151 @@
+### 81. 彻底去掉 AI 生成链路的时间上限：`bodyTimeout` 归零 + 对话预算默认 0 + 客户端断开即中断上游
+
+- **类型**：需求（本会话需求“放开吧，不要限制时间了”）+ 底层超时统一
+- **背景**：第 79 条只把**模型对话直连**这一条路的 `bodyTimeout` 放开了；网关那几条路（老 / 新路由的 `chatSurface`、Responses、Gemini，以及 `search` / `completions` / `embeddings` / `images` / `videos`）仍然吃 undici 默认的 300s，且业务层没有兜底，所以上游超过 5 分钟不吐字还是会被掐断。这一轮把 AI 生成路径**全部**放开。
+- **改动**：
+  1. `siteProxy.ts` 把上一轮的「流式专用 dispatcher」推广成通用调优开关：新增 `SiteProxyDispatchTuning` 与 `UNLIMITED_BODY_TIMEOUT = { bodyTimeout: 0 }`，`withSiteProxyRequestInit` / `withSiteRecordProxyRequestInit` / `withExplicitProxyRequestInit` 都多接一个可选的 tuning 参数；连接池缓存 key 带上 `bodyTimeout`，放开与不放开的连接池各自独立、互不污染。同时删掉了只服务对话的 `withStreamingSiteProxyRequestInit`。
+  2. 放开 AI 生成的全部出口：模型对话直连、`endpointFlow` 默认 dispatch 兜底、`sharedSurface`（chat / Responses 出口）、`geminiSurface`，以及 `routes/proxy` 下的 `search` / `completions` / `embeddings` / `images`(含 edits) / `videos`(含 multipart)。
+  3. 对话时间预算默认改成 **0 = 不限制**：`MODEL_MONITOR_CHAT_TIMEOUT_MS` / `MODEL_MONITOR_CHAT_IDLE_TIMEOUT_MS` 默认从 30min / 10min 改为 0；`siteDirectChatService` 只在预算 >0 时才挂定时器（总时长 / 空闲 / 首字三处都跟着走）。
+  4. 既然不设上限，就得留一个「怎么停」的出口：`modelMonitor.ts` 新增**客户端断开即中断上游** —— 浏览器关页面或点「停止」触发 `request.raw` 的 `close`，abort 掉上游 fetch；同时在所有分支（含通知 / 文件流的提前 return）注销监听，避免 `MaxListenersExceededWarning`。
+- **刻意不动的地方（数据面 vs 控制面）**：`balanceService` / `modelPricingService` / `platformDiscoveryRegistry` / `platforms/*` / 签到等**控制面**请求继续吃 undici 默认兜底 —— 它们自己没有超时，一起去掉会变成「上游不响应就永远挂着」。
+- **验证**：
+  - 端到端长流探针（加载 `dist` 里真实的 `executeEndpointFlow`，走默认 dispatch 兜底那条路）：上游**先 flushHeaders、再憋 330 秒**（> undici 默认 300s）才发数据 → `RESULT: PASS`，330 秒长流没被掐断。（第 79 条同一探针在修复前是 300.8s `UND_ERR_BODY_TIMEOUT` 失败。）
+  - 单测：新增 `siteProxy.dispatchTuning.test.ts` 5 例；`siteDirectChatService.test.ts` 10 例（含新增「两个预算都为 0 时不挂任何定时器」）；`modelMonitor.test.ts` 10 例；`proxy-core` + `routes/proxy` 共 50 文件 530 例全绿。
+  - 三个类型门通过；`npm run build:server` + 重启后 `/monitor` 200、`/api/model-monitor/overview` 200。
+- **主要文件**：`src/server/services/siteProxy.ts`、`src/server/services/siteDirectChatService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/config.ts`、`src/server/proxy-core/**`、`src/server/routes/proxy/*.ts`。
+- **状态**：已完成
+
+### 80. 对话「8-9 秒就断且内容没写完」：胖猫的 deepseek-v4.1-flash 自己提前截断，页面上把上游的结束原因显示出来
+
+- **类型**：缺陷排查 + 可观测性改进（结论是上游截断，不是我们断开）
+- **需求来源**：本会话需求（“比如胖猫的deepseek 4.1 flash，输入糖果问题后就8-9秒回答就断开了，但是明显没回答完，然后下个发送按钮也能点了，不知道是后台原因还是前台原因”）
+- **证据（实测，逐条指向上游）**：
+  1. 通过我们的直连接口打这一轮：8.4 秒、347 块、82511 字节，**上游正常发出 `finish_reason: "stop"` + usage + `data: [DONE]`**，`completion_tokens = 1240`，`reasoning_tokens = 0`，中途最大间隔 0.3 秒 —— 没有任何超时、没有中断，是我们可靠地收完了一个「上游自称已完成」的流。
+  2. **绕开我们全部代码**直接打站点 `/v1/chat/completions`：7.1 秒，同样 `stop` + `[DONE]`，内容同样停在同一个地方（1697 字符 vs 我们这边 1681 字符，差异只是每次生成的措辞）。
+  3. **非流式也一样**（`stream: false`）：7.6 秒、`finish_reason: stop`、1712 字符 —— 说明跟流式链路无关。
+  4. **有硬上限且不是 max_tokens**：显式传 `max_tokens: 300` 时仍然输出 1660 tokens 才停（根本没把 300 当回事），`max_tokens: 8192` 时输出还是 1660 tokens。构造一个必然超长的请求（重复 400 遍同一句话）→ 输出 100 遍、1660 tokens 就「stop」。所以是这个站点/模型的输出上限在约 1200-1700 tokens。
+  5. **同一提示词换站点就正常**：`api.kunyou.asia`（虾蹬王）的同名 `deepseek-v4.1-flash` 跑了 **490.8 秒、16384 completion tokens** 还在继续思考 —— 证明这个模型本身能长跑，短停在胖猫那边。
+  6. 请求体里**没有被注入 `max_tokens`**（`siteDirectChatService` 的 `openaiBody` 只放 `extraBody` + `model` + `messages` + `stream`），密钥分组是 `default`，也不是分组限制。
+- **结论**：后台（我们）没有问题，是**上游站点 胖猫 的 `deepseek-v4.1-flash` 在约 1.2k-1.7k tokens 处提前收尾**，而且收尾时很规范地回了 `finish_reason: stop` + `[DONE]`。这也解释了「发送按钮又能点了」—— 我们确实收到了结束标记，属于正常收尾。第 79 条修掉的那个 5 分钟硬断是另一回事（这次 8 秒就结束，压根没碰到）。
+- **改动（可观测性）**：既然上游会「截断了却报完成」，页面上就得能一眼看出是谁停的。`ModelChatModal.tsx` 现在在流结束时记下上游声明的 `finish_reason`、`completion_tokens`、以及有没有收到 `[DONE]`，显示在回答气泡下方：`上游结束原因: stop · 输出 1187 tokens`；没收到结束标记则显示「上游没有发送结束标记，这轮可能被中断」。样式与文案分别落在 `src/web/index.css`（`.model-chat-finish`）与 `src/web/i18n.supplement.ts`。
+- **验证**：浏览器实测胖猫 + `deepseek-v4.1-flash` + 糖果测试题 → 8.1 秒结束，内容断在「第一对取SP」，气泡下方显示 `上游结束原因: stop · 输出 1187 tokens`（修复前这里什么都没有，只能靠猜）。新增断言在 `modelMonitor.chat.test.ts`（6 例）与 `i18n.test.ts` 共 11 例通过；`tsc` 三个门通过；`vite build` 后重启，`/monitor` 200。
+- **建议（留给你决定）**：这块是上游的额度/渠道策略，我们改不了。要更长的回答可以换站点（虾蹬王同模型实测能跑 490 秒）、换模型，或者在对话里把问题拆小。如果希望我们对这种「stop 但明显没写完」的情况做自动重试/续写，那是另一个功能，需要你确认。
+- **主要文件**：`src/web/components/ModelChatModal.tsx`、`src/web/index.css`、`src/web/i18n.supplement.ts`、`src/web/pages/modelMonitor.chat.test.ts`。
+- **状态**：已完成（上游行为已定性并可见化）
+
+### 79. 模型对话「复杂问题就断流」：undici 默认 5 分钟 bodyTimeout 掐断了长思考的流
+
+- **类型**：缺陷修复（底层 HTTP 客户端的硬超时压过业务层的超时预算）
+- **需求来源**：本会话需求（“现在模型监控的对话，如果问复杂问题，比如糖果测试题，就会出现断流，看下是什么原因？我记得之前是可以的”）
+- **站点事实 / 证据（实测）**：
+  1. 服务端并不认为自己失败 —— 库里 `proxy_logs` 里模型对话（`route_id`/`channel_id` 为 NULL、`client_app_name = 模型测试`）最近三条全是 `success 200`，对应 16:01:21/16:02:00/16:03:25 三次请求（`created_at` 是 UTC）。也就是说流是从**客户端侧**被掐断的。
+  2. 用糖果测试题直连服务端复现，`deepseek-v4.1-flash` 6.2 秒就完整跑完（350 块、82794 字节、收到 `[DONE]`），说明短问题没有异常。
+  3. 用 undici 做对照实验（本地服务先发响应头、再憋 330 秒才发第一个字节）：默认 dispatcher **300.8s 失败**，`cause = UND_ERR_BODY_TIMEOUT`；换成 `new Agent({ bodyTimeout: 0 })` 后 **330.0s 正常拿到数据**。
+- **根因**：`siteDirectChatService` 的直连 fetch 用的是 undici 的**默认** dispatcher，而 undici 的 `bodyTimeout` 默认是 `300e3`，语义是「响应体数据之间的最大间隔」—— 上游只要 5 分钟没有吐出**任何新字节**，连接就被直接掐断（`terminated` / `UND_ERR_BODY_TIMEOUT`）。而第 69 条专门为这件事配的预算（空闲 10 分钟、总时长 30 分钟、首字按空闲算）**全都比 300s 宽**，于是永远轮不到它们生效：推理模型憋 5 分钟以上才吐第一个字属于常态（糖果测试这类复杂题尤其明显），必然卡在 300 秒整断流，报出来的还是一句看不出所以然的 `terminated`。“之前可以”也对得上：这不是超时口径写错了，而是底层那条谁都没注意到的默认硬线一直压在上面。
+- **改动**：
+  - `siteProxy.ts`：新增流式专用 dispatcher（无代理用 `Agent`、有代理用 `ProxyAgent`、SOCKS 走 `createSocksDispatcher`，统一带 `bodyTimeout: 0`）并做实例缓存，配套导出 `withStreamingSiteProxyRequestInit()`（第 81 条把这条流式专用路径推广成通用的 `SiteProxyDispatchTuning` 开关，该函数已被 `withSiteProxyRequestInit(..., UNLIMITED_BODY_TIMEOUT)` 取代并删除）；顺带把 `withSiteRecordProxyRequestInit` 里「站点 + 账号代理 + 自定义请求头」的合并逻辑抽成 `buildSiteProxyRequestContext()`，两条路共用，避免复制一份。普通（非流式）请求**保持 undici 默认**，继续留着自己的兜底。
+  - `siteDirectChatService.ts`：直连改用流式 dispatcher（第 81 条起统一为 `withSiteRecordProxyRequestInit(..., UNLIMITED_BODY_TIMEOUT)`），超时判定回到业务层那两句带原因的文案（「上游 N 秒没有返回任何新数据（空闲超时）」）。同时把 `executeEndpointFlow` 传进来的**首字 signal 真正接上**（用 `mergeAbortSignals` 合并业务 signal）——之前这个参数被丢掉，首字超时触发时只是 `Promise.race` 提前返回 408，底层 fetch 还挂在 socket 上继续等，属于连接泄漏。
+- **验证**：
+  - 单测：新增 `siteProxy.streamingDispatcher.test.ts` 4 例（该文件在第 81 条被 `siteProxy.dispatchTuning.test.ts` 取代）（流式选项关掉 bodyTimeout、流式才带专用 dispatcher、dispatcher 复用同一实例、自定义请求头照旧合并），连同 `siteDirectChatService.test.ts` 共 13 例通过。
+  - 真实对话回归：糖果测试题 → 7.0 秒、312 块、74067 字节、收到 `[DONE]`、无错误。
+  - **端到端修复验证**：加载 `dist` 里真实的 `withStreamingSiteProxyRequestInit`，打本地「先 flushHeaders 再憋 330 秒」的服务 —— 修复前 300.8s 失败（`UND_ERR_BODY_TIMEOUT`），修复后 **330.0s 正常收完**。
+  - `tsc -p tsconfig.server.json` 通过，`npm run build:server` 后重启，`/monitor` 200。
+- **后续**：本条只放开了「模型对话直连」这一条路；网关那几条路（老 / 新路由的 `chatSurface` 等）当时仍是 undici 默认 300s、且 `PROXY_FIRST_BYTE_TIMEOUT_SEC` 默认 0（等于没有空闲预算），故留待确认。**已在第 81 条按用户要求全部放开。**
+- **主要文件**：`src/server/services/siteProxy.ts`、`src/server/services/siteDirectChatService.ts`、`src/server/services/siteProxy.dispatchTuning.test.ts`（第 79 条当时是 `siteProxy.streamingDispatcher.test.ts`，第 81 条改名并用 5 例覆盖）。
+- **状态**：已完成
+
+### 78. 模型监控筛选：模型候选随站点收窄 + 重置按钮 + 站点筛选前置
+
+- **类型**：界面改进（列表筛选）
+- **需求来源**：本会话需求（“模型监控的全部站点和全部模型，如果下拉选择了站点那么模型那下拉就只有该站点下的模型，而不是全部，还有加个重置按钮，重置筛选查询。并且吧全部站点的筛选放到前面”）
+- **现状与根因**：模型下拉的候选其实一直是后端按站点算好的 —— `modelMonitorService.ts` 的 facet 条件只吃 `siteId` 与 `minSuccessRate`、不吃 `model`，实测 `site 33 → models=4 / modelOptions=4`、全量 `models=930 / modelOptions=626`，所以后端没有“回全量”的问题。界面上看起来没跟着收窄，是**前端没清理失效的已选模型**：换了站点之后 `modelFilter` 还留着上一个站点的模型名，它既不在新候选里（下拉显示成一个候选里根本没有的名字），又照样送去查询（结果自然为空）。此外工具栏是「模型在前、站点在后」，与“先定站点再挑模型”的顺序相反，且没有任何一键复位入口。
+- **改动**（`src/web/pages/ModelMonitor.tsx`）：站点筛选移到模型筛选之前；模型候选直接用 `overview.modelOptions`（`useMemo` 保持引用稳定）；新增自愈 effect —— 当已选模型不在当前候选里就清空它，让查询退回“只按站点过滤”（换站点、或成功率筛选把模型挤出清单时同理，因为那种情况下它本来就不该再被选中）；「全部」项文案改成 `${站点名} — 全部模型`，站点下没有采集到模型时提示也带上站点名，避免误读成全站点的全部模型。新增「重置筛选」按钮，一次清空站点 / 模型 / 成功率三项，未改动筛选时保持 disabled，不给出一个点了没反应的按钮。文案补进 `src/web/i18n.supplement.ts`。
+- **验证**：
+  - 浏览器实测 14/14 通过（真实接口取基准，逐项对齐数量）：工具栏顺序 `site→model`；全量 43 站 → 候选 44（+1 为“全部站点”），全量 627 模型 → 候选 628；选 `100xlabs` 后模型候选 **5**（= 该站 4 个模型 + 1），且**候选集合与该站接口返回的 4 个模型完全一致**，`100xlabs — all models` 文案带站点名；选模型后候选仍是该站范围；点重置后候选回到 628、文案回 `All models`、站点回 `All sites`、按钮回 disabled。
+  - 单测 `listFilters.architecture.test.ts`（为监控页补一条：站点在模型前、候选吃 `overview.modelOptions`、失效模型会被清掉、重置清空三项）等 4 个套件 21 例全绿；三个类型门通过；`vite build` 后重启服务，`/monitor` 返回 200 且 `index.html` 引用的产物均已生成。
+- **主要文件**：`src/web/pages/ModelMonitor.tsx`、`src/web/i18n.supplement.ts`、`src/web/pages/listFilters.architecture.test.ts`。
+- **状态**：已完成
+
+### 77. Linux.do 重登驱动：站点用跳转回调时被误判成「未回调 / 登录未生效」
+
+- **类型**：缺陷修复（辅助登录驱动读不懂一种合法的成功回调）
+- **需求来源**：本会话需求（登记 https://new-api.pigeonw.com 时，站点明明登录成功，系统的自动重登却报失败）
+- **站点事实（实测）**：`new-api.pigeonw.com`（`Pigeonw 公益站` → 后改名 `胖猫`）是 `v1.0.0-rc.36+invite.20261006` 的 new-api 构建。它的 Linux.do 回调**不是 200 JSON，而是 `303 → /dashboard`**，并在浏览器里留下 `new_api_refresh`（HttpOnly，101 字符）+ `new_api_has_session`。同时该构建的 `/api/user/self` **只认 Bearer，不认 Cookie**：已登录的浏览器用自己的 Cookie 去读它，拿到的是 `401 Unauthorized, invalid access token`。
+- **根因（两条叠在一起）**：
+  1. `linuxDoOAuthRelogin.ts` 的回调捕获只走 `response.text()`。Playwright 对跳转响应直接抛 `Response body is unavailable for redirect responses`，捕获结果被 `.catch(() => undefined)` 吞掉，于是 `captured.callback` 永远为空 —— 站点已经登录成功，驱动却报「授权后站点未回调 Linux.do 登录」。**失败信息与事实相反**，把一次成功当成站点没响应。
+  2. 该构建的回调里**读不到 `Set-Cookie`**（Playwright 上报 0 个），而 `/api/user/self` 又不吃 Cookie，所以「按响应头 / 按页面用户信息」两种直觉判定在这个站点上都会给出错误结论。真正可信的证据只有一个：**登出之后浏览器又拿到了站点下发的会话 Cookie**（`signOutOfSite` 会先清空该站 Cookie，所以之后出现的必定是这次登录给的）。
+- **改动**（`src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.ts`）：
+  - 回调捕获按状态分流：跳转响应（3xx）不再尝试读 body，改写 `{status, location}`；其余仍走 JSON 判定。
+  - 新增 `isCallbackRedirectStatus()` 与 `judgeRedirectCallback()`：跳转式回调按三条判定 —— 跳转目标仍在站点自身来源（把 code 交回 `connect.linux.do` 说明没走完）、落地路径不是登录/注册/错误页、以及浏览器确实拿到了会话 Cookie。
+  - `judgeLinuxDoCallback()` 对 3xx 明确回「站点以跳转方式回调，需要按站点会话状态判定」，不再把跳转说成「站点拒绝」。
+  - 落地前 `waitForSiteLanding()`：回调响应是在浏览器**还在跟着跳转**时被观察到的，此时页面还在 `connect.linux.do` 上，任何页面内读取都会问错站点。
+  - `readOAuthStateInPage()` 加重试（3 次）：退出登录后 SPA 还在客户端跳转，撞上这个竞态会读到空 state，过一次就报「站点未返回 OAuth state」（实测 3 次里踩到 1 次）。
+- **验证**：
+  - 单测 18 例全绿（新增跳转裁决的 6 例 + 状态分类 2 例：接受「落到控制台且留下会话」、接受绝对地址、拒绝跨来源、拒绝落回登录页、拒绝「跳转但没留 Cookie」、拒绝无跳转地址）；相关套件合计 165 例通过。
+  - 真实重登：驱动直接跑 → `{"ok":true,"message":"Linux.do 重新登录完成"}`（修复前是 `{"ok":false,"message":"授权后站点未回调 Linux.do 登录"}`）。
+  - 端到端演练（生产路径）：把账号 #45 的凭证换成死值并置 `expired` → `POST /api/accounts/45/balance` → **91.5 秒后自动重登成功**，余额 `0.216986`，状态回 `active`，`runtimeHealth=healthy`。
+- **主要文件**：`src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.ts`、`src/server/services/assistedLogin/sites/linuxDoOAuthRelogin.test.ts`。
+- **状态**：已完成
+
+### 76. 登记「胖猫」（new-api.pigeonw.com）
+
+- **类型**：站点登记（无代码改动，登记过程中牵出第 77 条）
+- **需求来源**：本会话需求（“帮我登记这个站：https://new-api.pigeonw.com/security，linuxdo快捷登录，有签到”；用户补充“把站点中文名改成胖猫”）
+- **站点事实（实测）**：
+  - `system_name = Pigeonw 公益站`、`version = v1.0.0-rc.36+invite.20261006`；直连可用（`GET /api/status` 200，无 CF 盾），站点未开系统代理。
+  - `linuxdo_oauth: true`（`linuxdo_client_id = oMpzsuao0CzRUxlE9veBjeoQlXCQbuSO`、`linuxdo_minimum_trust_level = 1`）、`github_oauth: false`、`turnstile_check: false`；签到 `checkin_enabled: true`。
+  - 登录页是 `/sign-in`；`/api/oauth/linuxdo` 是回调（state 不对时回 `403 {"message":"State parameter is empty or mismatched"}`）。
+- **登记结果**：
+  - 站点 **#59**（平台 `new-api`，名字按用户要求由 `Pigeonw 公益站` 改成 **`胖猫`**，未开系统代理）。
+  - 账号 **#45**：`3145215575`、`platformUserId 45215575`、`session` 模式、`oauth.provider=linuxdo`、`checkinEnabled: true`。
+  - 同步到站点侧已有密钥 `li`（`account_tokens` id 106，默认），路由 **43 条**。
+  - **会话清理（按用户要求）**：每次登录后都清掉其他会话。绑定时 `sessionHygiene: pruned, removed 1, kept 1`；凭证重取时 `removed 8, kept 1`；演练时 `removed 1, kept 1`。最终站点会话列表只剩 1 条（当前会话，`current=true`）。
+- **验证（全部实测）**：
+  - 余额：`POST /api/accounts/45/balance` → `{"balance":0.216986,...}`。
+  - 签到：`POST /api/checkin/trigger/45` → `{"success":true,"message":"今日已签到"}`（当日早些时候那次签到已入账 0.21699）。
+  - 直连对话：`deepseek-v4.1-flash` 经 `/api/model-monitor/chat/stream`（带 `tokenId`）正常流式返回；`glm-5.3` 回 502，是站点自己的上游渠道问题，与登记无关。
+  - 自动重登：见第 77 条。
+- **主要文件**：仅数据库登记，无源码改动（登记中发现的重登缺陷另见第 77 条）。
+- **状态**：已完成
+
+### 75. 修复「账号一旦被标过期就再也回不来」：余额刷新与 sub2api 续期调度不再排除 expired 账号
+
+- **类型**：缺陷修复（自愈链路被状态过滤掐死）
+- **需求来源**：本会话需求（“https://l0veyou.com/keys 连接管理里提示该网站凭证已过期，看看是什么原因没有自动重连”）
+- **站点事实**：站点 #27 `l0veyou`（`https://l0veyou.com`，`sub2api`，`status=active`），账号 #11（`3145215575`，`oauth_provider=linuxdo`）。它的凭证是 `accessToken`(JWT) + `extraConfig.sub2apiAuth.{refreshToken, tokenExpiresAt}`。其中 JWT 的 `tokenExpiresAt=1790832534000` 早在 **2026-10-01 13:28:54 (+08)** 就到期了，`last_balance_refresh` 停在 **2026-10-04T14:00:04Z**（+08 10-04 22:00）之后三天没再动过；`extra_config` 里最后一次抢救痕迹是 10-04 的 linuxdo 重登（`relogin.lastReloginAt=15:47:30Z`）与浏览器重登（`browserRelogin.attemptedAt=15:16:40Z`），此后**再无任何尝试**。站点本身可达（`GET /` 200），并且 refreshToken 一直是有效的 —— 手工 `POST /api/accounts/11/balance` 只用了 10.8 秒就把账号自愈回 `active`，`tokenExpiresAt` 被换成 2026-10-08 13:06:13。
+- **根因**：不是 refreshToken 失效，也不是站点挂了，而是**唯一两条能续期的调度都把 expired 账号从 SQL 里筛掉了**：
+  1. 每小时一次的全量余额刷新 `refreshAllBalances()`（由 `checkinScheduler` 的 `0 * * * *` 触发）写的是 `.where(eq(schema.accounts.status, 'active'))`。账号一旦被 `reportTokenExpired()` 标成 `expired`，就再也进不了这一轮，而这一轮里恰恰藏着两条自愈路径：sub2api 的 refresh token 预刷新、以及失败后的 `tryAutoRelogin()`。
+  2. 每 60 秒一轮的 sub2api 托管续期调度 `executeSub2ApiManagedRefreshPass()` 同样要求账号 `status = 'active'`（SQL 与 `shouldRefreshManagedSub2ApiAccount()` 双重过滤），把“刚好最需要刷新 token”的 expired 账号排除在外。
+  两条路全被堵死，加上它跌成 `expired` 的那天（10-04）linuxdo 重登与浏览器重登都没成功，冷却过后也没有任何任务会再来碰它 —— 于是成为死结：**过期 → 不再被轮询 → 永远过期**。对照证据：同库另外 4 个 sub2api 账号（`#2`/`#17`/`#18`/`#35`）全是 `active`，`last_balance_refresh` 每小时正常更新，说明调度本身没问题，唯独 expired 被排除。
+- **改动**：
+  - `balanceService.ts`：`refreshAllBalances()` 改为 `inArray(schema.accounts.status, ['active', 'expired'])`。`disabled` 仍然排除（那是运维决定，不是失效）；`refreshBalance()` 内部本来就有 `status: account.status === 'expired' ? 'active' : account.status`，所以只要有入口就能自愈。
+  - `balanceService.ts`：给“已经在 expired 状态”的账号不再重复发 token 过期告警 —— 它之所以是 expired 就是因为这条告警已经发过，每小时重发只会变成告警洪水。失败的真实原因照旧写进账号的 runtime health（页面上能看到），只是不再重复写事件与推送。新过期（`active → expired`）的账号告警不变。
+  - `sub2apiRefreshScheduler.ts`：账号状态过滤从 `= 'active'` 放开为 `in ('active','expired')`（SQL 与 `shouldRefreshManagedSub2ApiAccount()` 同步改），站点状态仍要求 `active`。managed refresh 成功时 `refreshSub2ApiManagedSession()` 会把 expired 提回 active。
+- **验证**：
+  - 单测全绿：`sub2apiRefreshScheduler.test.ts` 3 例（新增「expired 账号仍会被这轮捡起来、disabled 仍被跳过」）、`sub2apiManagedAuth.test.ts` 2 例（新增，覆盖 `expired → active` 的复活契约与 refresh token 被拒时账号不被改动）、`balanceService.refreshAllBalances.test.ts` 3 例（新增，覆盖 expired 被刷新并提回 active、disabled 不被动、已过期账号不再重复告警），加上 `balanceService.autoRelogin`、`checkinScheduler`、`checkinService.autoRelogin`、`autoRelogin`、`sub2apiRefreshSingleflight`、`alertService.credentialFailure` 等共 83 例通过。
+  - **测试确实抓得住这个 bug**：临时把两处过滤改回 `= 'active'` 后，新增的 2 例立刻失败（`expected [] to deeply equal ['revivable-token']`、`scanned: 0`），改回即绿。
+  - 三个类型门（`tsconfig.server.json`/`web.json`/`web.test.json`）全部通过，`npm run build:server` 后重启服务。
+  - 线上实跑一次 `refreshAllBalances()`：43 个账号 42.8 秒跑完，结果里**首次出现 `#4 luckyg`、`#10 蛙蛙公益站` 两个 expired 账号**（修复前它们连被尝试的机会都没有）；两者仍失败但页面原因是真实的（“站点登录会话数已达上限”“账号密码无效或账号被封禁”），且**没有新增重复的 token 事件**（最近一条 token 事件仍是 05:09:12 签到调度那条）。
+- **主要文件**：`src/server/services/balanceService.ts`、`src/server/services/sub2apiRefreshScheduler.ts`、`src/server/services/sub2apiRefreshScheduler.test.ts`、`src/server/services/sub2apiManagedAuth.test.ts`（新增）、`src/server/services/balanceService.refreshAllBalances.test.ts`（新增）。
+- **状态**：已完成
+
+### 74. 模型监控「对话」写进使用日志时补上首字耗时
+
+- **类型**：缺陷修复（日志缺字段）
+- **需求来源**：本会话需求（“模型监控对话里生成的日志，好像没有首字信息，看能不能加上去”）
+- **问题**：网关路由（`/v1/*`）打的日志一直有 `first_byte_latency_ms`，所以「使用日志」里能显示「流式 · 首字 1.2s」；但模型监控的「对话」是**直连**链路，走的 `recordDirectChatLog()` 只写了 `latencyMs`，首字一栏永远是空的 —— 排查「多久才出字」时只能看到总用时。实测库里 170/171/172/173/174 这几条直连日志的 `first_byte_latency_ms` 全是 NULL。
+- **根因**：直连其实**已经在测首字了**（`requestSiteDirectChat` 调 `executeEndpointFlow` 时传了 `firstByteTimeoutMs`，底层 `fetchWithObservedFirstByte` 读到第一块数据就会打点），只是这个观测值没有从 service 传出来，路由层自然也写不进日志。
+- **改动**：
+  - `siteDirectChatService.ts`：成功结果新增 `firstByteLatencyMs`，用 `getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null` 取值 —— 和 `chatSurface` 里网关记首字用的是同一个函数、同一套口径。拿不到就返回 `null`，不编数字。
+  - `modelMonitor.ts`：`recordDirectChatLog()` 增加 `firstByteLatencyMs` 字段并写进 `insertProxyLog`；成功日志带上它，中途被空闲/总时长掐断的失败日志也带（已经吐过字说明首字到达过）。
+  - **不拿总耗时冒充首字**：上游一个字节都没吐出来时（含「200 但空响应体」与发起前就失败）统一写 `null`，日志里显示 `--`。
+- **验证**：
+  - 单测：`siteDirectChatService.test.ts` 加 1 例断言首字是真实打点值且 ≤ 总耗时；`modelMonitor.test.ts` 加 2 例（成功写 420、失败留空）。两个文件 19 例全绿，`tsc -p tsconfig.server.json` 通过。
+  - 真实直连 `glm-4.5-flash`：日志 #178 `latency_ms=8166, first_byte_latency_ms=1953`（#177 是 8936 / 1754），对比修复前的 #174 是 `5898 / NULL`。
+  - 页面确认：`/logs` 里 #178 那行显示「流式 · 首字 2s」，用时 8.2s。
+- **主要文件**：`src/server/services/siteDirectChatService.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/services/siteDirectChatService.test.ts`、`src/server/routes/api/modelMonitor.test.ts`。
+- **状态**：已完成
+
 ### 73. CC Switch 导入的模型改成带搜索的下拉，候选＝已获取的全部模型
 
 - **类型**：功能增强（承接第 72 条）

@@ -69,6 +69,7 @@ vi.mock('../../services/proxyLogStore.js', () => ({
 }));
 
 vi.mock('../../services/siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   resolveChannelProxyUrl: (...args: unknown[]) => resolveChannelProxyUrlMock(...args),
   withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
 }));
@@ -450,7 +451,10 @@ describe('selectSurfaceChannelForAttempt', () => {
         method: 'POST',
         headers: { authorization: 'Bearer test' },
         body: JSON.stringify({ model: 'gpt-5.2', input: 'hello' }),
-      }, 'http://proxy.example.com');
+      },
+      'http://proxy.example.com',
+      // 第 4 个参数是 dispatcher 调优：对话 / Responses 不设 bodyTimeout 上限。
+      { bodyTimeout: 0 });
       expect(init).toEqual({
         method: 'POST',
         headers: { authorization: 'Bearer test' },

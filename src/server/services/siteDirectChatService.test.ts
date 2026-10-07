@@ -143,6 +143,25 @@ describe('siteDirectChatService', () => {
     expect(body.stream).toBe(true);
   });
 
+  it('把「首字耗时」带回给调用方，供日志记录', async () => {
+    const { site, account, tokenId } = await seed();
+    mockUpstreamFetch();
+    const outcome = await service.requestSiteDirectChat({
+      siteId: site.id,
+      accountId: account.id,
+      tokenId,
+      model: 'kimi-k3',
+      messages: [{ role: 'user', content: 'hi' }],
+      timeoutMs: 30_000,
+    });
+
+    if (!outcome.ok) throw new Error(`直连失败：${outcome.message}`);
+    // 上游第一块数据到达时打点；拿不到就只能是 null，绝不能拿总耗时顶上。
+    expect(typeof outcome.firstByteLatencyMs).toBe('number');
+    expect(outcome.firstByteLatencyMs).toBeGreaterThanOrEqual(0);
+    expect(outcome.firstByteLatencyMs!).toBeLessThanOrEqual(outcome.latencyMs);
+  });
+
   it('不传思考强度时不会凭空造出 reasoning_effort', async () => {
     const { site, account, tokenId } = await seed();
     const { chatCalls } = mockUpstreamFetch();
@@ -186,6 +205,34 @@ describe('siteDirectChatService', () => {
       await vi.advanceTimersByTimeAsync(61_000);
       expect(requestSignal.aborted).toBe(true);
       expect(outcome.timeoutReason()).toContain('没有返回任何新数据');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('对话默认不设时间上限：两个预算都为 0 时不挂任何定时器', async () => {
+    const { site, account, tokenId } = await seed();
+    const { chatCalls } = mockUpstreamFetch();
+    vi.useFakeTimers();
+    try {
+      const outcome = await service.requestSiteDirectChat({
+        siteId: site.id,
+        accountId: account.id,
+        tokenId,
+        model: 'kimi-k3',
+        messages: [{ role: 'user', content: 'hi' }],
+        // 0 = 不限制（默认）。以前这里是 30 分钟总限 + 10 分钟空闲，推理模型
+        // 憋十几分钟才吐字的正常回答会被误杀。
+        timeoutMs: 0,
+        idleTimeoutMs: 0,
+      });
+      if (!outcome.ok) throw new Error(`直连失败：${outcome.message}`);
+      const requestSignal = chatCalls()[0].init.signal as AbortSignal;
+      // 跑到远超以前那两条硬线的时间点，也不该被中断。
+      await vi.advanceTimersByTimeAsync(45 * 60_000);
+      expect(requestSignal.aborted).toBe(false);
+      // 而且不该给出任何“超时”理由 —— 压根没发生超时。
+      expect(outcome.timeoutReason()).toBe(null);
     } finally {
       vi.useRealTimers();
     }

@@ -6,7 +6,11 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
-import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import {
+  withSiteProxyRequestInit,
+  withSiteRecordProxyRequestInit,
+  UNLIMITED_BODY_TIMEOUT,
+} from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
@@ -98,7 +102,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
               body: cloneFormDataWithOverrides(multipartForm, {
                 model: upstreamModel,
               }) as any,
-            }, accountProxy)
+            }, accountProxy, UNLIMITED_BODY_TIMEOUT)
             : withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
               headers: {
@@ -109,7 +113,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
                 ...(jsonBody || {}),
                 model: upstreamModel,
               }),
-            }, accountProxy);
+            }, accountProxy, UNLIMITED_BODY_TIMEOUT);
           const response = await fetch(targetUrl, requestInit);
           const responseText = await response.text();
           if (!response.ok) {

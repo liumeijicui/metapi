@@ -12,6 +12,7 @@ vi.mock('./browserProfileCredential.js', () => ({
 }));
 
 vi.mock('./siteProxy.js', () => ({
+  UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
   resolveChannelProxyUrl: () => 'http://proxy.test:7890',
 }));
 

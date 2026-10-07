@@ -28,6 +28,11 @@ async function recordDirectChatLog(input: {
   status: 'success' | 'failed';
   httpStatus: number;
   errorMessage: string | null;
+  /**
+   * 首字耗时（首个响应体到达）。和网关路由记的是同一套口径，
+   * 拿不到就写 null —— 日志里显示「--」，不拿总耗时冒充。
+   */
+  firstByteLatencyMs?: number | null;
 }): Promise<void> {
   await insertProxyLog({
     routeId: null,
@@ -38,9 +43,11 @@ async function recordDirectChatLog(input: {
     status: input.status,
     httpStatus: input.httpStatus,
     latencyMs: Date.now() - input.startedAt,
+    // 直连对话永远是流式，首字耗时是排查「卡多久才出字」的关键指标。
+    isStream: true,
+    firstByteLatencyMs: input.firstByteLatencyMs ?? null,
     errorMessage: input.errorMessage,
     retryCount: 0,
-    isStream: true,
     clientAppName: '模型测试',
     clientFamily: 'internal',
     clientConfidence: 'exact',
@@ -136,6 +143,11 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     }
 
     const startedAt = Date.now();
+    // 对话默认不设时间上限，所以「客户端断开」就成了唯一的兜底：页面关掉 / 点了停止
+    // 之后，这条 signal 会把上游请求一起中断，不让它挂在那儿白跑。
+    const clientAbort = new AbortController();
+    const onClientClose = () => clientAbort.abort(new Error('client disconnected'));
+    request.raw.once('close', onClientClose);
     const outcome = await requestSiteDirectChat({
       siteId,
       accountId,
@@ -143,10 +155,11 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model,
       messages,
       stream: true,
-      // 总时长上限 + 空闲上限：流式对话只要上游还在吐字就不会被判超时。
+      // 0 = 不限制（默认）；设成正数则恢复「空闲 / 总时长」两条硬线。
       timeoutMs: config.modelMonitorChatTimeoutMs,
       idleTimeoutMs: config.modelMonitorChatIdleTimeoutMs,
       extraBody: reasoningEffort ? { reasoning_effort: reasoningEffort } : null,
+      signal: clientAbort.signal,
     });
 
     if (!outcome.ok) {
@@ -167,6 +180,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         httpStatus: outcome.status,
         errorMessage: failure.message,
       }).catch(() => undefined);
+      request.raw.off('close', onClientClose);
       return reply.code(failure.status).send({ error: { message: failure.message } });
     }
 
@@ -208,12 +222,16 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         startedAt,
         status: 'failed',
         httpStatus: 0,
+        // 已经吐过数据就说明首字到达过，失败日志一样值得记这行。
+        firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
         errorMessage: bytes > 0
           ? `${failureMessage}（已输出 ${bytes} 字节后中断）`
           : failureMessage,
       }).catch(() => undefined);
       reply.raw.end();
       return reply;
+    } finally {
+      request.raw.off('close', onClientClose);
     }
     reply.raw.end();
 
@@ -223,6 +241,8 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       startedAt,
       status: 'success',
       httpStatus: upstream.status || 200,
+      // 一个字节都没吐出来就没有「首字」可言，别把响应头到达时间写成首字。
+      firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
       errorMessage: bytes > 0 ? null : '上游没有返回任何内容',
     }).catch(() => undefined);
     return reply;
