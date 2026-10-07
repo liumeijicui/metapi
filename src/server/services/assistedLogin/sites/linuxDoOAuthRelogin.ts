@@ -51,6 +51,9 @@ const AUTHORIZE_BUTTON_SELECTOR = 'button, a, input[type="submit"], input[type="
 const NAVIGATION_TIMEOUT_MS = 60_000;
 const SECURITY_CHECK_TIMEOUT_MS = 45_000;
 const CALLBACK_POLL_INTERVAL_MS = 500;
+/** The callback bounce has to land before the session can be read. */
+const SITE_LANDING_TIMEOUT_MS = 30_000;
+const SITE_LANDING_POLL_INTERVAL_MS = 400;
 /** The consent page is opened after a client-side redirect; that race is retried. */
 const AUTHORIZE_NAVIGATION_ATTEMPTS = 3;
 /** The SPA bounce to /login is a client-side navigation Playwright cannot await. */
@@ -60,6 +63,7 @@ const SIGN_OUT_SETTLE_MS = 1_000;
  * SPA, so the first in-page read can land on the challenge page.
  */
 const IN_PAGE_READ_ATTEMPTS = 4;
+const OAUTH_STATE_READ_ATTEMPTS = 3;
 const IN_PAGE_READ_GAP_MS = 1_500;
 
 export type LinuxDoReloginResult = {
@@ -122,6 +126,129 @@ export function isLinuxDoAuthorizeUrl(rawUrl: string): boolean {
 }
 
 /**
+ * True for the callbacks whose body cannot be read.
+ *
+ * Playwright rejects `response.text()` on a redirect with "Response body is
+ * unavailable for redirect responses". A fork that answers the handshake with
+ * `303 -> /console` therefore produced *no* captured callback at all, and the
+ * run reported "站点未回调 Linux.do 登录" while the site had in fact just signed
+ * the account in. The status is recorded on its own for those, and the verdict
+ * comes from the session instead.
+ */
+export function isCallbackRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/**
+ * Counts the cookies the browser holds for the deployment.
+ *
+ * The handshake is preceded by a sign-out that clears exactly these, so anything
+ * counted here was handed out by the login that just ran — which is what makes
+ * the number a verdict rather than a coincidence.
+ */
+async function countSiteCookies(context: BrowserContext, hosts: readonly string[]): Promise<number> {
+  try {
+    const cookies = await context.cookies();
+    return cookies.filter((cookie) => hosts.some(
+      (host) => matchesSiteHost(cookie.domain.replace(/^\./, ''), host),
+    )).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Waits for the callback's own redirect to finish landing on the site.
+ *
+ * The callback response is observed *while* the browser is still following it.
+ * Everything the verdict and the caller depend on — the cookies the login just
+ * handed out — is only settled once the bounce is over, so the run does not
+ * return until the frame is back on the deployment's own origin.
+ */
+async function waitForSiteLanding(page: Page, siteOrigin: string): Promise<void> {
+  const deadline = Date.now() + SITE_LANDING_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      if (new URL(page.url()).origin === siteOrigin) break;
+    } catch {
+      // A URL that will not parse is a frame in transition; keep waiting.
+    }
+    await page.waitForTimeout(SITE_LANDING_POLL_INTERVAL_MS).catch(() => undefined);
+  }
+  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+}
+
+export type RedirectCallbackEvidence = {
+  /** Status of the callback response, e.g. 303. */
+  status: number;
+  /** Where the site sends the browser next, when it says so. */
+  location: string | null;
+};
+
+/** Paths a signed-in bounce never lands on, so a redirect there is a refusal. */
+const REFUSAL_LANDING_PATTERN = /\/(login|sign-in|signin|register|error)(\/|$)/i;
+
+/**
+ * Decides a redirect-shaped callback from what the handshake left behind.
+ *
+ * Three things have to hold, and each rules out a different way of reading
+ * "signed in" when nothing happened: the bounce stays on the deployment (a
+ * callback that hands the code back to `connect.linux.do` never completed), it
+ * does not land on a signed-out page, and the browser ends up holding a session
+ * cookie the site handed out.
+ *
+ * That last one is the only trustworthy "success" signal this fork offers.
+ * `Set-Cookie` on the redirect itself is *not* readable — Playwright reports none
+ * for the 303 while the browser plainly ends up with `new_api_refresh` — and
+ * `/api/user/self` cannot be asked either: this generation of forks answers it
+ * only to a bearer token, so a signed-in browser reading it with its own cookie
+ * gets 401 and looks signed out. The cookies are counted after the sign-out that
+ * preceded the handshake, so every one of them is new.
+ *
+ * The account *id* cannot be read here — a redirect never states it — so the
+ * caller's own credential check is what ties the new session to the account;
+ * this verdict only covers "the site accepted the handshake".
+ */
+export function judgeRedirectCallback(
+  evidence: RedirectCallbackEvidence,
+  options: { siteOrigin: string; siteLabel: string; sessionCookieCount: number },
+): LinuxDoReloginResult {
+  if (!evidence.location) {
+    return {
+      ok: false,
+      message: `站点以 HTTP ${evidence.status} 回调但未给出跳转地址`,
+    };
+  }
+
+  let landing: URL;
+  try {
+    landing = new URL(evidence.location, options.siteOrigin);
+  } catch {
+    return { ok: false, message: `站点回调的跳转地址无法解析（${evidence.location.slice(0, 80)}）` };
+  }
+  if (landing.origin !== options.siteOrigin) {
+    return {
+      ok: false,
+      message: `站点回调跳转到了其他来源（${landing.origin}），${options.siteLabel} 的登录未完成`,
+    };
+  }
+  if (REFUSAL_LANDING_PATTERN.test(landing.pathname)) {
+    return {
+      ok: false,
+      message: `站点回调把浏览器送回了登录页（${landing.pathname}），登录未生效`,
+    };
+  }
+  if (options.sessionCookieCount <= 0) {
+    return {
+      ok: false,
+      message: `站点以 HTTP ${evidence.status} 回调但没有留下会话 Cookie，登录未生效`,
+    };
+  }
+
+  return { ok: true, message: 'Linux.do 重新登录完成' };
+}
+
+/**
  * Turns the OAuth callback response into a verdict. The page navigates to
  * /console regardless of the outcome, so only the API answer is trustworthy.
  */
@@ -138,6 +265,17 @@ export function judgeLinuxDoCallback(
   const reason = typeof payload?.message === 'string' && payload.message.trim()
     ? payload.message.trim()
     : '';
+  // A redirect is how the newer forks answer a *successful* handshake: they set
+  // the session cookie and bounce the browser to their console. The body of a
+  // redirect never reaches us (Playwright refuses to hand it out), so the status
+  // alone says nothing about the outcome — the caller has to read the session
+  // the redirect left behind. Judging it here would be a coin flip.
+  if (isCallbackRedirectStatus(status)) {
+    return {
+      ok: false,
+      message: `站点以跳转方式回调（HTTP ${status}），需要按站点会话状态判定`,
+    };
+  }
   if (status !== 200) {
     return { ok: false, message: `站点拒绝 Linux.do 登录：${reason || `HTTP ${status}`}` };
   }
@@ -170,15 +308,35 @@ export async function reloginWithLinuxDo(
 
   const siteOrigin = new URL(request.baseUrl).origin;
   const page = await context.newPage();
-  const captured: { callback: { status: number; body: string } | null } = { callback: null };
+  const captured: {
+    callback: { status: number; body: string } | null;
+    redirect: RedirectCallbackEvidence | null;
+  } = { callback: null, redirect: null };
   const captureCallback = (response: BrowserResponse): void => {
     if (!isCallbackResponse(response.url(), request)) return;
+    const status = response.status();
+    // Reading the body of a redirect throws, and letting that exception stand
+    // as "no callback" is exactly the bug this branch exists for: the handshake
+    // had answered, only not with the shape the reader expected. The redirect's
+    // own evidence is read instead.
+    if (isCallbackRedirectStatus(status)) {
+      captured.redirect = {
+        status,
+        location: response.headers().location || null,
+      };
+      return;
+    }
     void response
       .text()
       .then((body) => {
-        captured.callback = { status: response.status(), body };
+        captured.callback = { status, body };
       })
-      .catch(() => undefined);
+      .catch(() => {
+        // A body the browser will not hand out is still a callback. Recording it
+        // keeps the verdict on the observable parts instead of reporting that
+        // the site never answered.
+        if (!captured.callback) captured.callback = { status, body: '' };
+      });
   };
   page.on('response', captureCallback);
 
@@ -221,10 +379,26 @@ export async function reloginWithLinuxDo(
       await page.waitForTimeout(CALLBACK_POLL_INTERVAL_MS);
     }
     const settled = captured.callback;
-    if (!settled) return { ok: false, message: '授权后站点未回调 Linux.do 登录' };
-    const verdict = judgeLinuxDoCallback(settled.status, settled.body, {
-      expectedUserId: request.expectedUserId,
-    });
+    const redirect = captured.redirect;
+    if (!settled && !redirect) return { ok: false, message: '授权后站点未回调 Linux.do 登录' };
+    let verdict: LinuxDoReloginResult;
+    if (redirect) {
+      // The session the redirect just handed out lives in the browser, so the
+      // bounce has to finish before it can be counted - and before the caller
+      // harvests it.
+      await waitForSiteLanding(page, siteOrigin);
+      verdict = judgeRedirectCallback(redirect, {
+        siteOrigin,
+        siteLabel: request.siteLabel,
+        sessionCookieCount: await countSiteCookies(context, request.hosts),
+      });
+    } else if (settled) {
+      verdict = judgeLinuxDoCallback(settled.status, settled.body, {
+        expectedUserId: request.expectedUserId,
+      });
+    } else {
+      return { ok: false, message: '授权后站点未回调 Linux.do 登录' };
+    }
     // Read the balance before the tab is parked: the callback lands on the SPA,
     // which fires the site's own check-in, and this is the moment the grant - if
     // there is one today - has just landed.
@@ -344,6 +518,21 @@ export function readOAuthFlowToken(payload: unknown): string | null {
  * state, which costs one wasted same-origin request.
  */
 async function readOAuthStateInPage(page: Page): Promise<string | null> {
+  for (let attempt = 1; attempt <= OAUTH_STATE_READ_ATTEMPTS; attempt += 1) {
+    const state = await readOAuthStateInPageOnce(page);
+    if (state) return state;
+    if (attempt < OAUTH_STATE_READ_ATTEMPTS) {
+      // The sign-out left the SPA mid-bounce; a read issued against the page it
+      // was leaving comes back empty, so the probe is repeated rather than
+      // reported as a site that does not offer Linux.do login.
+      await page.waitForTimeout(IN_PAGE_READ_GAP_MS).catch(() => undefined);
+    }
+  }
+  return null;
+}
+
+/** One probe: the legacy GET first, then the rc POST flow_token. */
+async function readOAuthStateInPageOnce(page: Page): Promise<string | null> {
   const legacy = await page
     .evaluate(async (path) => {
       try {
