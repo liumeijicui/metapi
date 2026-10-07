@@ -1,6 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
 import {
@@ -232,6 +232,7 @@ export async function refreshBalance(accountId: number) {
 
   const account = rows[0].accounts;
   const site = rows[0].sites;
+  const alreadyExpired = account.status === 'expired';
 
   if (isSiteDisabled(site.status)) {
     setAccountRuntimeHealth(account.id, {
@@ -321,7 +322,12 @@ export async function refreshBalance(accountId: number) {
       reason: message,
       source: 'balance',
     });
-    if (shouldReportExpired(message)) {
+    // An account that is already `expired` has had this verdict recorded once
+    // (that is *why* it is expired). Re-announcing it on every retry would turn
+    // the hourly revival pass below into an alert firehose without adding any
+    // new information; the fresh reason is still written to the account's
+    // runtime health just above, which is what the UI shows.
+    if (shouldReportExpired(message) && !alreadyExpired) {
       await reportTokenExpired({
         accountId: account.id,
         username: account.username,
@@ -506,10 +512,18 @@ export async function refreshBalance(accountId: number) {
 }
 
 export async function refreshAllBalances() {
+  // `expired` is deliberately *included*. This pass is the only hourly job that
+  // can renew a lapsed session over HTTP (a managed sub2api refresh token, or a
+  // Linux.do re-login) and `refreshBalance()` promotes the account back to
+  // `active` the moment one of those succeeds. Selecting only `active` accounts
+  // therefore locked every expired account out of the one job that could revive
+  // it: the account was marked expired by an earlier run, and from then on the
+  // scheduler never looked at it again. `disabled` stays excluded - that is an
+  // operator decision, not a lapse.
   const rows = await db
     .select()
     .from(schema.accounts)
-    .where(eq(schema.accounts.status, 'active'))
+    .where(inArray(schema.accounts.status, ['active', 'expired']))
     .all();
 
   const results: Array<{ accountId: number; balance: number | null }> = [];

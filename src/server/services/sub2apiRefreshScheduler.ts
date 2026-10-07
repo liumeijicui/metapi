@@ -8,6 +8,12 @@ import {
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 
 const ACTIVE_STATUS = 'active';
+const EXPIRED_STATUS = 'expired';
+// An expired sub2api account is still refreshable: the managed refresh token
+// outlives the access token JWT, and the refresh call is what promotes the
+// account back to `active`. Filtering to `active` here permanently excluded the
+// very accounts that needed this pass the most.
+const REFRESHABLE_ACCOUNT_STATUSES = [ACTIVE_STATUS, EXPIRED_STATUS];
 const SUB2API_PLATFORM = 'sub2api';
 const SUB2API_REFRESH_SCHEDULER_INTERVAL_MS = 60_000;
 export const SUB2API_REFRESH_SCHEDULER_CONCURRENCY = 4;
@@ -41,7 +47,7 @@ function shouldRefreshManagedSub2ApiAccount(input: {
   nowMs: number;
 }): boolean {
   if (!isSub2ApiPlatform(input.site.platform)) return false;
-  if (normalizeLifecycleStatus(input.account.status) !== ACTIVE_STATUS) return false;
+  if (!REFRESHABLE_ACCOUNT_STATUSES.includes(normalizeLifecycleStatus(input.account.status))) return false;
   if (normalizeLifecycleStatus(input.site.status) !== ACTIVE_STATUS) return false;
 
   const managedAuth = getSub2ApiAuthFromExtraConfig(input.account.extraConfig);
@@ -60,7 +66,7 @@ export async function executeSub2ApiManagedRefreshPass(input: {
     .from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(
-      sql`${normalizedLifecycleStatusSql(schema.accounts.status)} = ${ACTIVE_STATUS}`,
+      sql`${normalizedLifecycleStatusSql(schema.accounts.status)} in ('active', 'expired')`,
       sql`${normalizedLifecycleStatusSql(schema.sites.status)} = ${ACTIVE_STATUS}`,
       sql`${normalizedPlatformSql(schema.sites.platform)} = ${SUB2API_PLATFORM}`,
     ))

@@ -217,6 +217,58 @@ describe('sub2apiRefreshScheduler', () => {
     ].sort((a, b) => a - b));
   });
 
+  it('still picks up an expired sub2api account, since the refresh token is what revives it', async () => {
+    const nowMs = Date.parse('2026-04-06T02:00:00.000Z');
+    vi.setSystemTime(nowMs);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'sub2-revive-site',
+      url: 'https://sub2-revive.example.com',
+      platform: 'sub2api',
+      status: 'active',
+    }).returning().get();
+
+    const expiredAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'expired@example.com',
+      accessToken: 'expired-access-token',
+      apiToken: null,
+      status: 'expired',
+      extraConfig: buildSub2ApiExtraConfig({
+        refreshToken: 'sub2-refresh-revive',
+        tokenExpiresAt: nowMs - 1_000,
+      }),
+    }).returning().get();
+
+    await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'disabled@example.com',
+      accessToken: 'disabled-access-token',
+      apiToken: null,
+      status: 'disabled',
+      extraConfig: buildSub2ApiExtraConfig({
+        refreshToken: 'sub2-refresh-disabled',
+        tokenExpiresAt: nowMs - 1_000,
+      }),
+    }).run();
+
+    refreshSub2ApiManagedSessionSingleflightMock.mockResolvedValue({
+      accessToken: 'revived-access-token',
+      extraConfig: buildSub2ApiExtraConfig({
+        refreshToken: 'revived-refresh-token',
+        tokenExpiresAt: nowMs + (60 * 60 * 1000),
+      }),
+    });
+
+    const result = await executeSub2ApiManagedRefreshPass({ nowMs });
+
+    expect(result).toMatchObject({ scanned: 1, refreshed: 1, failed: 0, skipped: 0 });
+    expect(result.refreshedAccountIds).toEqual([expiredAccount.id]);
+    expect(
+      refreshSub2ApiManagedSessionSingleflightMock.mock.calls.map((call) => call[0]?.account?.id),
+    ).toEqual([expiredAccount.id]);
+  });
+
   it('refreshes due sub2api accounts with bounded concurrency instead of serially', async () => {
     vi.useRealTimers();
     const nowMs = Date.parse('2026-04-06T02:00:00.000Z');
