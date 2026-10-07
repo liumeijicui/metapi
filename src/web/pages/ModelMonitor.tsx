@@ -339,9 +339,29 @@ export default function ModelMonitor() {
     }
   };
 
+  // 「重置」按钮只在真的改过筛选时可点，避免一个永远没效果的按钮。
+  const monitorFiltersActive =
+    siteFilter !== '' || modelFilter !== '' || minSuccessRate !== '';
+  const resetMonitorFilters = () => {
+    setSiteFilter('');
+    setModelFilter('');
+    setMinSuccessRate('');
+  };
+
   const models = overview?.models ?? [];
   const sites = overview?.sites ?? [];
-  const modelOptions = overview?.modelOptions ?? [];
+  // 「全部模型」这一项要说清当前是在哪个范围里全部：选了站点之后，它就是该
+  // 站点的全部模型，而不是全部站点的全部模型。
+  const selectedSiteName = siteFilter
+    ? (sites.find((site) => String(site.siteId) === siteFilter)?.siteName || '')
+    : '';
+  const modelFilterSiteLabel = selectedSiteName
+    ? `${selectedSiteName} ${tr('的全部模型')}`
+    : tr('全部模型');
+  // 模型下拉的候选由后端算好了，并且已经按站点筛过（它的 facet 只吃站点与
+  // 成功率，不吃模型），所以选了站点之后这一份就是该站点的模型。用 useMemo
+  // 保持引用稳定：下面的「清掉失效选项」要看它。
+  const modelOptions = useMemo(() => overview?.modelOptions ?? [], [overview]);
   // 站点自己就没有这个接口，属于「已知无法采集」，和真正需要关注的失败
   // 分开：默认不占版面，只在需要时展开看一眼。
   const isKnownLimited = (status: string) => status === 'unsupported' || status === 'models_only';
@@ -358,6 +378,16 @@ export default function ModelMonitor() {
     const average = rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : null;
     return { okSites, totalSites: sites.length - unsupported, unsupported, modelsOnly, average };
   }, [models, sites]);
+
+  // 站点切换后，之前选的模型很可能不在新站点的清单里。留着它只会查到空结果，
+  // 而且下拉会显示一个「候选里根本没有」的模型名（看起来就像没有跟着站点收窄）。
+  // 清单是随着响应回来的，所以在它落地之后比一次：不在就清掉，让查询回到
+  // 只按站点过滤。成功率筛选把模型挤出清单时同理 —— 那个模型本来就不该再被选。
+  useEffect(() => {
+    if (!modelFilter) return;
+    if (modelOptions.some((option) => option.modelName === modelFilter)) return;
+    setModelFilter('');
+  }, [modelFilter, modelOptions]);
 
   const windowText = overview
     ? ` (${overview.windowStartHour}:00-${overview.windowEndHour}:00)`
@@ -439,27 +469,7 @@ export default function ModelMonitor() {
       </div>
 
       <div className="card model-monitor-toolbar">
-        <div className="model-monitor-filter model-monitor-filter-model">
-          <ModernSelect
-            value={modelFilter}
-            onChange={setModelFilter}
-            options={[
-              { value: '', label: tr('全部模型') },
-              ...modelOptions.map((option) => ({
-                value: option.modelName,
-                label: option.modelName,
-                description: `${option.siteCount} ${tr('个站点')}`,
-              })),
-            ]}
-            size="sm"
-            searchable
-            placeholder={tr('全部模型')}
-            searchPlaceholder={tr('搜索模型名')}
-            emptyLabel={tr('没有匹配的模型')}
-            menuMaxHeight={320}
-            data-testid="model-monitor-model-select"
-          />
-        </div>
+        {/* 站点在前、模型在后：模型候选是按站点收窄的，先定站点再挑模型才顺。 */}
         <div className="model-monitor-filter model-monitor-filter-site">
           <ModernSelect
             value={siteFilter}
@@ -484,11 +494,44 @@ export default function ModelMonitor() {
             data-testid="model-monitor-site-select"
           />
         </div>
+        <div className="model-monitor-filter model-monitor-filter-model">
+          <ModernSelect
+            value={modelFilter}
+            onChange={setModelFilter}
+            options={[
+              { value: '', label: modelFilterSiteLabel },
+              ...modelOptions.map((option) => ({
+                value: option.modelName,
+                label: option.modelName,
+                description: `${option.siteCount} ${tr('个站点')}`,
+              })),
+            ]}
+            size="sm"
+            searchable
+            placeholder={tr('全部模型')}
+            searchPlaceholder={tr('搜索模型名')}
+            emptyLabel={selectedSiteName
+              ? `${selectedSiteName} ${tr('没有采集到模型')}`
+              : tr('没有匹配的模型')}
+            menuMaxHeight={320}
+            data-testid="model-monitor-model-select"
+          />
+        </div>
         <select value={minSuccessRate} onChange={(event) => setMinSuccessRate(event.target.value)}>
           {SUCCESS_FILTERS.map((option) => (
             <option key={option.value} value={option.value}>{tr(option.label)}</option>
           ))}
         </select>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={resetMonitorFilters}
+          disabled={!monitorFiltersActive}
+          style={{ border: '1px solid var(--color-border)', padding: '8px 14px', whiteSpace: 'nowrap' }}
+          data-testid="model-monitor-reset-filters"
+        >
+          {tr('重置筛选')}
+        </button>
         <select value={sortKey} onChange={(event) => setSortKey(event.target.value)}>
           {SORT_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>{tr(option.label)}</option>

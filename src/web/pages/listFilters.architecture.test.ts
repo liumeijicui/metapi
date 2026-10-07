@@ -42,4 +42,21 @@ describe('列表菜单字段查询筛选', () => {
     expect(tokens).toContain('return [...filteredTokens].sort(');
     expect(tokens).toContain('const resetTokenFilters = () => {');
   });
+
+  it('模型监控：站点筛选在模型之前，模型候选随站点收窄，且有重置按钮', () => {
+    const monitor = read('src/web/pages/ModelMonitor.tsx');
+    // 「全部站点」要排在「全部模型」前面。
+    expect(monitor.indexOf('model-monitor-filter-site')).toBeLessThan(
+      monitor.indexOf('model-monitor-filter-model'),
+    );
+    // 模型候选直接吃后端按站点收窄后的清单，不再自行拼全量。
+    expect(monitor).toContain('const modelOptions = useMemo(() => overview?.modelOptions ?? [], [overview]);');
+    // 换站点后旧模型会不在候选里，要自动清掉，避免查到空结果。
+    expect(monitor).toContain('if (modelOptions.some((option) => option.modelName === modelFilter)) return;');
+    // 重置要一次清空三项筛选。
+    expect(monitor).toContain('const resetMonitorFilters = () => {');
+    expect(monitor).toContain("setSiteFilter('');");
+    expect(monitor).toContain("setModelFilter('');");
+    expect(monitor).toContain("setMinSuccessRate('');");
+  });
 });

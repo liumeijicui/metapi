@@ -61,4 +61,20 @@ describe('ModelMonitor 对话按钮', () => {
     // 手动输入框仍然保留
     expect(modal).toContain('<textarea');
   });
+
+  it('对话结束后显示上游声明的结束原因与用量，便于分辨是上游截断还是我们断了', () => {
+    // 上游截断内容却照样回 finish_reason=stop + [DONE] 时（胖猫的
+    // deepseek-v4.1-flash 就是），光看内容分不出是谁停的，所以要把上游
+    // 自己声明的结束原因、token 用量、以及有没有结束标记都留在气泡下面。
+    expect(modal).toContain('let finishReason: string | null = null;');
+    expect(modal).toContain('let completionTokens: number | null = null;');
+    expect(modal).toContain('let sawDone = false;');
+    expect(modal).toContain("if (parsed.data === '[DONE]') {");
+    expect(modal).toContain('if (finishChoice?.finish_reason) finishReason = String(finishChoice.finish_reason);');
+    expect(modal).toContain("if (typeof payload?.usage?.completion_tokens === 'number')");
+    expect(modal).toContain('copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone };');
+    expect(modal).toContain("tr('上游结束原因')");
+    expect(modal).toContain("tr('上游没有发送结束标记，这轮可能被中断')");
+    expect(modal).toContain('model-chat-finish');
+  });
 });

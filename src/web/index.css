@@ -6185,6 +6185,13 @@ a.model-monitor-site-name:hover {
   word-break: break-word;
 }
 
+/* 上游自己声明的结束原因与用量：内容明显没写完时，这行字说明是上游停的。 */
+.model-chat-finish {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
 .model-chat-reasoning {
   font-size: 12px;
   color: var(--color-text-secondary);

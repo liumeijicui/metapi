@@ -32,6 +32,17 @@ type ChatMessage = {
   content: string;
   reasoning?: string;
   error?: boolean;
+  /**
+   * 这一轮流是怎么结束的（只对助手消息有意义）。
+   *
+   * 上游把回答截断了却照样回 `finish_reason: stop` + `[DONE]` 时（胖猫的
+   * deepseek-v4.1-flash 就是这样），页面上光看内容分不出是上游停的还是我们断的，
+   * 所以把上游自己声明的结束原因和 token 用量留在气泡下面。
+   */
+  finishReason?: string | null;
+  completionTokens?: number | null;
+  /** 有没有收到 `[DONE]`。没收到就说明这轮不是正常收尾。 */
+  sawDone?: boolean;
 };
 
 /** 一条可按直连的凭据：站点账号自己的 JWT，或账号下的 sk- 令牌。 */
@@ -264,6 +275,11 @@ export default function ModelChatModal({
       const decoder = new TextDecoder('utf-8');
       const reader = response.body.getReader();
       let buffer = '';
+      // 只记录「这轮怎么结束的」，用来把责任写清楚：上游声明的结束原因、用量、
+      // 有没有结束标记。上游截断内容却回 stop + [DONE] 时，只有这行字能说明白。
+      let finishReason: string | null = null;
+      let completionTokens: number | null = null;
+      let sawDone = false;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -273,7 +289,11 @@ export default function ModelChatModal({
         buffer = blocks.pop() || '';
         for (const block of blocks) {
           const parsed = parseSseBlock(block);
-          if (!parsed.data || parsed.data === '[DONE]') continue;
+          if (!parsed.data) continue;
+          if (parsed.data === '[DONE]') {
+            sawDone = true;
+            continue;
+          }
           let payload: any;
           try {
             payload = JSON.parse(parsed.data);
@@ -281,10 +301,23 @@ export default function ModelChatModal({
             continue;
           }
           if (payload?.error) throw new Error(String(payload.error?.message || payload.error));
+          const finishChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+          if (finishChoice?.finish_reason) finishReason = String(finishChoice.finish_reason);
+          if (typeof payload?.usage?.completion_tokens === 'number') {
+            completionTokens = payload.usage.completion_tokens;
+          }
           const delta = readOpenAiDelta(payload);
           if (delta.content || delta.reasoning) applyDelta(delta);
         }
       }
+      setMessages((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last && last.role === 'assistant') {
+          copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone };
+        }
+        return copy;
+      });
     } catch (error: any) {
       const message = error?.name === 'AbortError'
         ? tr('已停止')
@@ -420,6 +453,13 @@ export default function ModelChatModal({
                 <div className="model-chat-content">
                   {item.content || (sending && index === messages.length - 1 ? tr('生成中…') : '')}
                 </div>
+                {item.role === 'assistant' && item.finishReason !== undefined ? (
+                  <div className="model-chat-finish">
+                    {item.sawDone
+                      ? `${tr('上游结束原因')}: ${item.finishReason || tr('未声明')}${item.completionTokens == null ? '' : ` · ${tr('输出')} ${item.completionTokens} tokens`}`
+                      : tr('上游没有发送结束标记，这轮可能被中断')}
+                  </div>
+                ) : null}
               </div>
             ))
           )}
