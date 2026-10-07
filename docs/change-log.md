@@ -1,3 +1,25 @@
+### 71. 登记「42 API」（api.42x.shop）
+
+- **类型**：站点登记（无代码改动）
+- **需求来源**：本会话需求（“帮我登记这个站：https://api.42x.shop/dashboard/overview，linux do快捷登录，登录访问令牌：qWuB35…，有签到”）
+- **站点事实（实测）**：
+  - `system_name = 42 API`、`version = v1.0.0-rc.15`（new-api rc 构建）；**直连可用**（`GET /api/status` 200，无 CF 盾），站点未开系统代理。
+  - `linuxdo_oauth: true`（`linuxdo_client_id = mOZflJ7ET1M4sJPhhzxUXX826AR1cbdQ`、`linuxdo_minimum_trust_level = 1`）、`github_oauth: false`、`turnstile_check: false`、`password_login_enabled: true`；本机 Linux.do（`linux_do_id 367936`）在该站绑的是用户 `3145215575`（`platformUserId 7314`）。
+  - 签到：`checkin_enabled: true`，奖励区间 `min_quota 100000 ~ max_quota 1000000`（约 $0.2~$2）。
+  - **登录页是 `/sign-in`**（`/login`、`/console` 只是 404 的 SPA 壳）；页面上「Continue with LinuxDO」**默认 disabled，必须先勾选用户协议复选框**才会激活（自动化里得先点一次 `button[role="checkbox"]`）——这是本站唯一踩到的坑。
+- **登记结果**：
+  - 站点 **#58 42 API**（平台 `new-api`，未开系统代理）。
+  - 账号 **#44**：用户名 `3145215575`、`platformUserId 7314`、访问令牌的 `session` 模式、`linux_do_id 367936`、余额约 **$32.59**（`quota 142.81 / used 110.22`）、`checkinEnabled: true`。
+  - 令牌：接管站上已有密钥 `李`（站点侧 token id 4213，`token_group = www`，无限额度），无需新建。
+  - 路由 **69 条**（由后台同步任务生成）；建号时会话清理结果 `no-other-session`（无多余会话可删）。
+- **验证（全部实测）**：
+  - 签到：`POST /api/checkin/trigger/44` → `{"success":true,"message":"签到成功","reward":"1.424456"}`；上游 `checked_in_today: true`、`checkin_count: 1`（`quota_awarded 712228`）；余额 `$31.161908 → $32.586364`。
+  - 直连对话：`glm-4.5-flash`、`qwen3.8-flash-next` 经 `/api/model-monitor/chat/stream` 均正常流式返回。
+  - **自动重登演练**：写入 `relogin: {provider:"linuxdo"}` 标记后，把凭证换成死值并置 `expired` → `POST /api/accounts/44/balance` → **67 秒后自动重登成功**：凭证被换成新值、状态回 `active`、余额正常，`extraConfig.relogin.lastReloginAt` 已更新，`sessionHygiene: no-other-session`。
+- **站点侧（不是本系统）的问题**：部分模型目前打不通，全是站点自己的上游渠道故障，与登记无关——`deepseek-v4-flash` 报 `credit insufficient balance: balance=0`、`gpt-5.6-luna`/`gpt-5.2` 报 `Invalid API key`、`kimi-k3` 报 `do request failed`。
+- **主要文件**：仅数据库登记，无源码改动（变更日志除外）。
+- **状态**：已完成
+
 ### 70. agentrouter 对话一发起就被退出登录：两处修复（上游 401 被当成自己登录失效 + 站点按客户端指纹卡推理接口）
 
 - **类型**：缺陷修复
