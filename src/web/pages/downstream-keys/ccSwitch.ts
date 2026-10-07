@@ -144,3 +144,78 @@ export function buildManualConfigSnippet(input: CcSwitchDeepLinkInput): string {
     ...(model ? [`export ANTHROPIC_MODEL="${model}"`] : []),
   ].join('\n');
 }
+
+/** 候选选项的形状与 `Combobox` 的 `ComboboxOption` 结构一致（此处不 import React 组件，保持纯函数可测）。 */
+export type CcSwitchModelOption = {
+  value: string;
+  label: string;
+  description?: string;
+};
+
+/** 一条路由在弹窗里用作候选模型的来源。 */
+export type CcSwitchModelSource = {
+  modelPattern?: string | null;
+  displayName?: string | null;
+};
+
+/**
+ * 通配/正则路由（`re:` 前缀、含 `*` 或 `?`）不是客户端能直接写进配置的模型名，
+ * 因此不作为候选；只有精确模型名才会出现在下拉里。
+ */
+export function isSelectableModelName(pattern: string): boolean {
+  const normalized = String(pattern ?? '').trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[*?]/.test(normalized);
+}
+
+/**
+ * 汇总下拉里展示的模型候选：把我们已获取的全部模型（路由里的精确模型名）与
+ * 额外名字（例如该下游密钥自己的模型白名单）合并，按名字去重并排序。
+ * `displayName` 仅作为副标题展示，写进客户端的始终是模型名本身。
+ */
+export function buildCcSwitchModelOptions(
+  sources: CcSwitchModelSource[] = [],
+  extraNames: string[] = [],
+): CcSwitchModelOption[] {
+  const byKey = new Map<string, CcSwitchModelOption>();
+
+  const push = (name: string, displayName?: string | null) => {
+    const value = String(name ?? '').trim();
+    if (!isSelectableModelName(value)) return;
+    const key = value.toLowerCase();
+    const display = String(displayName ?? '').trim();
+    const description = display && display.toLowerCase() !== key ? display : undefined;
+    const existing = byKey.get(key);
+    if (existing) {
+      if (!existing.description && description) existing.description = description;
+      return;
+    }
+    byKey.set(key, description ? { value, label: value, description } : { value, label: value });
+  };
+
+  for (const source of sources) push(source?.modelPattern ?? '', source?.displayName);
+  for (const name of extraNames) push(name);
+
+  return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** 把额外名字并进已有的候选里（同名去重，保留原有副标题）。 */
+export function mergeCcSwitchModelOptions(
+  options: CcSwitchModelOption[] = [],
+  extraNames: string[] = [],
+): CcSwitchModelOption[] {
+  const byKey = new Map<string, CcSwitchModelOption>();
+  for (const option of options) {
+    const value = String(option?.value ?? '').trim();
+    if (!isSelectableModelName(value)) continue;
+    byKey.set(value.toLowerCase(), option);
+  }
+  for (const raw of extraNames) {
+    const value = String(raw ?? '').trim();
+    if (!isSelectableModelName(value)) continue;
+    const key = value.toLowerCase();
+    if (!byKey.has(key)) byKey.set(key, { value, label: value });
+  }
+  return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
+}

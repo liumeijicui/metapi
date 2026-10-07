@@ -18,6 +18,7 @@ import DownstreamKeyEditorModal, {
 } from './downstream-keys/DownstreamKeyEditorModal.js';
 import DownstreamKeyDrawer from './downstream-keys/DownstreamKeyDrawer.js';
 import DownstreamKeyCcSwitchModal from './downstream-keys/DownstreamKeyCcSwitchModal.js';
+import { buildCcSwitchModelOptions } from './downstream-keys/ccSwitch.js';
 import {
   formatCompactTokens,
   formatIso,
@@ -627,6 +628,11 @@ export default function DownstreamKeys() {
   }, [editorOpen]);
 
   const rawItemMap = useMemo(() => new Map(rawItems.map((item) => [item.id, item])), [rawItems]);
+  // 已获取的全部模型（精确模型名），作为 CC Switch 导入时的下拉候选。
+  const ccSwitchModelOptions = useMemo(
+    () => buildCcSwitchModelOptions(routeOptions),
+    [routeOptions],
+  );
   const routeMap = useMemo(() => new Map(routeOptions.map((item) => [item.id, item])), [routeOptions]);
 
   const managedItems = useMemo<ManagedItem[]>(() => (
@@ -1467,6 +1473,7 @@ export default function DownstreamKeys() {
         open={Boolean(ccSwitchTarget)}
         onClose={() => setCcSwitchTarget(null)}
         item={ccSwitchTarget}
+        modelOptions={ccSwitchModelOptions}
       />
     </div>
   );

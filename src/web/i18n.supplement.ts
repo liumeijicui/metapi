@@ -965,4 +965,8 @@ export const zhToEnSupplemental: Record<string, string> = {
   '写入 ANTHROPIC_BASE_URL，走 /v1/messages': 'Writes ANTHROPIC_BASE_URL and uses /v1/messages',
   '写入 config.toml 的 base_url（自动补 /v1），走 /v1/responses': 'Writes base_url into config.toml (adds /v1) and uses /v1/responses',
   '写入 GOOGLE_GEMINI_BASE_URL，走 /v1beta/models': 'Writes GOOGLE_GEMINI_BASE_URL and uses /v1beta/models',
+  // ==== CC Switch 导入：模型下拉 ====
+  '下拉是我们已获取的全部模型，可按名字搜索，也可以直接输入别的': 'The dropdown lists every model we have collected — search by name, or just type another one',
+  '没有匹配的模型，直接输入即可': 'No matching model — just type one',
+  '共 ${candidateModels.length} 个可选模型${keyModelNames.length > 0 ? `，其中 ${keyModelNames.length} 个属于该密钥的白名单` : \'\'}': '${candidateModels.length} models available${keyModelNames.length > 0 ? `, ${keyModelNames.length} of them on this key\'s allowlist` : \'\'}',
 };

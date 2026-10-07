@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCcSwitchDeepLink,
+  buildCcSwitchModelOptions,
+  isSelectableModelName,
+  mergeCcSwitchModelOptions,
   buildManualConfigSnippet,
   normalizeGatewayBaseUrl,
   resolveCcSwitchEndpoint,
@@ -144,5 +147,69 @@ describe('buildManualConfigSnippet', () => {
     });
     expect(text).toContain('GOOGLE_GEMINI_BASE_URL="https://gw.example.com"');
     expect(text).toContain('GEMINI_API_KEY="sk-abcdef123456"');
+  });
+});
+
+describe('isSelectableModelName', () => {
+  it('rejects wildcard and regex route patterns', () => {
+    expect(isSelectableModelName('re:^gpt-.*$')).toBe(false);
+    expect(isSelectableModelName('gpt-*')).toBe(false);
+    expect(isSelectableModelName('claude-?')).toBe(false);
+    expect(isSelectableModelName('   ')).toBe(false);
+  });
+
+  it('accepts ordinary model names', () => {
+    expect(isSelectableModelName('deepseek-v4-flash')).toBe(true);
+    expect(isSelectableModelName('gpt-6-astra')).toBe(true);
+  });
+});
+
+describe('buildCcSwitchModelOptions', () => {
+  it('lists every collected model, deduped and sorted', () => {
+    const options = buildCcSwitchModelOptions([
+      { modelPattern: 'gpt-6-astra' },
+      { modelPattern: 'deepseek-v4-flash' },
+      { modelPattern: 'GPT-6-Astra' },
+    ]);
+
+    expect(options.map((option) => option.value)).toEqual(['deepseek-v4-flash', 'gpt-6-astra']);
+  });
+
+  it('drops group/wildcard routes and keeps the display name as a subtitle', () => {
+    const options = buildCcSwitchModelOptions([
+      { modelPattern: 're:^gpt.*', displayName: 'GPT 全家桶' },
+      { modelPattern: 'glm-4.5-flash', displayName: 'GLM 4.5 Flash' },
+      { modelPattern: 'kimi-k3', displayName: 'kimi-k3' },
+    ]);
+
+    expect(options).toEqual([
+      { value: 'glm-4.5-flash', label: 'glm-4.5-flash', description: 'GLM 4.5 Flash' },
+      { value: 'kimi-k3', label: 'kimi-k3' },
+    ]);
+  });
+
+  it('merges extra names such as the key allowlist', () => {
+    const options = buildCcSwitchModelOptions(
+      [{ modelPattern: 'gpt-6-astra' }],
+      ['自定义模型', 'gpt-6-astra'],
+    );
+    expect(options.map((option) => option.value)).toEqual(['gpt-6-astra', '自定义模型']);
+  });
+});
+
+describe('mergeCcSwitchModelOptions', () => {
+  it('appends unknown names and keeps existing subtitles', () => {
+    const merged = mergeCcSwitchModelOptions(
+      [{ value: 'glm-4.5-flash', label: 'glm-4.5-flash', description: 'GLM' }],
+      ['z-model', 'glm-4.5-flash'],
+    );
+    expect(merged).toEqual([
+      { value: 'glm-4.5-flash', label: 'glm-4.5-flash', description: 'GLM' },
+      { value: 'z-model', label: 'z-model' },
+    ]);
+  });
+
+  it('skips blank and wildcard names', () => {
+    expect(mergeCcSwitchModelOptions([], ['  ', 'gpt-*'])).toEqual([]);
   });
 });

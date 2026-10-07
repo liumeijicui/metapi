@@ -1,12 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
+import Combobox from '../../components/Combobox.js';
 import { useToast } from '../../components/Toast.js';
 import {
   buildCcSwitchDeepLink,
   buildManualConfigSnippet,
   CC_SWITCH_APP_OPTIONS,
+  mergeCcSwitchModelOptions,
   resolveDefaultGatewayBaseUrl,
   type CcSwitchApp,
+  type CcSwitchModelOption,
 } from './ccSwitch.js';
 
 /** Only the fields the deep link needs, so both list rows and overview items fit. */
@@ -22,6 +25,8 @@ type Props = {
   open: boolean;
   onClose: () => void;
   item: CcSwitchKeyTarget | null;
+  /** 我们已获取的全部模型，作为下拉候选（仍允许直接输入）。 */
+  modelOptions?: CcSwitchModelOption[];
 };
 
 async function copyToClipboard(text: string): Promise<void> {
@@ -61,7 +66,7 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: Reac
   );
 }
 
-export default function DownstreamKeyCcSwitchModal({ open, onClose, item }: Props) {
+export default function DownstreamKeyCcSwitchModal({ open, onClose, item, modelOptions = [] }: Props) {
   const toast = useToast();
   const [app, setApp] = useState<CcSwitchApp>('claude');
   const [baseUrl, setBaseUrl] = useState(() => resolveDefaultGatewayBaseUrl());
@@ -80,9 +85,15 @@ export default function DownstreamKeyCcSwitchModal({ open, onClose, item }: Prop
   }, [open, item?.id]);
 
   const fullKey = (item?.key || '').trim();
-  const modelOptions = useMemo(
+  const keyModelNames = useMemo(
     () => (Array.isArray(item?.supportedModels) ? item.supportedModels.filter(Boolean) : []),
     [item?.supportedModels],
+  );
+
+  // 全部模型（我们已获取的）+ 该密钥自己的白名单，同一个下拉里挑。
+  const candidateModels = useMemo(
+    () => mergeCcSwitchModelOptions(modelOptions, keyModelNames),
+    [keyModelNames, modelOptions],
   );
 
   const deepLink = useMemo(
@@ -226,18 +237,20 @@ export default function DownstreamKeyCcSwitchModal({ open, onClose, item }: Prop
         </div>
 
         <div>
-          <FieldLabel hint="可下拉选该密钥允许的模型，也可直接输入">模型（可选）</FieldLabel>
-          <input
-            style={inputStyle}
-            list="ccswitch-model-options"
+          <FieldLabel hint="下拉是我们已获取的全部模型，可按名字搜索，也可以直接输入别的">模型（可选）</FieldLabel>
+          <Combobox
             value={model}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={setModel}
+            options={candidateModels}
+            allowCustom
             placeholder="留空则由客户端决定"
-            spellCheck={false}
+            emptyLabel="没有匹配的模型，直接输入即可"
+            menuMaxHeight={280}
+            data-testid="ccswitch-model-combobox"
           />
-          <datalist id="ccswitch-model-options">
-            {modelOptions.map((option) => <option key={option} value={option} />)}
-          </datalist>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>
+            共 {candidateModels.length} 个可选模型{keyModelNames.length > 0 ? `，其中 ${keyModelNames.length} 个属于该密钥的白名单` : ''}
+          </div>
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>

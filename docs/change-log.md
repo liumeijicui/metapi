@@ -1,3 +1,17 @@
+### 73. CC Switch 导入的模型改成带搜索的下拉，候选＝已获取的全部模型
+
+- **类型**：功能增强（承接第 72 条）
+- **需求来源**：本会话需求（“导入到 CC Switch 的模型搞个带搜索的下拉，我们获取的模型都显示在上面，由别人自行选择”）
+- **改法**：
+  - 把原来的纯文本输入框换成项目里既有的 `Combobox`（可搜索 + 可直接输入，和「模型转发」「上游模型名」两处同款），候选来自 `GET /api/routes/lite` 里我们已获取的全部模型名。
+  - 新增 `buildCcSwitchModelOptions()` / `mergeCcSwitchModelOptions()` / `isSelectableModelName()` 三个纯函数：过滤掉 `re:` 正则与含 `*`/`?` 的通配路由（这类不是客户端能写进配置的模型名），按名字去重排序，并把该下游密钥自己的模型白名单并进同一个下拉。
+  - 弹窗副标题实时显示候选总数与白名单命中数；下拉里 `displayName` 作为副标题展示，写进客户端的始终是模型名本身。
+  - 仍保留自由输入（`allowCustom`），候选只是提示；留空则交给客户端决定。
+- **实测（本机 711 条路由）**：弹窗显示「共 704 个可选模型」（7 条被过滤掉的是非精确名）；打开下拉渲染 704 项，输入 `glm-4.5` 过滤到 1 项并选中，深链接 `model=glm-4.5-flash`；输入 `my-custom-model` 回车后 `model=my-custom-model`，自由输入未被破坏。
+- **主要文件**：`src/web/pages/downstream-keys/ccSwitch.ts`、`src/web/pages/downstream-keys/ccSwitch.test.ts`（21 例）、`src/web/pages/downstream-keys/DownstreamKeyCcSwitchModal.tsx`、`src/web/pages/DownstreamKeys.tsx`、`src/web/i18n.supplement.ts`。
+- **验证**：`tsconfig.web.json` / `tsconfig.web.test.json` 通过；`vitest` 21 例全绿；前端已构建、服务已重启。
+- **状态**：已完成
+
 ### 72. 下游密钥支持一键导入 CC Switch（ccswitch:// 深链接）
 
 - **类型**：功能新增
