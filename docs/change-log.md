@@ -1,3 +1,30 @@
+### 72. 下游密钥支持一键导入 CC Switch（ccswitch:// 深链接）
+
+- **类型**：功能新增
+- **需求来源**：本会话需求（“下游密钥里好像没有导入到 ccswitch 的功能，帮我加一下吧”）
+- **做什么**：在下游密钥列表（桌面行操作 + 移动端卡片操作）加「导入 CC Switch」入口，弹窗里选接入客户端（Claude Code / Codex CLI / Gemini CLI）、确认网关地址、可选模型、是否导入后立即切换，然后一键生成并打开 `ccswitch://` 深链接；CC Switch 未安装时提供「复制导入链接」与「复制手动配置」两条退路。
+- **为什么这样做**：CC Switch 的 v1 供应商导入协议就是深链接，不需要后端参与——`ccswitch://v1/import?resource=provider&app=…&name=…&endpoint=…&apiKey=…&homepage=…&enabled=…`。全部逻辑在前端组装，避免把下游密钥明文经服务端再绕一圈。
+- **端点差异（实测 CC Switch 源码 `src-tauri/src/deeplink/provider.rs`）**：
+  | 客户端 | CC Switch 写入的变量 | 需要的 base URL |
+  | --- | --- | --- |
+  | Claude Code | `ANTHROPIC_BASE_URL` | 根地址（客户端自拼 `/v1/messages`） |
+  | Codex CLI | `config.toml` 的 `base_url` | **必须带 `/v1`**（客户端自拼 `/responses`） |
+  | Gemini CLI | `GOOGLE_GEMINI_BASE_URL` | 根地址（客户端自拼 `/v1beta/...`） |
+  所以只有 Codex 那条要补 `/v1`，这在 `resolveCcSwitchEndpoint()` 里做。
+- **两条硬性约束**：链接里不能出现空格（统一编码成 `%20`，不用 `+`）；`name`/`apiKey`/`baseUrl` 任一为空就不生成链接，按钮置灰，避免交给 CC Switch 一个必然被拒的地址。
+- **主要文件**：
+  - `src/web/pages/downstream-keys/ccSwitch.ts`（新增）：深链接与手动配置的纯函数。
+  - `src/web/pages/downstream-keys/ccSwitch.test.ts`（新增）：14 例，覆盖三个客户端的端点规则、空格编码、缺失字段、Codex 的 `/v1`。
+  - `src/web/pages/downstream-keys/DownstreamKeyCcSwitchModal.tsx`（新增）：弹窗。
+  - `src/web/pages/DownstreamKeys.tsx`：桌面/移动端入口 + 弹窗挂载。
+  - `src/web/i18n.supplement.ts`：新文案的英文映射（严格英文模式下不会出现中文）。
+- **验证**：
+  - `npx tsc -p tsconfig.web.json --noEmit`、`tsconfig.web.test.json`、`tsconfig.web.test.json` 全通过；`vitest` 该模块 14 例、下游密钥页既有 12 例、i18n 5 例全绿。
+  - 托管浏览器实跑 `http://127.0.0.1:4000/downstream-keys`：点入口 → 弹窗打开 → 生成的链接为 `ccswitch://v1/import?...&resource=provider&app=claude&enabled=true`，切到 Codex CLI 后 `endpoint` 变成 `http://127.0.0.1:4000/v1`，符合预期。
+  - 用现成的下游密钥按三种客户端的真实路径各打一次：`/v1/messages`（`x-api-key`）200；`/v1beta/models?key=` 200；`/v1/responses` 用根地址 + `/v1` 能到达上游（返回的是上游业务 400，说明链路本身通）。
+- **状态**：已完成
+- **说明**：本轮未改动 `/home/app/metapi` 以外任何东西；上游站点侧问题（如第 71 条的渠道故障）与本条无关。
+
 ### 71. 登记「42 API」（api.42x.shop）
 
 - **类型**：站点登记（无代码改动）

@@ -17,6 +17,7 @@ import DownstreamKeyEditorModal, {
   type DownstreamSiteOption,
 } from './downstream-keys/DownstreamKeyEditorModal.js';
 import DownstreamKeyDrawer from './downstream-keys/DownstreamKeyDrawer.js';
+import DownstreamKeyCcSwitchModal from './downstream-keys/DownstreamKeyCcSwitchModal.js';
 import {
   formatCompactTokens,
   formatIso,
@@ -498,6 +499,7 @@ export default function DownstreamKeys() {
   const [exclusionSiteOptions, setExclusionSiteOptions] = useState<DownstreamSiteOption[]>([]);
   const [exclusionCredentialOptions, setExclusionCredentialOptions] = useState<DownstreamCredentialOption[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [ccSwitchTarget, setCcSwitchTarget] = useState<ManagedItem | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [showFilters, setShowFilters] = useState(false);
@@ -1241,6 +1243,7 @@ export default function DownstreamKeys() {
                     <>
                       <button className="btn btn-link" onClick={() => { setSelectedId(row.id); setDrawerOpen(true); }}>查看</button>
                       <button className="btn btn-link" onClick={() => openEdit(row)}>编辑</button>
+                      <button className="btn btn-link" onClick={() => setCcSwitchTarget(row)}>导入 CC Switch</button>
                       <button className="btn btn-link" onClick={() => void toggleEnabled(row)} disabled={loadingToggle}>{loadingToggle ? '处理中...' : (row.enabled ? '禁用' : '启用')}</button>
                       <button className="btn btn-link" onClick={() => void resetUsage(row)} disabled={loadingReset}>{loadingReset ? '处理中...' : '清零用量'}</button>
                       <button className="btn btn-link btn-link-danger" onClick={() => setDeleteConfirm({ mode: 'single', item: row })} disabled={loadingDelete}>{loadingDelete ? '处理中...' : '删除'}</button>
@@ -1337,6 +1340,7 @@ export default function DownstreamKeys() {
                         <div className="accounts-row-actions" style={{ justifyContent: 'flex-end' }}>
                           <button className="btn btn-link" onClick={() => { setSelectedId(row.id); setDrawerOpen(true); }}>查看</button>
                           <button className="btn btn-link" onClick={() => openEdit(row)}>编辑</button>
+                          <button className="btn btn-link" onClick={() => setCcSwitchTarget(row)}>导入 CC Switch</button>
                           <button className="btn btn-link" onClick={() => void toggleEnabled(row)} disabled={loadingToggle}>{loadingToggle ? '处理中...' : (row.enabled ? '禁用' : '启用')}</button>
                           <button className="btn btn-link" onClick={() => void resetUsage(row)} disabled={loadingReset}>{loadingReset ? '处理中...' : '清零用量'}</button>
                           <button className="btn btn-link btn-link-danger" onClick={() => setDeleteConfirm({ mode: 'single', item: row })} disabled={loadingDelete}>{loadingDelete ? '处理中...' : '删除'}</button>
@@ -1457,6 +1461,12 @@ export default function DownstreamKeys() {
         onClose={() => setDrawerOpen(false)}
         item={selectedItem}
         initialRange={range}
+      />
+
+      <DownstreamKeyCcSwitchModal
+        open={Boolean(ccSwitchTarget)}
+        onClose={() => setCcSwitchTarget(null)}
+        item={ccSwitchTarget}
       />
     </div>
   );
