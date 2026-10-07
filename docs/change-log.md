@@ -1,3 +1,33 @@
+### 82. 新路由「连续上游失败自动降级到最低优先级，成功即恢复」：重试自动切到其他源
+
+- **类型**：需求 + 选路健壮性
+- **需求来源**：本会话需求（“帮我看看新路由有没有这个机智，比如连续10次调用源站返回类似400的错误，就将该渠道放到优先最低的位置，后续也这样做”；“我的要求就是重试之后能自动切到其他源就行”）
+- **背景**：新路由（`forward:` 前缀）此前只有「失败计数 + 冷却退避」这一套 —— 通道失败进冷却（`cooldown_until`），冷却期内不参与选路，到期靠探测恢复。它有两个缺口：(1) `failCount` **只增不减**（`recordSuccess` 只清冷却、不清计数），退避公式 `15s × fib(failCount)` 累计到约 27 次后，每次失败都直接给 30 天冷却，等于事实性下线且极难恢复；(2) 无冷却时，连续失败的上游仍按原优先级参与选路，重试未必切到别的源。
+- **口径决策**（按用户“类似 400 也算”“重试后能自动切到其他源”定）：
+  1. 计数用**全新字段** `consecutive_upstream_failures`，与历史的 `failCount` **解耦** —— 成功一次即清零，不会累计到 30 天冷却；`failCount` 的退避逻辑保持原样不动，避免影响既有行为。
+  2. **任何上游失败都计数**（含 4xx「类似 400」、5xx、超时、连接错误）。理由：请求体是同一份代码拼出来的，别的源能过而这个源连续 10 次过不了，那它对「我们」就等于不可用；而真正偶发的请求错误几乎不可能连续 10 次，且成功一次就清零，误伤有限。曾短暂实现过按错误类型过滤的 `isUpstreamFaultForAutoDemotion()`（只算 5xx/408/429/401/403），按用户口径已删除。
+  3. **降级 ≠ 禁用**：只是把该通道 priority 压到本路由所有通道之后（`max(priority) + 1`），不摘除、不置冷却；其他源都不可用时它仍会被选中，避免“全挂”。
+  4. **成功即恢复**：成功一次即清计数、清降级标记，并把 priority 还原成降级前的值。
+- **改动**：
+  1. 表 `route_channels` 新增 3 列：`consecutive_upstream_failures`（INTEGER NOT NULL DEFAULT 0，成功清零）、`auto_demoted_at`（TEXT，非空 = 已降级，也是页面判定依据）、`priority_before_auto_demotion`（INTEGER，降级前原优先级，用于恢复）。迁移 `drizzle/0032_hesitant_silver_samurai.sql` + 快照；`routeGroupingSchemaCompatibility.ts` 补 3 条三方言 `ALTER TABLE ... ADD COLUMN`，老库启动自动补列。
+  2. `config.ts` 新增 `proxyAutoDemoteFailureThreshold`（env `PROXY_AUTO_DEMOTE_FAILURE_THRESHOLD`，默认 **10**，**0 = 关闭**）。
+  3. `tokenRouter.ts`：
+     - 新增 `resolveAutoDemotedPriority(routeId)` —— 取本路由所有通道 priority 的 `max + 1`，**幂等**，反复失败不会越压越深。
+     - `recordFailure`：每次失败 `consecutive_upstream_failures + 1`；达到阈值且尚未降级时打降级戳（记原 priority、`auto_demoted_at`、priority 压到最低），写库 + 同步内存缓存 + `invalidateRouteScopedCache`（优先级变了必须重建匹配缓存）。
+     - `recordSuccess` / `recordProbeSuccess`（冷却探测恢复成功）：复位三字段并还原 priority（有变化则 invalidate 缓存）。
+     - `clearChannelFailureState`（手动清失败状态）：先按行读原 priority 逐条还原，再统一清 0/NULL。
+     - `getRoundRobinCandidates`：轮询策略本来忽略 priority，这里**显式加降级维度** `demotionOrder`，保证降级在轮询下也生效。
+     - 新增 `describeAutoDemotion()`：把「已降级通道数」写进路由决策说明（debug summary + 前端可见）。
+  4. `modelForwardService.ts`：手动保存转发顺序 = **人工复位降级**（更新已存在通道时一并把三字段清 0/NULL）；`listModelForwardRules` 透出 `autoDemotedAt` / `consecutiveUpstreamFailures` 给页面。
+  5. 前端 `ModelForwarding.tsx`：目标行状态机在「已停用 / 冷却中 / 正常 / 待命」之外新增**「已降级」**（warning 态），tooltip 说明「连续上游失败，已自动降级到最低优先级；成功一次自动恢复原顺序」。
+- **验证**：
+  - 新增 `tokenRouter.auto-demote.test.ts` 8 例全绿：①连续 10 次后降到最低且后续自动切到别的源；②“类似 400”同样计数（9 次不够、第 10 次降级）；③中间成功一次即清零、攒不到阈值；④成功一次恢复原顺序；⑤降级不摘除通道（其他源都不可用时仍会被选中）；⑥手动保存顺序即复位；⑦转发列表透出降级状态；⑧老路由同样生效。
+  - **端到端实测**（真实服务 + 真实库，临时规则 A = 坏源 `__metapi_no_such_model__`、B = 好源）：第 1~9 次调用都正常落到 B、A 只有计数无降级；第 10 次调用后 A 的 `priority` 由 1 变 2 并写入 `auto_demoted_at`，B 由 2 变 1，该次请求最后一次尝试的通道是 B —— 即“重试自动切到其他源”成立。临时规则已删除。
+  - 三个类型门（server / web / web.test）通过；`build:server` + `vite build` + 重启成功；线上库自动补列已确认；`/api/model-forward-rules` 200 且带新字段；`gpt-6-astra` 真实调用回归 200。
+- **遗留（本次未改，另行提出）**：`sendNotification` 的 fetch 无超时，通知渠道不可达时会把报警路径挂住（表现为同一模型连续第 2、3 次请求各卡 25s+ 直到 socket 超时）；`failCount` 只增不减（历史行为，成功只清冷却），新机制已与之解耦。
+- **主要文件**：`src/server/services/tokenRouter.ts`、`src/server/services/modelForwardService.ts`、`src/server/config.ts`、`src/server/db/schema.ts`、`src/server/db/routeGroupingSchemaCompatibility.ts`、`drizzle/0032_hesitant_silver_samurai.sql`、`src/web/pages/ModelForwarding.tsx`。
+- **状态**：已完成
+
 ### 81. 彻底去掉 AI 生成链路的时间上限：`bodyTimeout` 归零 + 对话预算默认 0 + 客户端断开即中断上游
 
 - **类型**：需求（本会话需求“放开吧，不要限制时间了”）+ 底层超时统一

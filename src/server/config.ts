@@ -128,6 +128,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
+    // 连续多少次「上游自身故障」就把该通道降级到路由里最低优先级（0 = 关闭）。
+    // 降级不是禁用：其他通道全都不可用时它照样会被选中；成功一次立刻恢复原优先级。
+    proxyAutoDemoteFailureThreshold: Math.max(0, Math.trunc(parseNumber(env.PROXY_AUTO_DEMOTE_FAILURE_THRESHOLD, 10))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),
     proxyStickySessionTtlMs: Math.max(30_000, Math.trunc(parseNumber(env.PROXY_STICKY_SESSION_TTL_MS, 30 * 60 * 1000))),
     proxySessionChannelConcurrencyLimit: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT, 2))),

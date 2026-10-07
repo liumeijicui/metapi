@@ -1851,6 +1851,24 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "consecutive_upstream_failures": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "auto_demoted_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "priority_before_auto_demotion": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

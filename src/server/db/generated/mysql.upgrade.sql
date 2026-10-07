@@ -1,10 +1,3 @@
-CREATE TABLE IF NOT EXISTS `model_forward_rules` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `model_name` TEXT NOT NULL, `enabled` BOOLEAN DEFAULT true, `route_id` INT, `notes` TEXT, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')));
-CREATE TABLE IF NOT EXISTS `model_forward_targets` (`id` INT AUTO_INCREMENT NOT NULL PRIMARY KEY, `rule_id` INT NOT NULL, `site_id` INT NOT NULL, `account_id` INT NOT NULL, `token_id` INT, `upstream_model` TEXT NOT NULL, `channel_id` INT, `weight` INT DEFAULT 10, `enabled` BOOLEAN DEFAULT true, `sort_order` INT DEFAULT 0, `created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), `updated_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s')), FOREIGN KEY (`account_id`) REFERENCES `accounts`(`id`) ON DELETE CASCADE, FOREIGN KEY (`rule_id`) REFERENCES `model_forward_rules`(`id`) ON DELETE CASCADE, FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE, FOREIGN KEY (`token_id`) REFERENCES `account_tokens`(`id`) ON DELETE SET NULL);
-CREATE UNIQUE INDEX `model_forward_rules_model_name_unique` ON `model_forward_rules` (`model_name`(191));
-CREATE UNIQUE INDEX `model_forward_targets_rule_account_model_unique` ON `model_forward_targets` (`rule_id`, `account_id`, `upstream_model`(191));
-CREATE INDEX `model_forward_rules_enabled_idx` ON `model_forward_rules` (`enabled`);
-CREATE INDEX `model_forward_rules_route_id_idx` ON `model_forward_rules` (`route_id`);
-CREATE INDEX `model_forward_targets_account_id_idx` ON `model_forward_targets` (`account_id`);
-CREATE INDEX `model_forward_targets_channel_id_idx` ON `model_forward_targets` (`channel_id`);
-CREATE INDEX `model_forward_targets_rule_sort_idx` ON `model_forward_targets` (`rule_id`, `sort_order`);
-CREATE INDEX `model_forward_targets_site_id_idx` ON `model_forward_targets` (`site_id`);
+ALTER TABLE `route_channels` ADD COLUMN `consecutive_upstream_failures` INT NOT NULL DEFAULT 0;
+ALTER TABLE `route_channels` ADD COLUMN `auto_demoted_at` VARCHAR(191);
+ALTER TABLE `route_channels` ADD COLUMN `priority_before_auto_demotion` INT;

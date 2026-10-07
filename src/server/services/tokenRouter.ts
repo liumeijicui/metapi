@@ -344,6 +344,30 @@ function resolveEffectiveFailureCooldownMs(failCount?: number | null): number {
   return clampFailureCooldownMs(resolveFailureBackoffSec(failCount) * 1000);
 }
 
+/**
+ * 被自动降级的通道落到哪一层：本路由现有优先级的下一个（即最低）。
+ *
+ * 幂等 —— 已经是最低时再算一次还是同一层，所以反复失败不会越压越深。
+ */
+async function resolveAutoDemotedPriority(routeId: number): Promise<number> {
+  const rows = await db.select({ priority: schema.routeChannels.priority })
+    .from(schema.routeChannels)
+    .where(eq(schema.routeChannels.routeId, routeId))
+    .all();
+  let maxPriority = 0;
+  for (const row of rows) {
+    const value = Number.isFinite(row.priority) ? Math.trunc(row.priority as number) : 0;
+    if (value > maxPriority) maxPriority = value;
+  }
+  return maxPriority + 1;
+}
+
+function describeAutoDemotion(summary: string[], candidates: RouteChannelCandidate[]): void {
+  const demoted = candidates.filter((candidate) => !!candidate.channel.autoDemotedAt);
+  if (demoted.length <= 0) return;
+  summary.push(`自动降级：${demoted.length} 个通道连续上游失败已达阈值，已排到优先级最低`);
+}
+
 function resolveRoundRobinCooldownSec(level: number): number {
   const normalizedLevel = Math.max(0, Math.min(ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1, Math.trunc(level)));
   return ROUND_ROBIN_COOLDOWN_LEVELS_SEC[normalizedLevel] ?? 0;
@@ -2011,6 +2035,7 @@ export class TokenRouter {
       summary.push(`按显示名命中：${normalizeRouteDisplayName(match.route.displayName)}`);
       summary.push('显示名仅用于聚合展示，实际转发模型按选中通道来源模型决定');
     }
+    describeAutoDemotion(summary, match.channels);
     const available: RouteChannelCandidate[] = [];
     const candidates: RouteDecisionCandidate[] = [];
     const candidateMap = new Map<number, RouteDecisionCandidate>();
@@ -2521,6 +2546,8 @@ export class TokenRouter {
       recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
     }
 
+    // 成功即结清这条通道的账：连续上游失败清零，被自动降级的恢复原优先级。
+    const restorePriority = ch.priorityBeforeAutoDemotion ?? null;
     await db.update(schema.routeChannels).set({
       successCount: nextSuccessCount,
       totalLatencyMs: nextTotalLatencyMs,
@@ -2530,6 +2557,10 @@ export class TokenRouter {
       lastFailAt: null,
       consecutiveFailCount: 0,
       cooldownLevel: 0,
+      consecutiveUpstreamFailures: 0,
+      autoDemotedAt: null,
+      priorityBeforeAutoDemotion: null,
+      ...(restorePriority == null ? {} : { priority: restorePriority }),
     }).where(eq(schema.routeChannels.id, channelId)).run();
 
     patchCachedChannel(channelId, (channel) => {
@@ -2541,7 +2572,15 @@ export class TokenRouter {
       channel.lastFailAt = null;
       channel.consecutiveFailCount = 0;
       channel.cooldownLevel = 0;
+      channel.consecutiveUpstreamFailures = 0;
+      channel.autoDemotedAt = null;
+      channel.priorityBeforeAutoDemotion = null;
+      if (restorePriority != null) channel.priority = restorePriority;
     });
+
+    if (restorePriority != null) {
+      invalidateRouteScopedCache(ch.routeId);
+    }
   }
 
   async recordProbeSuccess(
@@ -2594,8 +2633,16 @@ export class TokenRouter {
         lastFailAt: null,
         consecutiveFailCount: 0,
         cooldownLevel: 0,
+        consecutiveUpstreamFailures: 0,
+        autoDemotedAt: null,
+        priorityBeforeAutoDemotion: null,
+        ...(ch.priorityBeforeAutoDemotion == null ? {} : { priority: ch.priorityBeforeAutoDemotion }),
       }).where(eq(schema.routeChannels.id, channelId)).run();
       patchCachedChannel(channelId, (channel) => {
+        channel.consecutiveUpstreamFailures = 0;
+        channel.autoDemotedAt = null;
+        channel.priorityBeforeAutoDemotion = null;
+        if (ch.priorityBeforeAutoDemotion != null) channel.priority = ch.priorityBeforeAutoDemotion;
         channel.cooldownUntil = null;
         channel.lastFailAt = null;
         channel.consecutiveFailCount = 0;
@@ -2650,12 +2697,29 @@ export class TokenRouter {
       .where(inArray(schema.routeChannels.id, normalizedChannelIds))
       .all();
 
+    // 手动清失败状态等于人工复位：连自动降级的优先级也一起还回去。
+    const demotedRows = await db.select({
+      id: schema.routeChannels.id,
+      priorityBeforeAutoDemotion: schema.routeChannels.priorityBeforeAutoDemotion,
+    }).from(schema.routeChannels)
+      .where(inArray(schema.routeChannels.id, normalizedChannelIds))
+      .all();
+    for (const row of demotedRows) {
+      if (row.priorityBeforeAutoDemotion == null) continue;
+      await db.update(schema.routeChannels).set({
+        priority: row.priorityBeforeAutoDemotion,
+      }).where(eq(schema.routeChannels.id, row.id)).run();
+    }
+
     const result = await db.update(schema.routeChannels).set({
       failCount: 0,
       lastFailAt: null,
       consecutiveFailCount: 0,
       cooldownLevel: 0,
       cooldownUntil: null,
+      consecutiveUpstreamFailures: 0,
+      autoDemotedAt: null,
+      priorityBeforeAutoDemotion: null,
     }).where(inArray(schema.routeChannels.id, normalizedChannelIds)).run();
 
     if (clearRuntimeHealthStatesForChannels(runtimeHealthRows)) {
@@ -2762,6 +2826,28 @@ export class TokenRouter {
     let consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
     let cooldownLevel = Math.max(0, ch.cooldownLevel ?? 0);
 
+    // 自动降级：连续 N 次失败就把这条通道压到本路由的最低优先级，让后续请求自动
+    // 切到别的源；成功一次即恢复原优先级（见 recordSuccess）。
+    //
+    // 「连续」是有意要和 `failCount`（只增不减的累计值）区分开的：这里每一次失败
+    // 都计数，任何一次成功都会清零。400 / 422 这类「请求本身」的错误也算 —— 请求体
+    // 是同一份代码拼的，别的源能过而这个源连续 10 次过不了，那它对我们就等于不可用；
+    // 而真正偶发的请求错误几乎不可能连续 10 次，且成功一次就清零，误伤有限。
+    // （service_tier 被策略拦下这类在调用前就返回的情况，不会走到 recordFailure。）
+    const autoDemoteThreshold = config.proxyAutoDemoteFailureThreshold;
+    const nextUpstreamFailures = Math.max(0, ch.consecutiveUpstreamFailures ?? 0) + 1;
+    let autoDemotedAt = ch.autoDemotedAt ?? null;
+    let priorityBeforeAutoDemotion = ch.priorityBeforeAutoDemotion ?? null;
+    let priority = ch.priority ?? 0;
+    const shouldAutoDemote = autoDemoteThreshold > 0
+      && priorityBeforeAutoDemotion == null
+      && nextUpstreamFailures >= autoDemoteThreshold;
+    if (shouldAutoDemote) {
+      priorityBeforeAutoDemotion = priority;
+      autoDemotedAt = nowIso;
+      priority = await resolveAutoDemotedPriority(route.id);
+    }
+
     if (shortWindowLimitCooldownUntil) {
       cooldownUntil = shortWindowLimitCooldownUntil;
       consecutiveFailCount = 0;
@@ -2787,6 +2873,10 @@ export class TokenRouter {
       consecutiveFailCount,
       cooldownLevel,
       cooldownUntil,
+      consecutiveUpstreamFailures: nextUpstreamFailures,
+      autoDemotedAt,
+      priorityBeforeAutoDemotion,
+      priority,
     }).where(inArray(schema.routeChannels.id, affectedChannelIds)).run();
 
     for (const affectedChannelId of affectedChannelIds) {
@@ -2796,7 +2886,16 @@ export class TokenRouter {
         channel.cooldownUntil = cooldownUntil;
         channel.consecutiveFailCount = consecutiveFailCount;
         channel.cooldownLevel = cooldownLevel;
+        channel.consecutiveUpstreamFailures = nextUpstreamFailures;
+        channel.autoDemotedAt = autoDemotedAt;
+        channel.priorityBeforeAutoDemotion = priorityBeforeAutoDemotion;
+        channel.priority = priority;
       });
+    }
+
+    // 优先级变了就得让这一路由的匹配缓存重建，否则下一次选路还按旧优先级分层。
+    if (shouldAutoDemote) {
+      invalidateRouteScopedCache(route.id);
     }
 
     if (!shortWindowLimitCooldownUntil) {
@@ -3374,6 +3473,11 @@ export class TokenRouter {
 
   private getRoundRobinCandidates(candidates: RouteChannelCandidate[]): RouteChannelCandidate[] {
     return [...candidates].sort((left, right) => {
+      // 轮询本来忽略 priority，所以自动降级要在这里显式体现：被降级的通道
+      // 排到所有健康通道之后，只有它们全都不可用时才会轮到。
+      const demotionOrder = Number(!!left.channel.autoDemotedAt) - Number(!!right.channel.autoDemotedAt);
+      if (demotionOrder !== 0) return demotionOrder;
+
       const selectionOrder = compareNullableTimeAsc(
         left.channel.lastSelectedAt || left.channel.lastUsedAt,
         right.channel.lastSelectedAt || right.channel.lastUsedAt,

@@ -17,6 +17,9 @@ export type ModelForwardTargetRow = {
   cooldownUntil: string | null;
   successCount: number | null;
   failCount: number | null;
+  /** 连续上游失败达到阈值后被自动降级到最低优先级；成功一次即恢复。 */
+  autoDemotedAt: string | null;
+  consecutiveUpstreamFailures: number | null;
   lastUsedAt: string | null;
 };
 

@@ -261,14 +261,21 @@ export default function ModelForwarding() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {rule.targets.map((target, index) => {
                   const cooling = target.cooldownUntil && Date.parse(target.cooldownUntil) > Date.now();
+                  // 被自动降级的排到最后，但不会停用：其他目标都不可用时它照旧会被调用。
+                  const demoted = !!target.autoDemotedAt;
                   const state = !target.enabled
                     ? tr('已停用')
-                    : cooling
-                      ? tr('冷却中')
-                      : (target.successCount ?? 0) > 0
-                        ? tr('正常')
-                        : tr('待命');
-                  const stateClass = !target.enabled || cooling ? 'badge-warning' : 'badge-success';
+                    : demoted
+                      ? tr('已降级')
+                      : cooling
+                        ? tr('冷却中')
+                        : (target.successCount ?? 0) > 0
+                          ? tr('正常')
+                          : tr('待命');
+                  const stateClass = !target.enabled || cooling || demoted ? 'badge-warning' : 'badge-success';
+                  const stateTooltip = demoted
+                    ? tr('连续上游失败，已自动降级到最低优先级；成功一次自动恢复原顺序')
+                    : `${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`;
                   const targetBusy = busyTargetKey === `${rule.id}:${target.id}`;
                   return (
                     <div
@@ -304,7 +311,7 @@ export default function ModelForwarding() {
                       <span
                         className={`badge ${stateClass}`}
                         style={{ fontSize: 10.5 }}
-                        data-tooltip={`${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`}
+                        data-tooltip={stateTooltip}
                       >
                         {state}
                       </span>

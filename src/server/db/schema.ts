@@ -285,6 +285,10 @@ export const routeChannels = sqliteTable('route_channels', {
   consecutiveFailCount: integer('consecutive_fail_count').notNull().default(0),
   cooldownLevel: integer('cooldown_level').notNull().default(0),
   cooldownUntil: text('cooldown_until'),
+  // 「连续失败」自动降级计数：每次上游失败 +1，任何一次成功即清零并恢复原优先级。
+  consecutiveUpstreamFailures: integer('consecutive_upstream_failures').notNull().default(0),
+  autoDemotedAt: text('auto_demoted_at'),
+  priorityBeforeAutoDemotion: integer('priority_before_auto_demotion'),
 }, (table) => ({
   routeIdIdx: index('route_channels_route_id_idx').on(table.routeId),
   accountIdIdx: index('route_channels_account_id_idx').on(table.accountId),

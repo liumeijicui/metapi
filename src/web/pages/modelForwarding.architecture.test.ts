@@ -117,6 +117,34 @@ describe('ModelForwarding 模型转发页', () => {
     expect(service).toContain('nextSortOrder');
   });
 
+  it('连续上游失败自动降级的通道在页面上标成「已降级」', () => {
+    // 后端把降级状态透出给页面。
+    expect(types).toContain('autoDemotedAt: string | null');
+    expect(types).toContain('consecutiveUpstreamFailures: number | null');
+    expect(service).toContain('autoDemotedAt: row.channel?.autoDemotedAt ?? null');
+    expect(service).toContain('consecutiveUpstreamFailures: row.channel?.consecutiveUpstreamFailures ?? null');
+    // 页面上能一眼看出这条目标已经被降级，并说明怎么恢复。
+    expect(page).toContain('const demoted = !!target.autoDemotedAt;');
+    expect(page).toContain("tr('已降级')");
+    expect(page).toContain('stateTooltip');
+    // 降级和冷却 / 停用是三种不同状态，不能混成一个。
+    expect(page).toContain('!target.enabled');
+    expect(page).toContain('cooling');
+  });
+
+  it('手动保存顺序即复位自动降级，阈值可配', () => {
+    expect(service).toContain('consecutiveUpstreamFailures: 0');
+    expect(service).toContain('autoDemotedAt: null');
+    expect(service).toContain('priorityBeforeAutoDemotion: null');
+    const config = read('src/server/config.ts');
+    expect(config).toContain('proxyAutoDemoteFailureThreshold');
+    expect(config).toContain('PROXY_AUTO_DEMOTE_FAILURE_THRESHOLD');
+    expect(tokenRouter).toContain('config.proxyAutoDemoteFailureThreshold');
+    expect(tokenRouter).toContain('resolveAutoDemotedPriority');
+    // 轮询策略本来忽略 priority，降级要在候选排序里显式生效。
+    expect(tokenRouter).toContain('demotionOrder');
+  });
+
   it('弹窗会即时提示对外模型名重复，并把它接进保存校验', () => {
     expect(editor).toContain('existingRuleNames');
     expect(editor).toContain('duplicatedModelName');

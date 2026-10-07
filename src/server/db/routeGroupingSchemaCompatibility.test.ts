@@ -55,6 +55,9 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE route_channels ADD COLUMN last_selected_at text;',
         'ALTER TABLE route_channels ADD COLUMN consecutive_fail_count integer NOT NULL DEFAULT 0;',
         'ALTER TABLE route_channels ADD COLUMN cooldown_level integer NOT NULL DEFAULT 0;',
+        'ALTER TABLE route_channels ADD COLUMN consecutive_upstream_failures integer NOT NULL DEFAULT 0;',
+        'ALTER TABLE route_channels ADD COLUMN auto_demoted_at text;',
+        'ALTER TABLE route_channels ADD COLUMN priority_before_auto_demotion integer;',
       ],
     },
     {
@@ -73,6 +76,9 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE "route_channels" ADD COLUMN "last_selected_at" TEXT',
         'ALTER TABLE "route_channels" ADD COLUMN "consecutive_fail_count" INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE "route_channels" ADD COLUMN "cooldown_level" INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE "route_channels" ADD COLUMN "consecutive_upstream_failures" INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE "route_channels" ADD COLUMN "auto_demoted_at" TEXT',
+        'ALTER TABLE "route_channels" ADD COLUMN "priority_before_auto_demotion" INTEGER',
       ],
     },
     {
@@ -91,6 +97,9 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE `route_channels` ADD COLUMN `last_selected_at` TEXT NULL',
         'ALTER TABLE `route_channels` ADD COLUMN `consecutive_fail_count` INT NOT NULL DEFAULT 0',
         'ALTER TABLE `route_channels` ADD COLUMN `cooldown_level` INT NOT NULL DEFAULT 0',
+        'ALTER TABLE `route_channels` ADD COLUMN `consecutive_upstream_failures` INT NOT NULL DEFAULT 0',
+        'ALTER TABLE `route_channels` ADD COLUMN `auto_demoted_at` TEXT NULL',
+        'ALTER TABLE `route_channels` ADD COLUMN `priority_before_auto_demotion` INT NULL',
       ],
     },
   ])('adds missing route grouping columns for $dialect', async ({ dialect, expectedSql }) => {
@@ -105,7 +114,15 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
     const { inspector, executedSql } = createInspector('postgres', {
       existingColumnsByTable: {
         token_routes: ['display_name', 'display_icon', 'route_mode', 'decision_snapshot', 'decision_refreshed_at', 'routing_strategy'],
-        route_channels: ['source_model', 'last_selected_at', 'consecutive_fail_count', 'cooldown_level'],
+        route_channels: [
+          'source_model',
+          'last_selected_at',
+          'consecutive_fail_count',
+          'cooldown_level',
+          'consecutive_upstream_failures',
+          'auto_demoted_at',
+          'priority_before_auto_demotion',
+        ],
       },
       existingTables: ['token_routes', 'route_channels', 'route_group_sources'],
     });

@@ -930,6 +930,8 @@ export const zhToEnSupplemental: Record<string, string> = {
   '的全部模型': '— all models',
   '没有采集到模型': 'has no models collected',
   '重置筛选': 'Reset Filters',
+  '已降级': 'Degraded',
+  '连续上游失败，已自动降级到最低优先级；成功一次自动恢复原顺序': 'Repeated upstream failures; automatically demoted to the lowest priority. One success restores the original order',
   '上游结束原因': 'Upstream finish reason',
   '未声明': 'not declared',
   '上游没有发送结束标记，这轮可能被中断': 'The upstream never sent an end marker, so this round may have been cut off',

@@ -61,6 +61,9 @@ export type ModelForwardTargetRow = {
   cooldownUntil: string | null;
   successCount: number | null;
   failCount: number | null;
+  /** 连续上游失败达到阈值后被自动降级到最低优先级；成功一次即恢复。 */
+  autoDemotedAt: string | null;
+  consecutiveUpstreamFailures: number | null;
   lastUsedAt: string | null;
 };
 
@@ -268,6 +271,11 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
         weight: target.weight ?? 10,
         enabled,
         manualOverride: true,
+        // 手动保存顺序就是人工拍板的顺序，自动降级的状态在这里复位，
+        // 否则用户调整完顺序还得等下一次成功调用才生效。
+        consecutiveUpstreamFailures: 0,
+        autoDemotedAt: null,
+        priorityBeforeAutoDemotion: null,
       }).where(eq(schema.routeChannels.id, channelId)).run();
       if (target.tokenId !== tokenId) {
         await db.update(schema.modelForwardTargets).set({ tokenId, updatedAt: nowIso })
@@ -346,6 +354,8 @@ export async function listModelForwardRules(): Promise<ModelForwardRuleRow[]> {
       cooldownUntil: row.channel?.cooldownUntil ?? null,
       successCount: row.channel?.successCount ?? null,
       failCount: row.channel?.failCount ?? null,
+      autoDemotedAt: row.channel?.autoDemotedAt ?? null,
+      consecutiveUpstreamFailures: row.channel?.consecutiveUpstreamFailures ?? null,
       lastUsedAt: row.channel?.lastUsedAt ?? null,
     });
     targetsByRuleId.set(row.target.ruleId, list);

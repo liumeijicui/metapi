@@ -109,6 +109,33 @@ export const ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS: RouteGroupingColumnCompa
       postgres: 'ALTER TABLE "route_channels" ADD COLUMN "cooldown_level" INTEGER NOT NULL DEFAULT 0',
     },
   },
+  {
+    table: 'route_channels',
+    column: 'consecutive_upstream_failures',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN consecutive_upstream_failures integer NOT NULL DEFAULT 0;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `consecutive_upstream_failures` INT NOT NULL DEFAULT 0',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "consecutive_upstream_failures" INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'auto_demoted_at',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN auto_demoted_at text;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `auto_demoted_at` TEXT NULL',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "auto_demoted_at" TEXT',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'priority_before_auto_demotion',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN priority_before_auto_demotion integer;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `priority_before_auto_demotion` INT NULL',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "priority_before_auto_demotion" INTEGER',
+    },
+  },
 ];
 
 export const ROUTE_GROUPING_TABLE_COMPATIBILITY_SPECS: RouteGroupingTableCompatibilitySpec[] = [
