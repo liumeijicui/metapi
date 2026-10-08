@@ -7,9 +7,13 @@ import { isIP, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { SocksClient } from 'socks';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
-import { Agent as UndiciAgent, ProxyAgent } from 'undici';
-import { hasExplicitUserAgent, resolveSiteInferenceUserAgent } from './siteProfiles.js';
-import { mergeHeadersWithSiteCustomHeaders, type SiteCustomHeadersMergePriority } from './siteCustomHeaders.js';
+import { Agent as UndiciAgent, Headers, ProxyAgent } from 'undici';
+import { resolveSiteInferenceUserAgent } from './siteProfiles.js';
+import {
+  mergeHeadersWithSiteCustomHeaders,
+  readSiteCustomHeaders,
+  type SiteCustomHeadersMergePriority,
+} from './siteCustomHeaders.js';
 import { resolveProxyUrlFromExtraConfig } from './accountExtraConfig.js';
 import { stripTrailingSlashes } from './urlNormalization.js';
 import { siteUrlRequiresSystemProxy } from './siteProfiles.js';
@@ -523,6 +527,16 @@ function resolveSiteCustomHeadersMergePriority(
   return site?.customHeadersOverrideRequestHeaders ? 'site' : 'request';
 }
 
+/** Flattens any header shape (plain record, array, `Headers`) into a record. */
+function headersToRecord(headers: UndiciRequestInit['headers']): Record<string, string> {
+  const record: Record<string, string> = {};
+  if (!headers) return record;
+  new Headers(headers).forEach((value, key) => {
+    record[key] = value;
+  });
+  return record;
+}
+
 export async function resolveSiteProxyUrlByRequestUrl(requestUrl: string): Promise<string | null> {
   const resolved = await resolveSiteRequestConfigByRequestUrl(requestUrl);
   return resolved.proxyUrl;
@@ -546,13 +560,14 @@ export async function withSiteProxyRequestInit(
 
   // 站点要求的推理接口客户端指纹（见 siteProfiles）。放在这里是为了覆盖所有走
   // fetchJson 的路径（例如用密钥读 /v1/models），网关与直连对话那条路在
-  // upstreamRequestBuilder 里已经加过；两边都先看有没有显式 UA，不覆盖已有的。
+  // upstreamRequestBuilder 里已经加过。只有站点上人工配置的 UA 才算显式指定，
+  // 下游客户端透传过来的 UA 一律让位，否则那个 UA 正是站点要拒的。
   const inferenceUserAgent = resolveSiteInferenceUserAgent(requestUrl);
-  if (inferenceUserAgent && !hasExplicitUserAgent(nextOptions.headers)) {
-    nextOptions.headers = {
-      ...(nextOptions.headers as Record<string, string> | undefined),
-      'User-Agent': inferenceUserAgent,
-    };
+  if (inferenceUserAgent) {
+    const configuredUserAgent = readSiteCustomHeaders(resolved.customHeaders)?.['user-agent'];
+    const nextHeaders = headersToRecord(nextOptions.headers);
+    nextHeaders['user-agent'] = configuredUserAgent || inferenceUserAgent;
+    nextOptions.headers = nextHeaders;
   }
 
   const alsOverride = accountProxyOverride.getStore();

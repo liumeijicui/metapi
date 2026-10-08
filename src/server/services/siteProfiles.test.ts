@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applySiteInferenceUserAgent,
+  hasUnsupportedResponsesCustomTool,
   hasExplicitUserAgent,
   resolveSiteInferenceUserAgent,
   siteRequiresSystemProxy,
@@ -40,5 +42,41 @@ describe('siteProfiles', () => {
 
   it('agentrouter 走系统代理这条已知事实没被改动', () => {
     expect(siteRequiresSystemProxy('agentrouter.org')).toBe(true);
+  });
+
+  it('下游客户端自带 UA 时也要换成站点指纹，只有人工配置的 UA 才保留', () => {
+    const headers: Record<string, string> = {
+      accept: '*/*',
+      'user-agent': 'codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)',
+    };
+    applySiteInferenceUserAgent(headers, 'https://agentrouter.org', { requireInferencePath: false });
+    expect(headers['User-Agent']).toBe('claude-cli/2.0.30 (external, cli)');
+    // 透传下来的小写键必须清掉，否则 undici 会不会用旧值取决于键顺序。
+    expect(Object.keys(headers).some((key) => key.toLowerCase() === 'user-agent' && key !== 'User-Agent'))
+      .toBe(false);
+
+    // 站点里人工配了 UA 时不动它（手工兜底通道）。
+    const configured: Record<string, string> = { 'user-agent': 'claude-cli/2.1.40 (external, cli)' };
+    applySiteInferenceUserAgent(configured, 'https://agentrouter.org', {
+      requireInferencePath: false,
+      configuredUserAgent: true,
+    });
+    expect(configured['user-agent']).toBe('claude-cli/2.1.40 (external, cli)');
+
+    // 不卡指纹的站点什么都不做。
+    const other: Record<string, string> = { 'user-agent': 'happy/1.0' };
+    applySiteInferenceUserAgent(other, 'https://happycoding.xyz', { requireInferencePath: false });
+    expect(other['user-agent']).toBe('happy/1.0');
+  });
+
+  it('agentrouter 的 Responses 接口只认 apply_patch，别的自定义工具要提前绕开', () => {
+    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', [])).toBe(false);
+    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['apply_patch'])).toBe(false);
+    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['apply_patch', 'exec'])).toBe(true);
+    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['exec'])).toBe(true);
+
+    // 别的站点不做这个限制判断。
+    expect(hasUnsupportedResponsesCustomTool('https://happycoding.xyz', ['exec'])).toBe(false);
+    expect(hasUnsupportedResponsesCustomTool('not-a-url', ['exec'])).toBe(false);
   });
 });

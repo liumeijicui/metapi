@@ -3,8 +3,8 @@ import { resolveProviderProfile } from '../proxy-core/providers/registry.js';
 import { config } from '../config.js';
 import { applyPayloadRules } from './payloadRules.js';
 import {
+  applySiteInferenceUserAgent,
   hasExplicitUserAgent,
-  resolveSiteInferenceUserAgent,
 } from './siteProfiles.js';
 import type { DownstreamFormat } from '../transformers/shared/normalized.js';
 import {
@@ -552,16 +552,15 @@ export function buildUpstreamEndpointRequest(input: {
     ...(input.providerHeaders || {}),
   };
   // 有些站点按客户端指纹卡推理接口（agentrouter 没有 Claude Code 的 UA 就回
-  // 401 unauthorized client detected）。站点自定义头 / 下游透传头里已经带了
-  // User-Agent 时一律不覆盖，保证还能手工兜底。
+  // 401 unauthorized client detected）。只有站点/账号上人工配置的 UA 才算显式
+  // 指定（providerHeaders 就是那一路）；下游客户端透传过来的 UA 正是站点要拒的
+  // 东西，必须换成指纹值，否则 Codex / Claude Code 自己带的 UA 会一直被拒。
   // 这里拿到的只是站点根地址（端点路径还没拼），所以不要求 URL 带 /v1 ——
   // 这个构造器本身只用来发推理请求。
-  const requiredInferenceUserAgent = hasExplicitUserAgent(commonHeaders)
-    ? null
-    : resolveSiteInferenceUserAgent(input.siteUrl, { requireInferencePath: false });
-  if (requiredInferenceUserAgent) {
-    commonHeaders['User-Agent'] = requiredInferenceUserAgent;
-  }
+  applySiteInferenceUserAgent(commonHeaders, input.siteUrl, {
+    requireInferencePath: false,
+    configuredUserAgent: hasExplicitUserAgent(input.providerHeaders),
+  });
   if (!isClaudeUpstream) {
     commonHeaders.Authorization = `Bearer ${input.tokenValue}`;
   }

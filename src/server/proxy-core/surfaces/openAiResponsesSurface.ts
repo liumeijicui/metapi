@@ -5,6 +5,7 @@ import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
 import { resolveResponsesToolState } from '../../transformers/openai/responses/toolCompat.js';
+import { hasUnsupportedResponsesCustomTool } from '../../services/siteProfiles.js';
 import {
   extractResponsesTerminalResponseId,
   isResponsesPreviousResponseNotFoundError,
@@ -455,6 +456,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
         body,
         normalizedResponsesBody,
       );
+      // 有些站点自建的 Responses 接口只接受一部分自定义工具（agentrouter 只认
+      // apply_patch），带别的 custom 工具打过去必然 400。这种情况让 chat 端点
+      // 先上：custom 工具会在那边降级成 function 声明再发。
+      const unsupportedResponsesCustomTools = hasUnsupportedResponsesCustomTool(
+        selected.site.url,
+        customToolNames,
+      );
       const openAiBody = openAiResponsesTransformer.inbound.toOpenAiBody(
         normalizedResponsesBody,
         modelName,
@@ -484,6 +492,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           {
             requestKind: 'responses-compact',
             requiresNativeResponsesFileUrl,
+            unsupportedResponsesCustomTools,
           },
         )
         : await resolveUpstreamEndpointCandidates(
@@ -501,6 +510,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           },
           {
             requiresNativeResponsesFileUrl,
+            unsupportedResponsesCustomTools,
           },
         );
       const endpointRuntimeContext = {

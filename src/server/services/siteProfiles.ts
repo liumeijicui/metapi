@@ -115,6 +115,73 @@ export function resolveSiteInferenceUserAgent(
   return match ? match.userAgent : null;
 }
 
+/**
+ * Custom (freeform) tools a site's own Responses endpoint accepts.
+ *
+ * These registries run their own Codex-compatible endpoint and validate the tool
+ * list themselves. agentrouter answers
+ * `400 Unsupported custom tool: 'exec'. Only 'apply_patch' is supported.`
+ * to anything but `apply_patch`, while the same payload sent to
+ * `/v1/chat/completions` (where we declare the custom tools as functions) works.
+ * Codex always sends `exec` next to `apply_patch`, so its native endpoint is
+ * unusable for Codex clients and the chat endpoint has to be tried first.
+ */
+const SITE_RESPONSES_CUSTOM_TOOL_ALLOWLISTS: ReadonlyArray<{ host: string; allowed: readonly string[] }> = [
+  { host: 'agentrouter.org', allowed: ['apply_patch'] },
+];
+
+/**
+ * The custom tool names a site's Responses endpoint accepts, or null when the
+ * site does not restrict them (every custom tool may be sent as-is).
+ */
+export function resolveResponsesCustomToolAllowlist(
+  rawUrl: string | null | undefined,
+): readonly string[] | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(rawUrl || ''));
+  } catch {
+    return null;
+  }
+  const host = normalizeHost(parsed.host);
+  const match = SITE_RESPONSES_CUSTOM_TOOL_ALLOWLISTS.find(
+    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+  );
+  return match ? match.allowed : null;
+}
+
+/** True when any of the declared custom tools would be rejected by the site. */
+export function hasUnsupportedResponsesCustomTool(
+  rawUrl: string | null | undefined,
+  customToolNames: readonly string[],
+): boolean {
+  if (customToolNames.length === 0) return false;
+  const allowed = resolveResponsesCustomToolAllowlist(rawUrl);
+  if (!allowed) return false;
+  return customToolNames.some((name) => !allowed.includes(name));
+}
+
+/**
+ * Force the site's required inference fingerprint onto a header bag.
+ *
+ * 下游客户端自带的 UA（Codex 的 `codex_cli_rs/...`）不算“人工指定过”：站点要的
+ * 正是这个头，透传过去只会换回 `401 unauthorized client detected`。只有站点/账号
+ * 上配置过的 UA 才算显式指定，由调用方通过 `configuredUserAgent` 提前声明。
+ */
+export function applySiteInferenceUserAgent(
+  headers: Record<string, string>,
+  rawUrl: string | null | undefined,
+  options?: { requireInferencePath?: boolean; configuredUserAgent?: boolean },
+): void {
+  if (options?.configuredUserAgent) return;
+  const required = resolveSiteInferenceUserAgent(rawUrl, options);
+  if (!required) return;
+  for (const key of Object.keys(headers)) {
+    if (key.trim().toLowerCase() === 'user-agent') delete headers[key];
+  }
+  headers['User-Agent'] = required;
+}
+
 /** True when the request already carries a User-Agent we must not overwrite. */
 export function hasExplicitUserAgent(headers: unknown): boolean {
   if (!headers || typeof headers !== 'object') return false;

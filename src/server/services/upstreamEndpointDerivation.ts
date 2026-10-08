@@ -15,6 +15,12 @@ export type EndpointDerivationHints = {
   oauthProvider?: string | null;
   requestKind?: 'default' | 'responses-compact' | 'claude-count-tokens';
   requiresNativeResponsesFileUrl?: boolean;
+  /**
+   * 站点的 Responses 接口只认一部分自定义工具（agentrouter 只认 apply_patch），
+   * 而这次请求带了它不认的工具：优先走 chat 端点 —— 那条路会把 custom 工具降级
+   * 成 function 再发，否则这一跳必然 400（`Unsupported custom tool: 'exec'`）。
+   */
+  unsupportedResponsesCustomTools?: boolean;
 };
 
 type ChannelContext = {
@@ -117,6 +123,9 @@ function preferredEndpointOrder(
   if (downstreamFormat === 'responses') {
     if (preferMessagesForClaudeModel) {
       return ['messages', 'chat', 'responses'];
+    }
+    if (hints?.unsupportedResponsesCustomTools) {
+      return ['chat', 'messages', 'responses'];
     }
     return ['responses', 'chat', 'messages'];
   }

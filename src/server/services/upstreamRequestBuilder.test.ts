@@ -24,7 +24,7 @@ describe('upstreamRequestBuilder', () => {
     expect(request.path).toBe('/v1/chat/completions');
   });
 
-  it('下游的 User-Agent 照旧被安全策略拦掉，用的是站点要求的那一个', () => {
+  it('下游客户端自带的 User-Agent 会被站点指纹替换掉', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
       modelName: 'deepseek-v4-flash',
@@ -34,13 +34,31 @@ describe('upstreamRequestBuilder', () => {
       siteUrl: 'https://agentrouter.org',
       openaiBody: { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], stream: true },
       downstreamFormat: 'openai',
-      downstreamHeaders: { 'user-agent': 'my-own-client/9.9' },
+      downstreamHeaders: { 'user-agent': 'codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)' },
     });
 
-    // user-agent 是白名单里允许透传的头（真实 Claude Code 客户端就是靠这个过闸），
-    // 所以调用方自己带了就尊重调用方的，不强行替换成我们内置的那个。
-    expect(request.headers['user-agent']).toBe('my-own-client/9.9');
-    expect(request.headers['User-Agent']).toBeUndefined();
+    // Codex / Claude Code 客户端自己带的 UA 正是 agentrouter 要拒的：把下游透传
+    // 的 UA 当“已经指定过”而放行，结果就是每个 codex 请求都 401
+    // unauthorized client detected（实测踩过，见 siteProfiles 的注释）。
+    expect(request.headers['User-Agent']).toBe('claude-cli/2.0.30 (external, cli)');
+    expect(request.headers['user-agent']).toBeUndefined();
+  });
+
+  it('站点/账号上人工配置的 User-Agent 优先，保留手工兜底通道', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'deepseek-v4-flash',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'agentrouter',
+      siteUrl: 'https://agentrouter.org',
+      openaiBody: { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      downstreamFormat: 'openai',
+      downstreamHeaders: { 'user-agent': 'codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)' },
+      providerHeaders: { 'User-Agent': 'my-own-client/9.9' },
+    });
+
+    expect(request.headers['User-Agent']).toBe('my-own-client/9.9');
   });
 
   it('其它站点不会被注入客户端标识', () => {

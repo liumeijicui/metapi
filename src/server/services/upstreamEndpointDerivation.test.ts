@@ -60,6 +60,38 @@ describe('upstreamEndpointDerivation', () => {
     expect(order).toEqual(['responses', 'chat', 'messages']);
   });
 
+  it('prefers chat when the site rejects some of the custom tools', async () => {
+    // agentrouter 的 Responses 接口只认 apply_patch，带 exec 过去必然 400
+    // （`Unsupported custom tool: 'exec'`），所以让 chat 端点先上。
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'deepseek-v4-flash',
+      'responses',
+      undefined,
+      undefined,
+      {
+        unsupportedResponsesCustomTools: true,
+      },
+    );
+
+    expect(order).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('keeps the usual responses-first order when every custom tool is supported', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'deepseek-v4-flash',
+      'responses',
+      undefined,
+      undefined,
+      {
+        unsupportedResponsesCustomTools: false,
+      },
+    );
+
+    expect(order).toEqual(['responses', 'chat', 'messages']);
+  });
+
   it('keeps explicit openai platforms on responses-first ordering even for claude-family models', async () => {
     const order = await resolveUpstreamEndpointCandidates(
       {
