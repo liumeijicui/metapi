@@ -140,6 +140,21 @@ try {
   }
 
   const model = await client.send('DOM.getBoxModel', { backendNodeId: iframe.backendNodeId });
+  // A solved widget still reports its box, so the position alone cannot tell
+  // the caller whether there is anything left to click. Clicking one that is
+  // already green can restart the challenge, which is how a check-in that was
+  // about to complete gets thrown back to the start. Read the token instead: a
+  // non-empty response means the challenge is done and no click is needed.
+  const token = await client.send('Runtime.evaluate', {
+    expression: '(() => { try { const t = window.turnstile; return t && t.getResponse ? String(t.getResponse() || "") : ""; } catch (error) { return ""; } })()',
+    returnByValue: true,
+  });
+  if (String((token.result && token.result.value) || '').length > 0) {
+    client.close();
+    console.log('solved');
+    process.exit(0);
+  }
+
   const geometry = JSON.parse(
     (await client.send('Runtime.evaluate', {
       expression: 'JSON.stringify({ x: screenX, y: screenY, chromeX: Math.max(0, outerWidth - innerWidth), chromeY: Math.max(0, outerHeight - innerHeight) })',

@@ -417,25 +417,43 @@ fi
 # live DOM instead, which is also the only way to reach it when Cloudflare
 # nests the frame in a shadow root. The preset stays as the fallback for a
 # browser that has not published its DevTools endpoint yet.
-click_shield() {
+#
+# Clicks the checkbox of the challenge that is on screen, using the position the
+# live DOM reports. Returns non-zero when no widget is mounted at all.
+#
+# `solved` is the locator saying the challenge already has a token: there is
+# nothing to click, and clicking anyway can restart it.
+shield_click_located() {
   local out="" x="" y=""
-  if [ -f "$CHALLENGE_HELPER" ]; then
-    out=$("$NODE" "$CHALLENGE_HELPER" "$PROFILE" 2>/dev/null | tail -1)
-    case "$out" in
-      x=*)
-        x=$(printf '%s' "$out" | sed -n 's/.*x=\([0-9][0-9]*\).*/\1/p')
-        y=$(printf '%s' "$out" | sed -n 's/.*y=\([0-9][0-9]*\).*/\1/p')
-        ;;
-    esac
-  fi
-  if [ -n "$x" ] && [ -n "$y" ]; then
-    say "clicking the Turnstile checkbox at $x $y (located)"
-    xdotool mousemove "$x" "$y"; sleep 0.4
-    xdotool click 1
-    return 0
-  fi
-  say "Turnstile widget not located; falling back to $LOGIN_SHIELD_XY"
-  xdotool mousemove $LOGIN_SHIELD_XY click 1
+  [ -f "$CHALLENGE_HELPER" ] || return 1
+  out=$("$NODE" "$CHALLENGE_HELPER" "$PROFILE" 2>/dev/null | tail -1)
+  case "$out" in
+    solved)
+      say "Turnstile challenge already solved"
+      return 0
+      ;;
+    x=*)
+      x=$(printf '%s' "$out" | sed -n 's/.*x=\([0-9][0-9]*\).*/\1/p')
+      y=$(printf '%s' "$out" | sed -n 's/.*y=\([0-9][0-9]*\).*/\1/p')
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$x" ] || [ -z "$y" ]; then return 1; fi
+  say "clicking the Turnstile checkbox at $x $y (located)"
+  xdotool mousemove "$x" "$y"; sleep 0.4
+  xdotool click 1
+  return 0
+}
+
+# The coordinate to use when the DOM cannot be read. The check-in dialog raises
+# the same widget as the sign-in page but not at the same height on every build,
+# so each call site passes the preset measured for its own screen; that preset
+# is the fallback, never the first choice.
+click_shield() {
+  local fallback="${1:-$LOGIN_SHIELD_XY}"
+  shield_click_located && return 0
+  say "Turnstile widget not located; falling back to $fallback"
+  xdotool mousemove $fallback click 1
 }
 
 login() {
@@ -624,7 +642,11 @@ click_checkin
 sleep 4
 snap cur; measure; rm -f "$LOG/cur.ppm"
 say "state3=$st modal=$modal"
-if [ "$modal" = 1 ]; then xdotool mousemove $MODAL_SHIELD_XY click 1; fi
+# The dialog can carry the widget even when the title probe above reads the
+# screen wrong, so look for the widget itself first; only a page with no widget
+# anywhere falls back to the preset. `modal` still decides when to wait for a
+# dialog to appear, because a widget that mounts late is otherwise missed.
+if [ "$modal" = 1 ]; then click_shield "$MODAL_SHIELD_XY"; else shield_click_located || true; fi
 
 n=0
 while [ "$n" -lt 8 ]; do
@@ -639,11 +661,17 @@ while [ "$n" -lt 8 ]; do
     exit 0
   fi
   if [ "$modal" = 1 ]; then
-    if [ "$n" -lt 3 ]; then xdotool mousemove $MODAL_SHIELD_XY click 1; fi
+    if [ "$n" -lt 3 ]; then click_shield "$MODAL_SHIELD_XY"; fi
+  elif shield_click_located; then
+    # A challenge is up even though the dialog probe did not see it. Answering it
+    # is the only action the dialog needs, so this outranks the retry below: the
+    # button behind the overlay still measures as actionable, and clicking it
+    # again would aim at a modal instead of the page.
+    :
   elif [ "$st" = BLUE ] && [ "$n" -lt 2 ]; then
     click_checkin
     sleep 3
-    xdotool mousemove $MODAL_SHIELD_XY click 1
+    click_shield "$MODAL_SHIELD_XY"
   fi
   n=$((n+1))
 done

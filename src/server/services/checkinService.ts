@@ -9,7 +9,9 @@ import { parseCheckinRewardAmount } from './checkinRewardParser.js';
 import {
   getAutoReloginConfig,
   getExternalCheckinSessionFromExtraConfig,
+  getOauthProviderFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
+  getReloginProviderFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
@@ -200,6 +202,24 @@ async function pruneSessionsAfterBrowserSignIn(params: {
 }
 
 /**
+ * The credential as it stands on the row right now.
+ *
+ * A site that issues a rolling session cookie retires the previous value the
+ * moment its own refresh endpoint runs, and that exchange happens inside the
+ * check-in this decision follows. The snapshot loaded at the start of the run
+ * can therefore name a secret the site has already spent, so the browser and
+ * the branch that decides whether to sign in again both read the row instead.
+ */
+async function readLiveAccessToken(accountId: number, fallback?: string | null): Promise<string | null> {
+  const live = await db
+    .select({ accessToken: schema.accounts.accessToken })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  return live?.accessToken ?? fallback ?? null;
+}
+
+/**
  * Answers a browser-only check-in challenge.
  *
  * Some New API forks protect the check-in endpoint with Cloudflare Turnstile,
@@ -225,12 +245,7 @@ async function tryBrowserCheckin(site: any, account: any): Promise<BrowserChecki
   // retires the value this run started with. Re-read the row so the browser is
   // handed the secret that is actually live right now: a spent one only opens
   // the site signed out.
-  const live = await db
-    .select({ accessToken: schema.accounts.accessToken })
-    .from(schema.accounts)
-    .where(eq(schema.accounts.id, account.id))
-    .get();
-  const storedToken = live?.accessToken ?? account.accessToken;
+  const storedToken = await readLiveAccessToken(account.id, account.accessToken);
   const sessionCredential = asBrowserSessionCredential(storedToken);
   // A stored login and a live session are each sufficient; without either the
   // browser would only ever see the site's sign-in form.
@@ -456,22 +471,29 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   // below has been recorded.
   let reloginRefusal: { code: string; reason: string } | null = null;
 
-  if (!result.success && shouldAttemptAutoRelogin(result.message)) {
-    // This is the one caller that may spend a headed browser run: it restores
-    // the account's session, and the balance runs that follow are then fine.
+  let reloginAttempted = false;
+  // This is the one caller that may spend a headed browser run: it restores the
+  // account's session, and the balance runs that follow are then fine.
+  const attemptAutoRelogin = async (): Promise<boolean> => {
+    reloginAttempted = true;
     const relogin = await tryAutoRelogin(account, site, {
       allowBrowserFallback: true,
       onRefusal: (refusal) => { reloginRefusal = refusal; },
     });
-    if (relogin) {
-      activeAccessToken = relogin.accessToken;
-      sessionRestored = true;
-      // Adopt whatever the re-login reported before retrying, and refresh our
-      // in-memory copy of extraConfig — the merge writes further down start from
-      // `account.extraConfig`, so leaving the stale copy here would overwrite the
-      // id tryAutoRelogin() just persisted.
-      if (relogin.platformUserId) platformUserId = relogin.platformUserId;
-      if (relogin.extraConfig) account.extraConfig = relogin.extraConfig;
+    if (!relogin) return false;
+    activeAccessToken = relogin.accessToken;
+    sessionRestored = true;
+    // Adopt whatever the re-login reported before retrying, and refresh our
+    // in-memory copy of extraConfig — the merge writes further down start from
+    // `account.extraConfig`, so leaving the stale copy here would overwrite the
+    // id tryAutoRelogin() just persisted.
+    if (relogin.platformUserId) platformUserId = relogin.platformUserId;
+    if (relogin.extraConfig) account.extraConfig = relogin.extraConfig;
+    return true;
+  };
+
+  if (!result.success && shouldAttemptAutoRelogin(result.message)) {
+    if (await attemptAutoRelogin()) {
       result = await runCheckin(activeAccessToken);
     }
   }
@@ -479,6 +501,25 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   // A Turnstile-gated check-in cannot be answered over HTTP; when the account
   // carries login credentials, retry it in a real browser on this machine.
   if (isManualVerificationRequiredMessage(result.message)) {
+    // Two ways into that browser exist, and only one of them works for a site
+    // that gates the endpoint with Turnstile. A stored password signs the page
+    // in; an account bound through OAuth (GitHub/Linux.do) has no password
+    // field at all and needs the rolling `new_api_refresh` cookie, which is the
+    // *only* credential such a site hands out. When the row still holds an
+    // opaque API token, the browser lands on the sign-in form, reports the run
+    // as rejected and the site can never auto check in — even though a single
+    // re-login mints exactly the cookie the browser needs. Mint it here first.
+    const hasOauthBinding = Boolean(
+      getOauthProviderFromExtraConfig(account.extraConfig)
+      || getReloginProviderFromExtraConfig(account.extraConfig)
+      || account.oauthProvider,
+    );
+    const needsSessionCredential = !getAutoReloginConfig(account.extraConfig)
+      && !asBrowserSessionCredential(await readLiveAccessToken(account.id, account.accessToken))
+      && hasOauthBinding;
+    if (!reloginAttempted && needsSessionCredential) {
+      await attemptAutoRelogin();
+    }
     const browserAttempt = await tryBrowserCheckin(site, account);
     if (browserAttempt) {
       result = browserAttempt.result;

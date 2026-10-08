@@ -96,6 +96,8 @@ vi.mock('./accountCredentialService.js', () => ({
 }));
 
 const browserSessionMock = vi.fn();
+const linuxDoReloginMock = vi.fn();
+const harvestLinuxDoMock = vi.fn();
 
 vi.mock('./browserSessionCredential.js', () => ({
   // Mirrors the real module's constant so the service can recognise a session.
@@ -105,6 +107,14 @@ vi.mock('./browserSessionCredential.js', () => ({
       ? token.trim()
       : null),
   runBrowserSessionCheckin: (...args: unknown[]) => browserSessionMock(...args),
+}));
+
+vi.mock('./assistedLogin/sites/linuxDoOAuthRelogin.js', () => ({
+  reloginWithLinuxDo: (...args: unknown[]) => linuxDoReloginMock(...args),
+}));
+
+vi.mock('./linuxdoSession/sessionService.js', () => ({
+  harvestLinuxDoSiteCredential: (...args: unknown[]) => harvestLinuxDoMock(...args),
 }));
 
 describe('checkinService auto relogin', () => {
@@ -123,6 +133,8 @@ describe('checkinService auto relogin', () => {
     updateSetMock.mockReset();
     setHealthMock.mockReset();
     browserSessionMock.mockReset();
+    linuxDoReloginMock.mockReset();
+    harvestLinuxDoMock.mockReset();
     whereArgs.length = 0;
   });
 
@@ -975,6 +987,82 @@ describe('checkinService auto relogin', () => {
     // The turnstile verdict still stands on its own: the run is recorded as
     // "needs a person" rather than failed, and no browser was spent on it.
     expect(result.status).toBe('skipped');
+  });
+
+  it('re-logs in before the browser run when a Turnstile site holds an opaque token', async () => {
+    // The GN shape: bound through Linux.do, no password on file, and the row
+    // still holding the site's opaque management token. Turnstile refuses the
+    // HTTP check-in, and the browser can only answer that challenge after it is
+    // signed in — with an opaque token it lands on the sign-in form, reports the
+    // run as rejected, and the account never checks in by itself. Minting the
+    // rolling session cookie first is what gets the browser to the check-in
+    // card, and it is the only credential such a site ever hands out.
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 9,
+          username: '3145215575@qq.com',
+          accessToken: 'S5xKkCQugkmSpn+c2L05NBBn-opaque',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            credentialMode: 'session',
+            platformUserId: 3145,
+            relogin: { provider: 'linuxdo', boundAt: '2026-10-01T00:00:00.000Z' },
+          }),
+        },
+        sites: {
+          id: 21,
+          name: 'GN',
+          url: 'https://grok-heavy.878.indevs.in',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    adapterMock.listSessions.mockResolvedValue([]);
+    // The site's own status endpoint supplies the OAuth client id; the test
+    // must not reach the network for it.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      json: async () => ({ data: { linuxdo_client_id: 'cid' } }),
+    })));
+    linuxDoReloginMock.mockResolvedValue({ ok: true });
+    harvestLinuxDoMock.mockResolvedValue({
+      accessToken: 'new_api_refresh=minted-sid.minted-secret',
+      platformUserId: 3145,
+    });
+    // Reads of the account row see what the re-login just persisted; that is
+    // what the browser is handed as its session.
+    selectGetMock.mockImplementation(() => (
+      linuxDoReloginMock.mock.calls.length > 0
+        ? {
+          accessToken: 'new_api_refresh=minted-sid.minted-secret',
+          extraConfig: JSON.stringify({ relogin: { provider: 'linuxdo' } }),
+        }
+        : { accessToken: 'S5xKkCQugkmSpn+c2L05NBBn-opaque' }
+    ));
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: true, message: '浏览器签到成功（已通过站点人机校验）' },
+        logDir: '/logs/site-21',
+        profileDir: '/profiles/site-21',
+      },
+      accessToken: 'new_api_refresh=minted-sid.minted-secret',
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(9);
+
+    expect(linuxDoReloginMock).toHaveBeenCalled();
+    expect(browserSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionCredential: 'new_api_refresh=minted-sid.minted-secret',
+      password: '',
+    }));
+    expect(result.success).toBe(true);
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      accessToken: 'new_api_refresh=minted-sid.minted-secret',
+    }));
+    vi.unstubAllGlobals();
   });
 
   it('retires the sessions a browser sign-in just superseded', async () => {
