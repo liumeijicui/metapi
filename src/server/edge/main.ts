@@ -1,30 +1,16 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { buildFastifyOptions, config } from '../config.js';
-import {
-  ensureProxyFileCompatibilityColumns,
-  ensureProxyLogBillingDetailsColumn,
-  ensureProxyLogClientColumns,
-  ensureProxyLogDownstreamApiKeyIdColumn,
-  ensureProxyLogStreamTimingColumns,
-  ensureRouteGroupingCompatibilityColumns,
-  ensureSiteCompatibilityColumns,
-  runtimeDbDialect,
-} from '../db/index.js';
-import { isPublicApiRoute } from '../desktop.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { proxyRoutes } from '../routes/proxy/router.js';
-import { ensureRuntimeDatabaseReady } from '../runtimeDatabaseBootstrap.js';
-import { startEdgeConfigSync, stopEdgeConfigSync, syncEdgeConfig } from './configSync.js';
 import { ensureEdgeDataDir, getEdgeEnv, type EdgeEnv } from './edgeEnv.js';
-import { rehydrateLocalRuntimeSettings } from './localSettingsPolicy.js';
-import { edgeStatusRoutes } from './statusRoutes.js';
 
 /**
  * 本地边缘转发实例的入口：只做 /v1 转发 + 使用日志 + 一个只读状态接口。
  * 这里刻意不 import src/server/index.ts 里的任何 start* 调度器，
  * 所以本进程不会有签到、重登、采集、备份等后台任务；边界由
  * edgeBoundary.architecture.test.ts 静态锁死。
+ *
+ * 闸门必须早于所有会打开数据库的模块：src/server/db/index.ts 在模块求值阶段
+ * 就按 DATA_DIR 建出 hub.db，所以除 fastify/cors 和 edgeEnv.ts 之外的依赖一律用
+ * 动态 import 放在闸门之后加载；否则目录永远不是空的，闸门也就拦不住误指主服务数据目录。
  */
 let edge: EdgeEnv;
 try {
@@ -35,6 +21,27 @@ try {
   console.error(`[edge] 启动被拒绝：${(error as Error)?.message || String(error)}`);
   process.exit(1);
 }
+
+const { buildFastifyOptions, config } = await import('../config.js');
+const {
+  ensureProxyFileCompatibilityColumns,
+  ensureProxyLogBillingDetailsColumn,
+  ensureProxyLogClientColumns,
+  ensureProxyLogDownstreamApiKeyIdColumn,
+  ensureProxyLogStreamTimingColumns,
+  ensureRouteGroupingCompatibilityColumns,
+  ensureSiteCompatibilityColumns,
+  runtimeDbDialect,
+} = await import('../db/index.js');
+const { isPublicApiRoute } = await import('../desktop.js');
+const { authMiddleware } = await import('../middleware/auth.js');
+const { proxyRoutes } = await import('../routes/proxy/router.js');
+const { ensureRuntimeDatabaseReady } = await import('../runtimeDatabaseBootstrap.js');
+const { startEdgeConfigSync, stopEdgeConfigSync, syncEdgeConfig } = await import('./configSync.js');
+const { rehydrateLocalRuntimeSettings } = await import('./localSettingsPolicy.js');
+const { edgeStatusRoutes, isEdgeOpenRoute } = await import('./statusRoutes.js');
+const { readEdgeSyncSource } = await import('./syncSource.js');
+const { registerEdgeWebAssets } = await import('./webAssets.js');
 
 // 1) 本地库结构（边缘实例自己的 DATA_DIR，绝不指向主服务的数据目录）。
 await ensureRuntimeDatabaseReady({
@@ -63,12 +70,17 @@ const app = Fastify(buildFastifyOptions(config));
 await app.register(cors);
 app.addHook('onRequest', async (request, reply) => {
   // /v1 的鉴权由 proxyRoutes 自己挂（下游 sk- 密钥），这里只保护管理接口。
-  if (request.url.startsWith('/api/') && !isPublicApiRoute(request.url)) {
-    await authMiddleware(request, reply);
-  }
+  if (!request.url.startsWith('/api/')) return;
+  if (isPublicApiRoute(request.url)) return;
+  // 登录页要先读状态、再拿服务器令牌换本地登录，这两个接口必须免本地鉴权。
+  if (isEdgeOpenRoute(request.method, request.url)) return;
+  await authMiddleware(request, reply);
 });
 await app.register(edgeStatusRoutes);
 await app.register(proxyRoutes);
+
+// 6) 前端静态资源：exe 的登录页与「模型转发 / 使用日志」两个页面。
+await registerEdgeWebAssets(app);
 
 app.addHook('onClose', async () => {
   stopEdgeConfigSync();
@@ -78,5 +90,6 @@ await app.listen({ port: config.port, host: config.listenHost });
 startEdgeConfigSync();
 
 console.log(`[edge] 数据目录：${edge.dataDirAbsolute}`);
-console.log(`[edge] 配置源：${edge.configSourceUrl || '（未配置）'}`);
+const source = await readEdgeSyncSource();
+console.log(`[edge] 配置源：${source.url || '（未配置，请在登录页填写服务器地址与令牌）'}`);
 console.log('[edge] 已启动的调度器：无（本进程只做转发和使用日志）');

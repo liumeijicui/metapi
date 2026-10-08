@@ -10,6 +10,7 @@ import {
   rehydrateLocalRuntimeSettings,
   type SettingsEntry,
 } from './localSettingsPolicy.js';
+import { readEdgeSyncSource, type EdgeSyncSource } from './syncSource.js';
 
 export type EdgeSyncSections = {
   accounts: boolean;
@@ -53,11 +54,14 @@ function hashSection(value: unknown): string {
   return createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
+/** 单次拉取的超时：配置源不可达时不能让同步和启动流程一直挂着。 */
+const CONFIG_SOURCE_TIMEOUT_MS = 30_000;
+
 /** 从服务器拉一段只读配置；这里只发 GET，绝不对配置源做任何写操作。 */
-async function fetchConfigSource(path: string): Promise<unknown> {
-  const edge = getEdgeEnv();
-  const response = await fetch(`${edge.configSourceUrl}${path}`, {
-    headers: { authorization: `Bearer ${edge.configSourceToken}` },
+async function fetchConfigSource(source: EdgeSyncSource, path: string): Promise<unknown> {
+  const response = await fetch(`${source.url}${path}`, {
+    headers: { authorization: `Bearer ${source.token}` },
+    signal: AbortSignal.timeout(CONFIG_SOURCE_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`配置源 ${path} 返回 HTTP ${response.status}`);
@@ -106,15 +110,15 @@ export function syncEdgeConfig(): Promise<EdgeSyncResult> {
 }
 
 async function runSync(): Promise<EdgeSyncResult> {
-  const edge = getEdgeEnv();
-  if (!edge.configSourceUrl || !edge.configSourceToken) {
+  const source = await readEdgeSyncSource();
+  if (!source.url || !source.token) {
     return recordFailure('还没有配置同步源：请先填写服务器地址和管理令牌。');
   }
 
   try {
-    const accountsPayload = await fetchConfigSource('/api/settings/backup/export?type=accounts');
-    const preferencesPayload = await fetchConfigSource('/api/settings/backup/export?type=preferences');
-    const forwardPayload = await fetchConfigSource('/api/edge/model-forward-rules');
+    const accountsPayload = await fetchConfigSource(source, '/api/settings/backup/export?type=accounts');
+    const preferencesPayload = await fetchConfigSource(source, '/api/settings/backup/export?type=preferences');
+    const forwardPayload = await fetchConfigSource(source, '/api/edge/model-forward-rules');
 
     const accountsSection = readAccountsSection(accountsPayload);
     const settings = readPreferencesSettings(preferencesPayload);

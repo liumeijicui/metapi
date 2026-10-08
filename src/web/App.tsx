@@ -19,6 +19,19 @@ import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
 import { MobileDrawer } from './components/MobileDrawer.js';
 import CenteredModal from './components/CenteredModal.js';
+import EdgeServerFields from './components/EdgeServerFields.js';
+import EdgeSyncSettingsModal from './components/EdgeSyncSettingsModal.js';
+import {
+  buildServerAddress,
+  EDGE_DEFAULT_SERVER_HOST,
+  EDGE_DEFAULT_SERVER_PORT,
+  formatEdgeSyncTime,
+  refreshEdgeStatus,
+  saveEdgeSyncSource,
+  splitServerAddress,
+  triggerEdgeSync,
+  useEdgeStatus,
+} from './edgeMode.js';
 const Dashboard = lazy(() => import('./pages/Dashboard.js'));
 const Sites = lazy(() => import('./pages/Sites.js'));
 const Accounts = lazy(() => import('./pages/Accounts.js'));
@@ -131,10 +144,25 @@ function resolveStoredProfile(): UserProfile {
   }
 }
 
-export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (text: string) => string }) {
+export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
+  onLogin: (token: string) => void;
+  t: (text: string) => string;
+  /** 边缘版（exe）：登录页下方要填从哪台服务器拉配置，令牌就是那台服务器的管理员令牌。 */
+  edgeMode?: boolean;
+  /** 已保存的服务器地址，用来回填输入框。 */
+  edgeServerUrl?: string;
+}) {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [serverFields, setServerFields] = useState(() => {
+    const parts = splitServerAddress(edgeServerUrl);
+    // 边缘版第一次打开还没有已保存的地址：回填默认服务器，用户只要填令牌就能登录。
+    if (edgeMode && !parts.host) {
+      return { address: EDGE_DEFAULT_SERVER_HOST, port: EDGE_DEFAULT_SERVER_PORT };
+    }
+    return { address: parts.host, port: parts.port };
+  });
   const capabilityRows = [
     {
       title: t('统一代理网关'),
@@ -160,6 +188,31 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
     setLoading(true);
     setError('');
     try {
+      if (edgeMode) {
+        // 边缘版：先用服务器验地址与令牌，验过了才写入本地并进入应用（本机只拉取，不回推）。
+        const parts = splitServerAddress(serverFields.address);
+        const serverUrl = buildServerAddress({
+          scheme: parts.scheme,
+          host: parts.host,
+          port: serverFields.port,
+        });
+        if (!serverUrl) {
+          setError(t('请先填写服务器地址'));
+          setLoading(false);
+          return;
+        }
+
+        const saved = await saveEdgeSyncSource({ address: serverUrl, token });
+        if (!saved.ok) {
+          setError(t(saved.message || '保存服务器设置失败'));
+          setLoading(false);
+          return;
+        }
+
+        onLogin(token);
+        return;
+      }
+
       const res = await fetch('/api/settings/auth/info', {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -320,6 +373,22 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
             >
               {loading ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />{t('验证中...')}</> : t('登录')}
             </button>
+            {edgeMode ? (
+              <div className="edge-login-settings">
+                <div className="edge-login-settings-title">{t('同步设置 · 配置来源')}</div>
+                <EdgeServerFields
+                  value={serverFields}
+                  onChange={(patch) => {
+                    setServerFields((prev) => ({ ...prev, ...patch }));
+                    setError('');
+                  }}
+                  disabled={loading}
+                />
+                <div className="edge-server-hint" style={{ marginTop: 8 }}>
+                  {t('令牌填服务器上的管理员令牌；本机只从服务器拉取配置，不会向服务器写入任何数据。')}
+                </div>
+              </div>
+            ) : null}
             <div className="login-auth-note">{t('仅校验本地服务访问权限，不会把令牌发送到第三方。')}</div>
             <div className="login-auth-footer">
               <div className="login-auth-selfuse">
@@ -495,6 +564,9 @@ const topNavItems = [
   { label: '关于', to: '/about' },
 ];
 
+/** 边缘版（exe）只保留这两个页面：模型转发与使用日志。 */
+const EDGE_MODE_NAV_PATHS = new Set(['/model-forwarding', '/logs']);
+
 function PageTransition({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   return <div key={location.pathname} className="page-enter">{children}</div>;
@@ -511,6 +583,7 @@ function RouteLoadingFallback() {
 
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
+  const location = useLocation();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -531,6 +604,11 @@ function AppShell() {
   const latestTaskEventIdRef = useRef(0);
   const toast = useToast();
   const isMobile = useIsMobile();
+  const edgeStatus = useEdgeStatus();
+  const edgeMode = edgeStatus?.edgeMode === true;
+  const [edgeSettingsOpen, setEdgeSettingsOpen] = useState(false);
+  const [edgeSyncing, setEdgeSyncing] = useState(false);
+  const edgeAutoSyncRef = useRef(false);
   const resolvedTheme: 'light' | 'dark' = themeMode === 'system'
     ? (systemPrefersDark ? 'dark' : 'light')
     : themeMode;
@@ -567,6 +645,34 @@ function AppShell() {
     document.documentElement.setAttribute('data-layout', isMobile ? 'mobile' : 'desktop');
   }, [isMobile]);
 
+  // 边缘版（exe）：探一次本机是不是「只转发」实例；不是就完全不显示边缘相关 UI。
+  useEffect(() => {
+    void refreshEdgeStatus();
+  }, []);
+
+  const runEdgeSync = React.useCallback(async () => {
+    setEdgeSyncing(true);
+    try {
+      const result = await triggerEdgeSync();
+      if (result.ok) {
+        toast.success(result.imported ? t('已同步服务器最新配置') : t('配置已是最新，无需更新'));
+      } else {
+        toast.error(result.message || t('同步失败'));
+      }
+      await refreshEdgeStatus();
+      return result.ok;
+    } finally {
+      setEdgeSyncing(false);
+    }
+  }, [t, toast]);
+
+  // 登录进来后自动拉一次，保证打开 exe 看到的就是服务器上的最新配置。
+  useEffect(() => {
+    if (!authed || !edgeMode || edgeAutoSyncRef.current) return;
+    edgeAutoSyncRef.current = true;
+    void runEdgeSync();
+  }, [authed, edgeMode, runEdgeSync]);
+
   useEffect(() => {
     if (!isMobile && drawerOpen) {
       setDrawerOpen(false);
@@ -585,7 +691,8 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (!authed) return;
+    // 边缘版没有 /api/events，跳过事件轮询；也不显示通知铃铛。
+    if (!authed || edgeMode) return;
     let cancelled = false;
 
     const pollEvents = async () => {
@@ -693,11 +800,26 @@ function AppShell() {
     toast.success(t('个人信息已保存'));
   };
 
+  // 边缘版只留「模型转发」与「使用日志」两个入口，其余页面一概不显示。
+  const visibleSidebarGroups = edgeMode
+    ? [{
+      label: '边缘版',
+      items: sidebarGroups
+        .flatMap((group) => group.items)
+        .filter((item) => EDGE_MODE_NAV_PATHS.has(item.to)),
+    }]
+    : sidebarGroups;
+
   if (!authed) {
-    return <Login t={t} onLogin={(token) => {
-      persistAuthSession(localStorage, token);
-      setAuthed(true);
-    }} />;
+    return <Login
+      t={t}
+      edgeMode={edgeMode}
+      edgeServerUrl={edgeStatus?.configSource.url || ''}
+      onLogin={(token) => {
+        persistAuthSession(localStorage, token);
+        setAuthed(true);
+      }}
+    />;
   }
 
   return (
@@ -720,7 +842,7 @@ function AppShell() {
           <span className="topbar-logo-text">Metapi</span>
         </div>
         <nav className="topbar-nav">
-          {topNavItems.map((item) => (
+          {(edgeMode ? [] : topNavItems).map((item) => (
             <NavLink key={item.to} to={item.to} end className={({ isActive }) => `topbar-nav-item ${isActive ? 'active' : ''}`}>
               {t(item.label)}
             </NavLink>
@@ -735,12 +857,14 @@ function AppShell() {
           >
             {language === 'zh' ? 'EN' : '中'}
           </button>
-          <button className="topbar-search-trigger" aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
-            <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-            <span className="topbar-search-label">{t('搜索')}</span>
-            <kbd className="topbar-search-kbd">Ctrl K</kbd>
-          </button>
-          <div style={{ position: 'relative' }}>
+          {!edgeMode && (
+            <button className="topbar-search-trigger" aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+              <span className="topbar-search-label">{t('搜索')}</span>
+              <kbd className="topbar-search-kbd">Ctrl K</kbd>
+            </button>
+          )}
+          <div style={{ position: 'relative', display: edgeMode ? 'none' : undefined }}>
             <button ref={notifBtnRef} className="topbar-icon-btn" aria-label={t('通知')} onClick={() => setShowNotifications(!showNotifications)}>
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
               {unreadCount > 0 && (
@@ -852,7 +976,7 @@ function AppShell() {
               <span>Metapi</span>
             </div>
             <nav className="mobile-nav">
-              {sidebarGroups.map((group) => (
+              {visibleSidebarGroups.map((group) => (
                 <div key={group.label} className="mobile-nav-group">
                   <div className="mobile-nav-label">{t(group.label)}</div>
                   {group.items.map((item) => (
@@ -869,24 +993,26 @@ function AppShell() {
                   ))}
                 </div>
               ))}
-              <div className="mobile-nav-group">
-                <div className="mobile-nav-label">{t('更多')}</div>
-                {topNavItems.filter((n) => n.to !== '/').map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
-                    onClick={() => setDrawerOpen(false)}
-                  >
-                    <span>{t(item.label)}</span>
-                  </NavLink>
-                ))}
-              </div>
+              {edgeMode ? null : (
+                <div className="mobile-nav-group">
+                  <div className="mobile-nav-label">{t('更多')}</div>
+                  {topNavItems.filter((n) => n.to !== '/').map((item) => (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
+                      onClick={() => setDrawerOpen(false)}
+                    >
+                      <span>{t(item.label)}</span>
+                    </NavLink>
+                  ))}
+                </div>
+              )}
             </nav>
           </MobileDrawer>
         ) : (
           <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-            {sidebarGroups.map((group) => (
+            {visibleSidebarGroups.map((group) => (
               <div key={group.label} className="sidebar-group">
                 {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
                 {group.items.map((item) => (
@@ -904,6 +1030,40 @@ function AppShell() {
                 ))}
               </div>
             ))}
+            {edgeMode && !sidebarCollapsed ? (
+              <div className="edge-sidebar-panel">
+                <div className="edge-sidebar-source">
+                  {t('服务器')}: {edgeStatus?.configSource.url || t('未配置')}
+                </div>
+                <div className="edge-sidebar-source">
+                  {t('上次同步')}: {formatEdgeSyncTime(edgeStatus?.lastSyncAt) || t('尚未同步')}
+                </div>
+                {edgeStatus?.lastSyncError ? (
+                  <div className="edge-sidebar-source" style={{ color: 'var(--color-danger)' }}>
+                    {edgeStatus.lastSyncError}
+                  </div>
+                ) : null}
+                <div className="edge-sidebar-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ fontSize: 12 }}
+                    disabled={edgeSyncing}
+                    onClick={() => void runEdgeSync()}
+                  >
+                    {edgeSyncing ? t('同步中…') : t('立即同步')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setEdgeSettingsOpen(true)}
+                  >
+                    {t('同步设置')}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <button className="sidebar-collapse-btn" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.3s ease', flexShrink: 0 }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
@@ -916,6 +1076,9 @@ function AppShell() {
         <main className="main-content">
           <PageTransition>
             <Suspense fallback={<RouteLoadingFallback />}>
+              {edgeMode && !EDGE_MODE_NAV_PATHS.has(location.pathname) ? (
+                <Navigate to="/model-forwarding" replace />
+              ) : (
               <Routes>
                 <Route path="/" element={<Dashboard adminName={displayName} />} />
                 <Route path="/sites" element={<Sites />} />
@@ -942,6 +1105,7 @@ function AppShell() {
                 <Route path="/about" element={<About />} />
                 <Route path="*" element={<Navigate to="/" />} />
               </Routes>
+              )}
             </Suspense>
           </PageTransition>
         </main>
@@ -954,7 +1118,14 @@ function AppShell() {
         onSave={handleSaveProfile}
         t={t}
       />
-      <SearchModal open={showSearch} onClose={() => setShowSearch(false)} />
+      {edgeMode ? null : <SearchModal open={showSearch} onClose={() => setShowSearch(false)} />}
+      <EdgeSyncSettingsModal
+        open={edgeSettingsOpen}
+        status={edgeStatus}
+        syncing={edgeSyncing}
+        onClose={() => setEdgeSettingsOpen(false)}
+        onSync={runEdgeSync}
+      />
     </>
   );
 }

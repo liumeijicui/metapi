@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import { triggerEdgeSync, useEdgeStatus } from '../edgeMode.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
 import RuleEditorModal from './model-forwarding/RuleEditorModal.js';
@@ -30,6 +31,9 @@ function describeTargets(rule: ModelForwardRuleRow): string[] {
 
 export default function ModelForwarding() {
   const toast = useToast();
+  const edgeStatus = useEdgeStatus();
+  // 边缘版（exe）里这台机器只是服务器配置的只读镜像：规则只能在服务器上改。
+  const readOnly = edgeStatus?.edgeMode === true;
   const [rules, setRules] = useState<ModelForwardRuleRow[]>([]);
   const [options, setOptions] = useState<ModelForwardOptions>(EMPTY_OPTIONS);
   const [siteModels, setSiteModels] = useState<Record<number, string[]>>({});
@@ -39,6 +43,7 @@ export default function ModelForwarding() {
   const [editingRule, setEditingRule] = useState<ModelForwardRuleRow | null>(null);
   const [busyRuleId, setBusyRuleId] = useState<number | null>(null);
   const [busyTargetKey, setBusyTargetKey] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -62,6 +67,21 @@ export default function ModelForwarding() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const handleEdgeSync = async () => {
+    setSyncing(true);
+    try {
+      const result = await triggerEdgeSync();
+      if (result.ok) {
+        toast.success(result.imported ? tr('已同步服务器最新转发配置') : tr('服务器配置没有变化'));
+        await load();
+      } else {
+        toast.error(result.message || tr('同步失败'));
+      }
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const loadSiteModels = useCallback(async (siteId: number) => {
     if (!Number.isSafeInteger(siteId) || siteId <= 0) return;
@@ -205,17 +225,38 @@ export default function ModelForwarding() {
         <div>
           <h1 className="page-title">{tr('模型转发')}</h1>
           <div className="page-subtitle">
-            {tr('把对外模型名固定转发到指定站点、上游模型与账号；优先级高于「路由」页面里的同名路由，规则未启用时自动回落老路由。')}
+            {readOnly
+              ? tr('本机是只读镜像：转发规则在服务器上维护，这里只用来查看和拉取。')
+              : tr('把对外模型名固定转发到指定站点、上游模型与账号；优先级高于「路由」页面里的同名路由，规则未启用时自动回落老路由。')}
           </div>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => { setEditingRule(null); setEditorOpen(true); }}
-        >
-          {tr('新建转发')}
-        </button>
+        {readOnly ? (
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={syncing}
+            onClick={() => void handleEdgeSync()}
+          >
+            {syncing ? tr('同步中…') : tr('从服务器同步')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => { setEditingRule(null); setEditorOpen(true); }}
+          >
+            {tr('新建转发')}
+          </button>
+        )}
       </div>
+
+      {readOnly ? (
+        <div className="edge-mirror-banner">
+          <span>
+            {tr('本机不改转发规则：需要调整时请在服务器上改好，再点右上角「从服务器同步」拉下来。')}
+          </span>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="card" style={{ padding: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
@@ -223,7 +264,9 @@ export default function ModelForwarding() {
         </div>
       ) : rules.length === 0 ? (
         <div className="card" style={{ padding: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
-          {tr('还没有转发规则。点右上角「新建转发」，选择站点、模型和账号即可。')}
+          {readOnly
+            ? tr('本机还没有转发规则。请确认服务器上已配置，然后点右上角「从服务器同步」。')
+            : tr('还没有转发规则。点右上角「新建转发」，选择站点、模型和账号即可。')}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -243,29 +286,33 @@ export default function ModelForwarding() {
                   </span>
                 ) : null}
                 <span style={{ flex: 1 }} />
-                <button
-                  type="button"
-                  className="btn btn-link"
-                  disabled={busyRuleId === rule.id}
-                  onClick={() => void handleToggle(rule)}
-                >
-                  {rule.enabled ? tr('停用') : tr('启用')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-link"
-                  onClick={() => { setEditingRule(rule); setEditorOpen(true); }}
-                >
-                  {tr('编辑')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-link btn-link-danger"
-                  disabled={busyRuleId === rule.id}
-                  onClick={() => void handleDelete(rule)}
-                >
-                  {tr('删除')}
-                </button>
+                {readOnly ? null : (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-link"
+                      disabled={busyRuleId === rule.id}
+                      onClick={() => void handleToggle(rule)}
+                    >
+                      {rule.enabled ? tr('停用') : tr('启用')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-link"
+                      onClick={() => { setEditingRule(rule); setEditorOpen(true); }}
+                    >
+                      {tr('编辑')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-link btn-link-danger"
+                      disabled={busyRuleId === rule.id}
+                      onClick={() => void handleDelete(rule)}
+                    >
+                      {tr('删除')}
+                    </button>
+                  </>
+                )}
               </div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -334,6 +381,8 @@ export default function ModelForwarding() {
                         {state}
                       </span>
                       <span style={{ flex: 1 }} />
+                      {readOnly ? null : (
+                      <>
                       <button
                         type="button"
                         className="btn btn-link"
@@ -387,6 +436,8 @@ export default function ModelForwarding() {
                       >
                         {tr('删除')}
                       </button>
+                      </>
+                      )}
                     </div>
                   );
                 })}
@@ -408,7 +459,7 @@ export default function ModelForwarding() {
       )}
 
       <RuleEditorModal
-        open={editorOpen}
+        open={editorOpen && !readOnly}
         editingRule={editingRule}
         options={options}
         siteModels={siteModels}

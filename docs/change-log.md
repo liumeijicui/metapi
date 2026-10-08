@@ -1,3 +1,31 @@
+### 84. Metapi Edge（exe）本地只转发：登录页填服务器地址，配置只拉不推
+
+- **类型**：新功能（独立桌面版）
+- **需求来源**：本会话需求（“在这个项目的基础上做个 exe 的简便版本，只做模型转发和使用日志两个地方”；“服务器IP端口写在exe的登录下的设置位置”；“exe 不往服务端推送信息，只是从服务端拉取信息”）
+- **背景**：服务器上行带宽小，大上下文请求的首字节时间被“把请求体上传到服务器”拖掉好几秒。把请求改从本机出口发出去就能省掉这段等待，但转发之外的活（签到、重登、余额/模型采集、公告、备份）必须继续留在服务器，所以边缘实例只做转发和使用日志。
+- **改动**：
+  1. **服务器侧只读接口**：新增 `GET /api/edge/model-forward-rules`（`src/server/routes/api/edgeSync.ts` + `exportModelForwardSnapshot()`），补齐 backup export 里没有的 `model_forward_rules` / `model_forward_targets`。鉴权沿用 `/api/*` 全局 `authMiddleware`。
+  2. **本地边缘实例 `src/server/edge/`**：独立入口 `main.ts`，只注册 `/api/edge/*` 管理接口与 `/v1` 转发，不 import 任何调度器（`edgeBoundary.architecture.test.ts` 静态锁死）。数据目录用闸门拦住：必须是显式 `DATA_DIR`、不能是主服务的 `./data`、`HOST` 必须是 `127.0.0.1`。
+  3. **同步源落到设置表**：服务器地址存 `edge_sync_source_url`，令牌就是 `auth_token`（`syncSource.ts`）。因为 `auth_token` 同时被 `applyRuntimeSettings` 热加载成 `config.authToken`，所以“登录 exe 的密码”天然等于本地 `/api/*` 的令牌，也等于服务器上的管理员令牌 —— 一个值三处通用，不需要额外凭证体系。
+  4. **登录即校验**：`PUT /api/edge/sync-source` 先拿一个 GET 探针（`/api/settings/auth/info`）到服务器验令牌，验过了才写库并热加载；令牌不对 / 连不上 / HTTP 非 200 分别给出可读提示。`GET /api/edge/status`（登录页要读当前地址）与这个 PUT 免本地鉴权，其余 `/api/*` 仍然要求令牌；`POST /api/edge/sync` 需要本地令牌。
+  5. **只拉不推**：`configSync.ts` 全部使用 GET，按内容指纹去抖（剔除 `timestamp/exportedAt/generatedAt`），先导入 accounts 再镜像转发规则（导入会级联删掉本地转发目标行），最后失效 tokenRouter / siteProxy 缓存并重建路由。服务器那侧只多了这一个只读接口，没有任何回写路径。
+  6. **本地策略覆盖**：`localSettingsPolicy.ts` 把服务器那份 `system_proxy_url`（服务器本地代理）、`admin_ip_allowlist`、各类通知开关改成固定值；WebDAV 备份配置直接丢弃。照抄服务器的值会让本地要么连不上网、要么把自己挡在门外、要么重复告警。
+  7. **前端（只影响边缘版）**：`edgeMode.ts` 探测 `/api/edge/status`，探到才启用边缘 UI —— 登录页下方多出“同步设置（服务器地址 + 端口）”，侧边栏只留“模型转发 / 使用日志”并带“立即同步 / 同步设置”，模型转发页变成只读镜像（隐藏新建/编辑/删改，换成“从服务器同步”按钮）。普通服务器版探测不到该接口，UI 行为一字未变。
+  8. **桌面壳**：`electron-builder.edge.yml`（`Metapi Edge`、独立 appId 与 `release/edge` 产物），入口 `dist/server/edge/main.js`、数据目录 `userData/edge-data`、默认端口 `127.0.0.1:30086`；边缘入口托管打包好的前端（`webAssets.ts`），桌面壳靠 `/api/desktop/health` 探活。
+
+  9. **打包链路能跑起来**：新增 `scripts/desktop/packEdgeDesktop.mjs` —— better-sqlite3 是 ABI 相关的原生模块，而边缘实例的服务进程跑在 Electron 自带的 Node 上，所以打包前要按 Electron ABI（42.0.1 → 146）换成官方预编译二进制、打完再还原；electron-builder 自带的 @electron/rebuild 因为依赖的 node-abi 还不认识这个 ABI，会直接报「无法探测 ABI」，故 `electron-builder.edge.yml` 关掉 `npmRebuild`。依赖里 better-sqlite3 顺带从 12.10.0 提到 12.11.1（12.10.0 没有 electron-v146 的预编译包）。另外给 `extraMetadata` 补了 `productName: Metapi Edge`，否则边缘版和完整版共用 `%APPDATA%\metapi`，两个 Chromium 实例会抢同一个用户数据目录。
+  10. **修好边缘入口的启动闸门顺序**：入口改成先只 import `edgeEnv.ts` 跑闸门，其余依赖（含会在模块求值阶段就按 `DATA_DIR` 建出 `hub.db` 的 `db/index.js`）一律动态 `await import()`。原来静态 import 会在闸门之前就把库建出来，于是「数据目录里已有数据库但不是边缘实例创建的」永远成立，误指主服务数据目录时也拦不住。
+  11. **登录页回填默认服务器**：`EDGE_DEFAULT_SERVER_HOST` / `EDGE_DEFAULT_SERVER_PORT` 固定为 `43.142.48.105` + `81`（服务器 nginx 对外端口；4000 从公网连不上），用户只需要填令牌。
+- **验证**：
+  - 类型门 `typecheck:server / :desktop / :web / :web:test` 全过；`repo:drift-check` 无新增债务。
+  - `src/server/edge` 12 例（同步源存取与登录探针、只拉不推、边界约束）与 `src/server/routes/api/edgeSync.test.ts` 2 例全过；`src/web` 全量 553 例中仅剩 2 个与本改动无关的环境性失败（模型名 locale 排序、Accounts 重绑快照）。
+  - 打包：`npm run dist:desktop:edge` 产出 `release/edge/metapi-edge-1.3.0-win-x64.exe`（安装包）与同名 `.zip`；核对包内 `better-sqlite3` 二进制就是 Electron ABI 那份（哈希一致），打包结束后 node_modules 已还原回 node ABI。
+  - 原生进程冒烟（`node dist/server/edge/main.js`）：`/api/desktop/health` 200、`/api/edge/status` 200 且 `edgeMode:true`、`/api/model-forward-rules` 401、错误令牌的 `PUT /api/edge/sync-source` 400 并给出可读原因。
+  - 安装包冒烟（直接跑 `release/edge/win-unpacked/Metapi Edge.exe`）：本地服务在 `127.0.0.1:30086` 起来，登录页与 `/assets/*` 全部 200、未登录访问业务接口 401；对真实服务器 `43.142.48.105:81` 的令牌探针返回 403，按预期转成「令牌不正确」。
+- **主要文件**：`src/server/edge/{main,edgeEnv,configSync,syncSource,statusRoutes,webAssets,forwardRulesMirror,localSettingsPolicy}.ts`、`src/server/routes/api/edgeSync.ts`、`src/web/{edgeMode.ts,App.tsx,components/EdgeServerFields.tsx,components/EdgeSyncSettingsModal.tsx,pages/ModelForwarding.tsx}`、`src/desktop/{main,runtime}.ts`、`electron-builder.edge.yml`。
+- **状态**：已完成
+
+
 ### 83. agentrouter 自动续期 + 自动保活：签到失败的真因是请求头、时区、以及「没人在看这个账号」
 
 - **类型**：缺陷修复 + 新增保活机制

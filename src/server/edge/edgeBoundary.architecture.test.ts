@@ -30,10 +30,12 @@ const FORBIDDEN_MODULES = [
   'proxyFileRetentionService',
 ];
 
-/** 边缘入口不该做的事：托管前端、跑主服务的初始化逻辑、清理受管浏览器。 */
+/**
+ * 边缘入口不该做的事：跑主服务的初始化逻辑、清理受管浏览器。
+ * 前端托管单独放在 webAssets.ts（exe 需要登录页 + 两个页面），入口只调用它，见最后一个用例。
+ */
 const FORBIDDEN_ENTRY_SNIPPETS = [
   'registerDesktopRoutes',
-  'fastifyStatic',
   'ensureDefaultSitesSeeded',
   'repairStoredCreatedAtValues',
   'migrateSiteApiKeysToAccounts',
@@ -77,9 +79,21 @@ describe('edge relay 边界', () => {
     expect(/['\"](POST|PUT|PATCH|DELETE)['\"]/.test(syncSource)).toBe(false);
   });
 
-  it('边缘入口不得托管前端或跑主服务的初始化逻辑', () => {
+  it('边缘入口不跑主服务的初始化逻辑', () => {
     const mainSource = readFileSync(join(EDGE_DIR, 'main.ts'), 'utf8');
     const offenders = FORBIDDEN_ENTRY_SNIPPETS.filter((snippet) => mainSource.includes(snippet));
     expect(offenders).toEqual([]);
+  });
+
+  it('前端静态资源只由 webAssets.ts 托管，且不掺业务逻辑', () => {
+    const mainSource = readFileSync(join(EDGE_DIR, 'main.ts'), 'utf8');
+    // 入口只调用 registerEdgeWebAssets，自己不认识 fastifyStatic。
+    expect(mainSource).not.toContain('fastifyStatic');
+
+    const webAssets = readFileSync(join(EDGE_DIR, 'webAssets.ts'), 'utf8');
+    expect(webAssets).toContain("'../../web'");
+    // 只发静态文件：不得引入服务、路由、数据库或调度器模块。
+    expect(/from '\.\.\/(services|routes|db)\//.test(webAssets)).toBe(false);
+    expect(webAssets).not.toContain('authMiddleware');
   });
 });
