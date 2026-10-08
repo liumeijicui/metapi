@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const fetchModelPricingCatalogMock = vi.fn(async (_arg?: unknown): Promise<any> => null);
+const fetchModelPricingCatalogMock = vi.fn(async (_arg?: unknown, _opts?: unknown): Promise<any> => null);
 
 vi.mock('./modelPricingService.js', () => ({
-  fetchModelPricingCatalog: (arg: unknown) => fetchModelPricingCatalogMock(arg),
+  fetchModelPricingCatalog: (arg: unknown, opts: unknown) => fetchModelPricingCatalogMock(arg, opts),
 }));
 
 import { resolveUpstreamEndpointCandidates } from './upstreamEndpointDerivation.js';
@@ -160,5 +160,42 @@ describe('upstreamEndpointDerivation', () => {
     );
 
     expect(order).toEqual([]);
+  });
+
+  it('reorders endpoints from a cached pricing catalog', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [
+        {
+          modelName: 'gpt-5.3',
+          supportedEndpointTypes: ['/v1/chat/completions'],
+        },
+      ],
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'responses',
+    );
+
+    // 默认顺序是 responses 优先；价目表只声明支持 chat，于是 chat 被提到最前。
+    expect(order).toEqual(['chat', 'responses', 'messages']);
+    // 请求路径必须走「只读缓存」，不等待抓取。
+    expect(fetchModelPricingCatalogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      { cacheOnly: true },
+    );
+  });
+
+  it('falls back to the default order when the catalog cache is empty', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue(null);
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['responses', 'chat', 'messages']);
   });
 });

@@ -249,7 +249,7 @@ export async function resolveUpstreamEndpointCandidates(
   );
 
   try {
-    const catalog = await fetchModelPricingCatalog({
+    const pricingInput = {
       site: {
         id: context.site.id,
         url: context.site.url,
@@ -262,7 +262,10 @@ export async function resolveUpstreamEndpointCandidates(
       },
       modelName,
       totalTokens: 0,
-    });
+    };
+    // 价目表只用来微调端点候选顺序，绝不能让它挡住上游请求：缓存不新鲜时
+    // 先用现有（可能是旧的）数据，同时在后台补一次。
+    const catalog = await fetchModelPricingCatalog(pricingInput, { cacheOnly: true });
 
     if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) {
       return finalizeCandidates(prioritizedPreferredEndpoints);

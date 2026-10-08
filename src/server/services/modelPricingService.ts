@@ -11,6 +11,12 @@ import {
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
+/**
+ * 过期后仍可继续使用的时长。价目表只用来给「端点候选排序」和「成本估算」做
+ * 参考，宁可先用旧数据、后台再刷新，也不要在请求路径上等一次网络往返。
+ */
+const PRICE_CACHE_STALE_TTL_MS = 6 * 60 * 60 * 1000;
+const PRICE_CACHE_FAILURE_STALE_TTL_MS = 5 * 60 * 1000;
 const PRICING_FETCH_TIMEOUT_MS = 8_000;
 const DEFAULT_GROUP = 'default';
 const ONE_HUB_PER_CALL_RATIO = 0.002;
@@ -147,6 +153,11 @@ export interface ProxyBillingDetails {
 
 const pricingCache = new Map<string, PricingCacheEntry>();
 const routingReferenceCostCache = new Map<string, RoutingReferenceCostCacheEntry>();
+/**
+ * 同一个站点的价目表抓取只允许一份在飞：启动或缓存同时过期时，并发请求
+ * 会同时发现缓存失效，没有这层去重就会打出一串重复的抓取。
+ */
+const pricingFetchInFlight = new Map<string, Promise<PricingData | null>>();
 
 function toNumber(value: unknown, fallback = 0): number {
   const n = typeof value === 'number' ? value : Number(value);
@@ -491,38 +502,92 @@ async function fetchPricingData(input: EstimateProxyCostInput): Promise<PricingD
 
 async function getPricingDataCached(input: EstimateProxyCostInput): Promise<PricingData | null> {
   const key = getCacheKey(input);
-  const now = Date.now();
   const cached = pricingCache.get(key);
-  if (cached && now - cached.fetchedAt < cached.ttlMs) {
+  if (cached && Date.now() - cached.fetchedAt < cached.ttlMs) {
     if (cached.data && !routingReferenceCostCache.has(key)) {
       syncRoutingReferenceCostCache(key, cached.fetchedAt, cached.ttlMs, cached.data);
     }
     return cached.data;
   }
 
-  const data = await fetchPricingData(input);
-  const ttlMs = data ? PRICE_CACHE_TTL_MS : PRICE_CACHE_FAILURE_TTL_MS;
-  pricingCache.set(key, {
-    fetchedAt: now,
-    ttlMs,
-    data,
-  });
-  syncRoutingReferenceCostCache(key, now, ttlMs, data);
-  return data;
+  return fetchPricingDataDeduped(input);
 }
 
 async function refreshPricingDataCache(input: EstimateProxyCostInput): Promise<PricingData | null> {
-  const key = getCacheKey(input);
-  const now = Date.now();
-  const data = await fetchPricingData(input);
+  return fetchPricingDataDeduped(input);
+}
+
+function storePricingDataCacheEntry(key: string, data: PricingData | null): void {
+  const fetchedAt = Date.now();
   const ttlMs = data ? PRICE_CACHE_TTL_MS : PRICE_CACHE_FAILURE_TTL_MS;
   pricingCache.set(key, {
-    fetchedAt: now,
+    fetchedAt,
     ttlMs,
     data,
   });
-  syncRoutingReferenceCostCache(key, now, ttlMs, data);
-  return data;
+  syncRoutingReferenceCostCache(key, fetchedAt, ttlMs, data);
+}
+
+function fetchPricingDataDeduped(input: EstimateProxyCostInput): Promise<PricingData | null> {
+  const key = getCacheKey(input);
+  const inFlight = pricingFetchInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const data = await fetchPricingData(input);
+    storePricingDataCacheEntry(key, data);
+    return data;
+  })();
+  pricingFetchInFlight.set(key, task);
+  const release = () => {
+    if (pricingFetchInFlight.get(key) === task) pricingFetchInFlight.delete(key);
+  };
+  task.then(release, release);
+  return task;
+}
+
+function pricingCacheStaleTtlMs(data: PricingData | null): number {
+  return data ? PRICE_CACHE_STALE_TTL_MS : PRICE_CACHE_FAILURE_STALE_TTL_MS;
+}
+
+/**
+ * 只读缓存、绝不发网络请求。给请求路径用：拿到旧数据也比卡一次网络往返强。
+ */
+export function peekPricingDataCache(input: EstimateProxyCostInput): {
+  data: PricingData | null;
+  /** 缓存里是否还有可用条目（可能是已过期数据）。 */
+  present: boolean;
+  /** 条目是否仍在 TTL 内。 */
+  fresh: boolean;
+} {
+  const key = getCacheKey(input);
+  const cached = pricingCache.get(key);
+  if (!cached) return { data: null, present: false, fresh: false };
+
+  const age = Date.now() - cached.fetchedAt;
+  if (age >= pricingCacheStaleTtlMs(cached.data)) {
+    return { data: null, present: false, fresh: false };
+  }
+  if (cached.data && !routingReferenceCostCache.has(key)) {
+    syncRoutingReferenceCostCache(key, cached.fetchedAt, cached.ttlMs, cached.data);
+  }
+  return {
+    data: cached.data,
+    present: true,
+    fresh: age < cached.ttlMs,
+  };
+}
+
+/**
+ * 后台补一次缓存，不等结果。缓存仍新鲜或已有在飞请求时直接返回。
+ */
+export function schedulePricingDataRefresh(input: EstimateProxyCostInput): void {
+  const key = getCacheKey(input);
+  const cached = pricingCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < cached.ttlMs) return;
+  if (pricingFetchInFlight.has(key)) return;
+
+  void fetchPricingDataDeduped(input).catch(() => {});
 }
 
 export function getCachedModelRoutingReferenceCost(input: {
@@ -851,8 +916,27 @@ export type ModelPricingCatalogInput = Omit<EstimateProxyCostInput, 'modelName'>
   modelName?: string;
 };
 
-export async function fetchModelPricingCatalog(input: ModelPricingCatalogInput): Promise<ModelPricingCatalog | null> {
-  const pricingData = await getPricingDataCached({ ...input, modelName: '' });
+export type ModelPricingCatalogOptions = {
+  /**
+   * 只读内存缓存、绝不发网络请求。代理请求路径上判断端点顺序时用它：
+   * 缓存缺失或过期就先按默认顺序走，同时在后台补一次。
+   * 默认（false）会等待一次抓取，适合响应结束后的成本估算。
+   */
+  cacheOnly?: boolean;
+};
+
+export async function fetchModelPricingCatalog(
+  input: ModelPricingCatalogInput,
+  options: ModelPricingCatalogOptions = {},
+): Promise<ModelPricingCatalog | null> {
+  const pricingInput = { ...input, modelName: '' };
+  if (options.cacheOnly) {
+    const peeked = peekPricingDataCache(pricingInput);
+    if (!peeked.fresh) schedulePricingDataRefresh(pricingInput);
+    return peeked.data ? buildModelPricingCatalogFromData(peeked.data) : null;
+  }
+
+  const pricingData = await getPricingDataCached(pricingInput);
   if (!pricingData) return null;
   return buildModelPricingCatalogFromData(pricingData);
 }
