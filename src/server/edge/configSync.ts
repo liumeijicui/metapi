@@ -5,6 +5,7 @@ import { invalidateSiteProxyCache } from '../services/siteProxy.js';
 import { invalidateTokenRouterCache } from '../services/tokenRouter.js';
 import { getEdgeEnv } from './edgeEnv.js';
 import { applyForwardRulesSnapshot, type ForwardRulesSnapshot } from './forwardRulesMirror.js';
+import { flushEdgeLogs, restoreEdgeLogs } from './logArchive.js';
 import {
   buildLocalPreferencesPayload,
   rehydrateLocalRuntimeSettings,
@@ -112,7 +113,8 @@ export function syncEdgeConfig(): Promise<EdgeSyncResult> {
 async function runSync(): Promise<EdgeSyncResult> {
   const source = await readEdgeSyncSource();
   if (!source.url || !source.token) {
-    return recordFailure('还没有配置同步源：请先填写服务器地址和管理令牌。');
+    // 还没登录（登录页只填了地址、令牌还没进来）：这不是故障，定时同步安静跳过，不写成错误状态。
+    return { ok: false, message: '还没有配置同步源：请先填写服务器地址和管理令牌。', at: new Date().toISOString() };
   }
 
   try {
@@ -139,7 +141,11 @@ async function runSync(): Promise<EdgeSyncResult> {
     }
 
     if (sections.accounts) {
+      // 导入账号会级联删掉本机日志，先把内存里最后一段（归档定时器还没刷到）刷进归档。
+      flushEdgeLogs();
       await importBackup(accountsPayload as Parameters<typeof importBackup>[0]);
+      // 导入账号会重建站点/账号并级联删掉本机使用日志，这里立刻从归档读回来，避免日志凭空少一段。
+      restoreEdgeLogs();
     }
 
     // 规则镜像必须排在 accounts 导入之后：导入重建 accounts/sites 会级联删掉本地转发目标行。

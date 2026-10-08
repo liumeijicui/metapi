@@ -65,7 +65,8 @@ export async function edgeStatusRoutes(app: FastifyInstance) {
     };
   });
 
-  // 登录页 /「同步设置」保存服务器地址与令牌：先到服务器验令牌，验过了才落库。
+  // 登录页 /「同步设置」保存服务器地址与令牌：先到服务器验令牌，验过了才写入本机
+  // （地址写连接文件，令牌只进内存）。
   app.put('/api/edge/sync-source', async (request, reply) => {
     const body = (request.body || {}) as { url?: unknown; token?: unknown };
     const url = normalizeEdgeSourceUrl(typeof body.url === 'string' ? body.url : '');

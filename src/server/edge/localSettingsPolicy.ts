@@ -1,5 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { applyRuntimeSettings } from '../runtimeSettingsHydration.js';
+import { detectLocalSystemProxyUrl } from './localSystemProxy.js';
 
 /** settings 表里的一行（value 为 JSON 文本）。 */
 export type SettingsEntry = { key: string; value: unknown };
@@ -9,7 +10,8 @@ export type SettingsEntry = { key: string; value: unknown };
  * 这些项在同步时一律用下面的固定值覆盖服务器那份。
  */
 export const EDGE_OVERRIDE_SETTINGS: Record<string, unknown> = {
-  // 服务器那份通常指向服务器自己的本地代理（127.0.0.1:7890），本地照抄必然连接失败。
+  // 服务器那份通常指向服务器自己的本地代理（127.0.0.1:7890），本地照抄必然连接失败；
+  // 导入时这里会被换成「本机系统代理的探测结果」，见 buildLocalPreferencesPayload。
   system_proxy_url: '',
   // 本地只监听 127.0.0.1，照抄服务器的 IP 白名单会把本地浏览器挡在门外。
   admin_ip_allowlist: '',
@@ -21,10 +23,15 @@ export const EDGE_OVERRIDE_SETTINGS: Record<string, unknown> = {
   smtp_enabled: false,
 };
 
+/** 换成「本机系统代理探测结果」的那一项（值取不到就等于清空）。 */
+const LOCAL_SYSTEM_PROXY_KEY = 'system_proxy_url';
+
 /** 本地直接丢弃、不写入的 settings：属于服务器侧的备份行为，镜像过来只会误导。 */
 export const EDGE_IGNORED_SETTING_KEYS = new Set<string>([
   'backup_webdav_config_v1',
   'backup_webdav_state_v1',
+  // 本机管理员令牌：登录页填的那份要一直是本地鉴权令牌，不能被服务器导出的同名设置顶掉。
+  'auth_token',
 ]);
 
 export type LocalPreferencesPayload = {
@@ -63,7 +70,7 @@ export function buildLocalPreferencesPayload(input: {
   }
 
   for (const [key, value] of Object.entries(EDGE_OVERRIDE_SETTINGS)) {
-    kept.push({ key, value });
+    kept.push({ key, value: key === LOCAL_SYSTEM_PROXY_KEY ? detectLocalSystemProxyUrl() : value });
   }
 
   return {

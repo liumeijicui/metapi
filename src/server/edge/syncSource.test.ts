@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Fastify from 'fastify';
@@ -47,9 +47,6 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     process.env.METAPI_EDGE_MODE = '1';
     process.env.HOST = '127.0.0.1';
     process.env.PORT = '30086';
-    // 清掉环境变量兜底，确保断言只来自设置表。
-    delete process.env.METAPI_EDGE_CONFIG_SOURCE_URL;
-    delete process.env.METAPI_EDGE_CONFIG_SOURCE_TOKEN;
 
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
@@ -95,14 +92,19 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     expect(isEdgeOpenRoute('GET', '/api/model-forward-rules')).toBe(false);
   });
 
-  it('保存同步源会写进设置表，并把令牌热加载成本机管理员令牌', async () => {
+  it('保存同步源会把地址写进连接文件、令牌只进内存，并热加载成本机管理员令牌', async () => {
     const saved = await saveEdgeSyncSource({ url: sourceUrl, token: 'good-token' });
     expect(saved).toEqual({ url: `http://${sourceUrl}`, token: 'good-token' });
 
-    const urlRow = await db.select().from(schema.settings).all();
-    const stored = new Map(urlRow.map((row: AnyRecord) => [row.key, row.value]));
-    expect(JSON.parse(String(stored.get('edge_sync_source_url')))).toBe(`http://${sourceUrl}`);
+    // 地址落在数据目录的连接文件里（登录页要回填）；令牌只在内存库里，进程重启要重新登录。
+    const connectionFile = join(dataDir, 'edge-connection.json');
+    expect(existsSync(connectionFile)).toBe(true);
+    expect(JSON.parse(readFileSync(connectionFile, 'utf8')).url).toBe(`http://${sourceUrl}`);
+
+    const rows = await db.select().from(schema.settings).all();
+    const stored = new Map(rows.map((row: AnyRecord) => [row.key, row.value]));
     expect(JSON.parse(String(stored.get('auth_token')))).toBe('good-token');
+    expect(stored.has('edge_sync_source_url')).toBe(false);
     // 热加载之后本地 /api/* 就认这个令牌。
     expect(config.authToken).toBe('good-token');
 

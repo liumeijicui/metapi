@@ -1482,6 +1482,14 @@ export const db: any = new Proxy({}, {
 });
 export { schema };
 
+/**
+ * 取底层 SQLite 连接（只有 sqlite 方言有）。
+ * 内存库（DB_URL=:memory:）的调用方需要它：迁移、ATTACH 归档库都得落在同一条连接上。
+ */
+export function getSqliteConnection(): Database.Database | null {
+  return sqliteConnection;
+}
+
 export async function closeDbConnections(): Promise<void> {
   resetSchemaCapabilityCache();
   if (mysqlPool) {

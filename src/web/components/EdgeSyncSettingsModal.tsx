@@ -106,7 +106,7 @@ export default function EdgeSyncSettingsModal({
 
         <div className="edge-server-field">
           <label className="edge-server-label" htmlFor="edge-settings-token">
-            {t('管理员令牌（留空表示不修改）')}
+            {t('管理员令牌（留空表示沿用当前登录令牌）')}
           </label>
           <input
             id="edge-settings-token"

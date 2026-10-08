@@ -14,6 +14,9 @@ describe('edge 配置同步（只拉不推）', () => {
   let schema: AnyRecord;
   let eq: AnyRecord;
   let syncEdgeConfig: () => Promise<SyncResult>;
+  let saveEdgeSyncSource: (input: { url: string; token: string }) => Promise<unknown>;
+  let detectLocalSystemProxyUrl: () => string;
+  let sourceUrl = '';
   let payloads: Record<string, unknown> = {};
   let failNextRequest = false;
   const requests: Array<{ method: string; url: string; authorization: string }> = [];
@@ -50,7 +53,6 @@ describe('edge 配置同步（只拉不推）', () => {
     process.env.METAPI_EDGE_MODE = '1';
     process.env.HOST = '127.0.0.1';
     process.env.PORT = '30086';
-    process.env.METAPI_EDGE_CONFIG_SOURCE_TOKEN = 'edge-test-token';
     process.env.METAPI_EDGE_CONFIG_SYNC_INTERVAL_MS = '30000';
 
     await import('../db/migrate.js');
@@ -64,10 +66,12 @@ describe('edge 配置同步（只拉不推）', () => {
     await new Promise<void>((resolve) => { server!.listen(0, '127.0.0.1', () => resolve()); });
     const address = server.address();
     const port = typeof address === 'object' && address ? address.port : 0;
-    process.env.METAPI_EDGE_CONFIG_SOURCE_URL = `http://127.0.0.1:${port}`;
+    sourceUrl = `http://127.0.0.1:${port}`;
 
     const configSyncModule = await import('./configSync.js');
     syncEdgeConfig = configSyncModule.syncEdgeConfig as () => Promise<SyncResult>;
+    saveEdgeSyncSource = (await import('./syncSource.js')).saveEdgeSyncSource;
+    detectLocalSystemProxyUrl = (await import('./localSystemProxy.js')).detectLocalSystemProxyUrl;
   }, 60_000);
 
   afterAll(async () => {
@@ -140,6 +144,9 @@ describe('edge 配置同步（只拉不推）', () => {
     await db.delete(schema.sites).run();
     await db.delete(schema.settings).run();
 
+    // 登录：地址写连接文件、令牌只进内存，同步就按这份来。
+    await saveEdgeSyncSource({ url: sourceUrl, token: 'edge-test-token' });
+
     const result = await syncEdgeConfig();
     expect(result.ok).toBe(true);
     expect(result.sections).toEqual({ accounts: true, preferences: true, forwardRules: true });
@@ -159,7 +166,8 @@ describe('edge 配置同步（只拉不推）', () => {
     expect(mirroredTargets[0].upstreamModel).toBe('deepseek-v4-flash');
 
     // 本地策略：覆盖项按本地值写入。
-    expect(await readSetting('system_proxy_url')).toBe('');
+    // 系统代理不是照抄服务器那份，而是本机探测结果（探测不到就是空串）。
+    expect(await readSetting('system_proxy_url')).toBe(detectLocalSystemProxyUrl());
     expect(await readSetting('admin_ip_allowlist')).toBe('');
     expect(await readSetting('webhook_enabled')).toBe(false);
     expect(await readSetting('smtp_enabled')).toBe(false);

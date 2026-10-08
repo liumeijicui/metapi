@@ -8,10 +8,6 @@ const EDGE_MARKER_FILE = 'edge-instance.json';
 const MAIN_SERVICE_DEFAULT_DATA_DIR = './data';
 
 export type EdgeEnv = {
-  /** 配置源（服务器）地址，末尾不带斜杠。 */
-  configSourceUrl: string;
-  /** 配置源管理令牌（服务器 AUTH_TOKEN）。 */
-  configSourceToken: string;
   /** 自动同步间隔（毫秒）。 */
   syncIntervalMs: number;
   /** 数据目录绝对路径。 */
@@ -53,8 +49,6 @@ export function readEdgeEnv(env: NodeJS.ProcessEnv = process.env): EdgeEnv {
 
   const rawInterval = Number(env.METAPI_EDGE_CONFIG_SYNC_INTERVAL_MS || '');
   return {
-    configSourceUrl: (env.METAPI_EDGE_CONFIG_SOURCE_URL || '').trim().replace(/\/+$/, ''),
-    configSourceToken: (env.METAPI_EDGE_CONFIG_SOURCE_TOKEN || '').trim(),
     syncIntervalMs: Number.isFinite(rawInterval) && rawInterval > 0 ? Math.max(30_000, rawInterval) : 5 * 60_000,
     dataDirAbsolute,
   };

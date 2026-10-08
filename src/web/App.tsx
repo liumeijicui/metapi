@@ -387,6 +387,9 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
                 <div className="edge-server-hint" style={{ marginTop: 8 }}>
                   {t('令牌填服务器上的管理员令牌；本机只从服务器拉取配置，不会向服务器写入任何数据。')}
                 </div>
+                <div className="edge-server-hint" style={{ marginTop: 4 }}>
+                  {t('同步下来的配置只放在内存里，关闭 Metapi Edge 后需要重新登录。')}
+                </div>
               </div>
             ) : null}
             <div className="login-auth-note">{t('仅校验本地服务访问权限，不会把令牌发送到第三方。')}</div>

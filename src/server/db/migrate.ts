@@ -681,12 +681,23 @@ function bootstrapLegacyDrizzleMigrations(sqlite: Database.Database, migrationsF
 
 export function runSqliteMigrations(): void {
   const dbPath = resolveSqliteDbPath();
-  const migrationsFolder = resolveMigrationsFolder();
   if (dbPath !== ':memory:') {
     mkdirSync(dirname(dbPath), { recursive: true });
   }
 
   const sqlite = new Database(dbPath);
+  runSqliteMigrationsOn(sqlite);
+  sqlite.close();
+  console.log('Migration complete.');
+}
+
+/**
+ * 在给定连接上建表。
+ * 内存库（DB_URL=:memory:）只存在于创建它的那条连接上：迁移必须在同一条连接里跑，
+ * 否则表建到另一条临时内存连接里，连接一断就没了。
+ */
+export function runSqliteMigrationsOn(sqlite: Database.Database): void {
+  const migrationsFolder = resolveMigrationsFolder();
   bootstrapLegacyDrizzleMigrations(sqlite, migrationsFolder);
   backfillMissingRecordedMigrations(sqlite, migrationsFolder);
 
@@ -701,9 +712,10 @@ export function runSqliteMigrations(): void {
     deduplicateLegacySitesForUniqueIndex: () => deduplicateLegacySitesForUniqueIndex(sqlite),
     closeSqlite: () => sqlite.close(),
   });
-
-  sqlite.close();
-  console.log('Migration complete.');
 }
 
-runSqliteMigrations();
+// 被 import 时不自动迁移：内存库的迁移必须落在调用方自己的连接上（见 runSqliteMigrationsOn），
+// 自动跑的那次只会建到一条临时连接里，纯属白耗时间。直接执行本文件（npm run db:migrate）行为不变。
+if (resolveSqliteDbPath() !== ':memory:') {
+  runSqliteMigrations();
+}
