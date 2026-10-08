@@ -218,6 +218,45 @@ describe('model forward routes', () => {
     expect(badTarget.statusCode).toBe(400);
   });
 
+  it('DELETE 目标接口：直接删掉一个目标，最后一个目标会被拒绝', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/model-forward-rules',
+      payload: {
+        modelName: 'gpt-6-astra',
+        targets: [
+          { siteId, accountId, upstreamModel: 'model-a' },
+          { siteId, accountId, upstreamModel: 'model-b' },
+        ],
+      },
+    });
+    const rule = created.json().rule;
+    const targetId = (model: string) =>
+      rule.targets.find((target: { upstreamModel: string }) => target.upstreamModel === model).id;
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-a')}`,
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json().rule.targets.map((target: { upstreamModel: string }) => target.upstreamModel))
+      .toEqual(['model-b']);
+
+    // 只剩一个目标时不允许再删，需要改删整条规则。
+    const lastOne = await app.inject({
+      method: 'DELETE',
+      url: `/api/model-forward-rules/${rule.id}/targets/${targetId('model-b')}`,
+    });
+    expect(lastOne.statusCode).toBe(400);
+    expect(lastOne.json().message).toContain('最后一个转发目标');
+
+    const badId = await app.inject({
+      method: 'DELETE',
+      url: `/api/model-forward-rules/${rule.id}/targets/abc`,
+    });
+    expect(badId.statusCode).toBe(400);
+  });
+
   it('模型监控一键挂载接口：追加到末尾，重复返回 400', async () => {
     const first = await app.inject({
       method: 'POST',

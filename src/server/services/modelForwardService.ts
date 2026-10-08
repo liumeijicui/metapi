@@ -660,6 +660,40 @@ export async function setModelForwardTargetEnabled(
   return updated;
 }
 
+/**
+ * 直接删除某个转发目标：删除通道、重排剩余目标顺序并回收不再使用的通道。
+ * 若这是规则下的最后一个目标，则拒绝删除（规则至少要保留一个目标），
+ * 需要整体移除时请改删整条规则。
+ */
+export async function deleteModelForwardTarget(ruleId: number, targetId: number): Promise<ModelForwardRuleRow> {
+  const rule = await db.select().from(schema.modelForwardRules)
+    .where(eq(schema.modelForwardRules.id, ruleId))
+    .get();
+  if (!rule) throw new ModelForwardError('转发规则不存在');
+
+  const targets = await db.select().from(schema.modelForwardTargets)
+    .where(eq(schema.modelForwardTargets.ruleId, ruleId))
+    .orderBy(asc(schema.modelForwardTargets.sortOrder), asc(schema.modelForwardTargets.id))
+    .all();
+  const target = targets.find((item) => item.id === targetId);
+  if (!target) throw new ModelForwardError('转发目标不存在');
+  if (targets.length <= 1) {
+    throw new ModelForwardError('这是最后一个转发目标，删除后规则将没有可用目标；如确实不再需要，请直接删除整条转发规则');
+  }
+
+  const channelId = target.channelId;
+  await db.delete(schema.modelForwardTargets).where(eq(schema.modelForwardTargets.id, targetId)).run();
+  // 目标对应的通道已不再需要，直接删除；后续 sync 会按剩余目标重排 priority。
+  if (typeof channelId === 'number' && channelId > 0) {
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
+  }
+  await renumberTargetSortOrders(ruleId);
+  await syncModelForwardRule(ruleId);
+  const updated = (await listModelForwardRules()).find((item) => item.id === ruleId);
+  if (!updated) throw new ModelForwardError('删除转发目标失败');
+  return updated;
+}
+
 export async function setModelForwardRuleEnabled(id: number, enabled: boolean): Promise<ModelForwardRuleRow> {
   const existing = await db.select().from(schema.modelForwardRules)
     .where(eq(schema.modelForwardRules.id, id))

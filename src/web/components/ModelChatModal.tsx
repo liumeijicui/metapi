@@ -353,6 +353,7 @@ export default function ModelChatModal({
   const activeCredential = credentials.find((item) => buildCredentialKey(item) === credentialKey) || null;
 
   return (
+    <>
     <CenteredModal
       open={open}
       onClose={() => { if (!sending) onClose(); }}
@@ -360,17 +361,19 @@ export default function ModelChatModal({
       maxWidth={760}
       bodyStyle={{ padding: 0 }}
       footer={(
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, width: '100%' }}>
+        <div className="model-chat-footer">
           <span style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
             {tr('直连目标站点；日志里标记为「模型测试」')}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             {sending ? (
-              <button type="button" className="btn btn-ghost" onClick={stop}>{tr('停止')}</button>
+              <button type="button" className="btn btn-ghost model-chat-footer-btn" onClick={stop}>
+                {tr('停止')}
+              </button>
             ) : null}
             <button
               type="button"
-              className="btn btn-ghost"
+              className="btn btn-ghost model-chat-footer-btn"
               onClick={() => setMessages([])}
               disabled={!messages.length || sending}
             >
@@ -465,40 +468,6 @@ export default function ModelChatModal({
           )}
         </div>
 
-        {promptPickerOpen ? (
-          <div className="model-chat-prompt-picker">
-            <div className="model-chat-prompt-head">
-              <input
-                value={promptQuery}
-                onChange={(event) => setPromptQuery(event.target.value)}
-                placeholder={tr('搜索提示词（鹈鹕测试 / 糖果测试…）')}
-                autoFocus
-              />
-              <button type="button" className="btn btn-ghost" onClick={() => setPromptPickerOpen(false)}>
-                {tr('收起')}
-              </button>
-            </div>
-            <div className="model-chat-prompt-list">
-              {filteredPrompts.length === 0 ? (
-                <div className="model-chat-prompt-empty">{tr('提示词管理里还没有题目')}</div>
-              ) : filteredPrompts.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className="model-chat-prompt-item"
-                  onClick={() => applyPrompt(item)}
-                  title={item.prompt}
-                >
-                  <span className="model-chat-prompt-title">{item.title}</span>
-                  {item.answer ? (
-                    <span className="model-chat-prompt-answer">{tr('答案')} {item.answer}</span>
-                  ) : null}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
         <div className="model-chat-composer">
           <textarea
             value={input}
@@ -516,8 +485,8 @@ export default function ModelChatModal({
           <div className="model-chat-composer-actions">
             <button
               type="button"
-              className={`btn btn-ghost${promptPickerOpen ? ' btn-ghost-active' : ''}`}
-              onClick={() => setPromptPickerOpen((current) => !current)}
+              className="btn btn-ghost model-chat-footer-btn"
+              onClick={() => setPromptPickerOpen(true)}
             >
               {tr('快捷提示词')}{promptCases.length ? ` (${promptCases.length})` : ''}
             </button>
@@ -533,5 +502,54 @@ export default function ModelChatModal({
         </div>
       </div>
     </CenteredModal>
+
+    <CenteredModal
+      open={open && promptPickerOpen}
+      onClose={() => { setPromptPickerOpen(false); setPromptQuery(''); }}
+      title={tr('快捷提示词')}
+      maxWidth={560}
+      closeOnBackdrop
+      closeOnEscape
+      footer={(
+        <button
+          type="button"
+          className="btn btn-ghost model-chat-footer-btn"
+          onClick={() => { setPromptPickerOpen(false); setPromptQuery(''); }}
+        >
+          {tr('关闭')}
+        </button>
+      )}
+    >
+      <div className="model-chat-prompt-head">
+        <input
+          value={promptQuery}
+          onChange={(event) => setPromptQuery(event.target.value)}
+          placeholder={tr('搜索提示词（鹈鹕测试 / 糖果测试…）')}
+          autoFocus
+        />
+      </div>
+      <div className="model-chat-prompt-list model-chat-prompt-list-modal">
+        {filteredPrompts.length === 0 ? (
+          <div className="model-chat-prompt-empty">{tr('提示词管理里还没有题目')}</div>
+        ) : filteredPrompts.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className="model-chat-prompt-item"
+            onClick={() => applyPrompt(item)}
+            title={item.prompt}
+          >
+            <span className="model-chat-prompt-title">{item.title}</span>
+            {item.answer ? (
+              <span className="model-chat-prompt-answer">{tr('答案')} {item.answer}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+      <div className="model-chat-prompt-tip">
+        {tr('选中后会把题目描述填进输入框，可再手动修改。')}
+      </div>
+    </CenteredModal>
+    </>
   );
 }

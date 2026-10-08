@@ -60,6 +60,21 @@ describe('ModelMonitor 对话按钮', () => {
     expect(modal).toContain('filteredPrompts.map');
     // 手动输入框仍然保留
     expect(modal).toContain('<textarea');
+    // 快捷提示词从内联面板改成弹窗：Windows 端内联面板会被聊天窗压扁，点不到。
+    expect(modal).toContain('open={open && promptPickerOpen}');
+    expect(modal).toContain('closeOnBackdrop');
+    expect(modal).not.toContain('model-chat-prompt-picker');
+  });
+
+  it('「清空对话」按钮有实心底色与边框，不再透明地叠在输入区上', () => {
+    expect(modal).toContain('model-chat-footer-btn');
+    const css = readFileSync(resolve(process.cwd(), 'src/web/index.css'), 'utf8');
+    const footerRule = css.match(/\.model-chat-footer-btn \{[^}]*\}/)?.[0] ?? '';
+    expect(footerRule).toContain('background: var(--color-bg-card);');
+    expect(footerRule).toContain('border: 1px solid var(--color-border);');
+    // 聊天窗本身超高时内部裁切，不能溢出去压住底部的按钮。
+    const chatRule = css.match(/\.model-chat \{[^}]*\}/)?.[0] ?? '';
+    expect(chatRule).toContain('overflow: hidden;');
   });
 
   it('对话结束后显示上游声明的结束原因与用量，便于分辨是上游截断还是我们断了', () => {

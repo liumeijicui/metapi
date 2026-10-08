@@ -230,6 +230,53 @@ function SiteBalanceDisplay(props: {
 }
 
 /**
+ * 「总余额」后面的小刷新钮：只刷新这一个站点的余额。
+ * 站点行本身点击会切换选中，所以要 stopPropagation，别顺带把行选中了。
+ */
+function SiteBalanceRefreshButton(props: {
+  siteId: number;
+  refreshing: boolean;
+  disabled: boolean;
+  onRefresh: () => void;
+}) {
+  const { siteId, refreshing, disabled, onRefresh } = props;
+  const label = '只刷新该站点的余额';
+  return (
+    <button
+      type="button"
+      className="site-balance-refresh"
+      data-testid={`site-refresh-balance-${siteId}`}
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        onRefresh();
+      }}
+    >
+      {refreshing ? (
+        <span className="spinner spinner-sm" />
+      ) : (
+        <svg
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 12a9 9 0 1 1-3.2-6.9" />
+          <path d="M21 3v6h-6" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/**
  * Shows whether the site has checked in today and how far along it is.
  *
  * A site counts as done once any one of its accounts succeeds, but the progress
@@ -350,6 +397,8 @@ export default function Sites() {
   const [refreshingBalances, setRefreshingBalances] = useState(false);
   // Per-site outcome of the last balance refresh: true = timestamp moved, false = it did not.
   const [refreshOutcome, setRefreshOutcome] = useState<Record<number, boolean>>({});
+  // 单个站点余额刷新中（同一时刻只允许一个），值是要刷新的站点 id。
+  const [refreshingSiteBalanceId, setRefreshingSiteBalanceId] = useState<number | null>(null);
   const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
   const [createdSiteForChoice, setCreatedSiteForChoice] = useState<{
@@ -1339,6 +1388,50 @@ export default function Sites() {
       setRefreshingBalances(false);
     }
   };
+  /**
+   * 只刷新一个站点的余额：复用同一套后台任务 + 轮询时间戳的逻辑，
+   * 只是把范围缩到这一个站点，结果只写进它自己的 refreshOutcome。
+   */
+  const refreshSingleSiteBalance = async (site: SiteRow) => {
+    if (refreshingSiteBalanceId !== null) return;
+    if ((site.accountCount ?? 0) <= 0) {
+      toast.info(`${site.name} 没有绑定账号，无法刷新余额`);
+      return;
+    }
+    setRefreshingSiteBalanceId(site.id);
+    setRefreshOutcome((prev) => {
+      if (!(site.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[site.id];
+      return next;
+    });
+    const previousStamp = site.lastBalanceRefresh;
+    try {
+      await api.refreshSiteBalances([site.id]);
+      const deadline = Date.now() + 30_000;
+      let after: string | null | undefined = previousStamp;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const rows = (await api.getSites()) as SiteRow[];
+        setSites(rows || []);
+        after = (rows || []).find((row) => row.id === site.id)?.lastBalanceRefresh;
+        if (!!after && after !== previousStamp) break;
+      }
+      const moved = !!after && after !== previousStamp;
+      setRefreshOutcome((prev) => ({ ...prev, [site.id]: moved }));
+      await load();
+      if (moved) {
+        toast.success(`${site.name} 余额已刷新`);
+      } else {
+        toast.info(`${site.name} 余额没有更新（可能账号凭据已失效）`);
+      }
+    } catch (e: any) {
+      toast.error(e.message || '刷新余额失败');
+    } finally {
+      setRefreshingSiteBalanceId(null);
+    }
+  };
+
   const handleSiteRowClick = (siteId: number, event: React.MouseEvent<HTMLTableRowElement>) => {
     if (shouldIgnoreRowSelectionClick(event.target)) return;
     const isSelected = selectedSiteIds.includes(siteId);
@@ -2412,11 +2505,19 @@ export default function Sites() {
                     <MobileField
                       label="余额"
                       value={(
-                        <SiteBalanceDisplay
-                          balance={site.totalBalance}
-                          summary={site.subscriptionSummary}
-                          align="end"
-                        />
+                        <div className="site-balance-cell-inner align-end">
+                          <SiteBalanceDisplay
+                            balance={site.totalBalance}
+                            summary={site.subscriptionSummary}
+                            align="end"
+                          />
+                          <SiteBalanceRefreshButton
+                            siteId={site.id}
+                            refreshing={refreshingSiteBalanceId === site.id}
+                            disabled={refreshingSiteBalanceId !== null}
+                            onRefresh={() => void refreshSingleSiteBalance(site)}
+                          />
+                        </div>
                       )}
                     />
                     <MobileField label="今日签到" value={(
@@ -2654,10 +2755,18 @@ export default function Sites() {
                       ) : null}
                     </td>
                     <td className="site-balance-cell">
-                      <SiteBalanceDisplay
-                        balance={site.totalBalance}
-                        summary={site.subscriptionSummary}
-                      />
+                      <div className="site-balance-cell-inner">
+                        <SiteBalanceDisplay
+                          balance={site.totalBalance}
+                          summary={site.subscriptionSummary}
+                        />
+                        <SiteBalanceRefreshButton
+                          siteId={site.id}
+                          refreshing={refreshingSiteBalanceId === site.id}
+                          disabled={refreshingSiteBalanceId !== null}
+                          onRefresh={() => void refreshSingleSiteBalance(site)}
+                        />
+                      </div>
                     </td>
                     <td data-testid={`site-checkin-${site.id}`}>
                       <SiteCheckinDisplay site={site} />

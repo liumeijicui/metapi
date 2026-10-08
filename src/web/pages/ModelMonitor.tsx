@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import Combobox from '../components/Combobox.js';
 import ModelChatModal from '../components/ModelChatModal.js';
+import DownstreamKeyCcSwitchModal, { type CcSwitchKeyTarget } from './downstream-keys/DownstreamKeyCcSwitchModal.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -231,9 +232,49 @@ export default function ModelMonitor() {
   const [attachModelName, setAttachModelName] = useState('');
   const [attachBusy, setAttachBusy] = useState(false);
   const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);
+  // 「导入到 CC Switch」：先把原站的 base 地址与 sk- 密钥取回来，再打开弹窗。
+  const [ccSwitchTarget, setCcSwitchTarget] = useState<{ item: CcSwitchKeyTarget; baseUrl: string } | null>(null);
+  const [ccSwitchBusyKey, setCcSwitchBusyKey] = useState<string | null>(null);
   const [forwardNames, setForwardNames] = useState<string[]>([]);
   const [forwardNamesLoaded, setForwardNamesLoaded] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 打开「导入到 CC Switch」：取该站点自己的 sk- 密钥（原站凭据），不是我们网关的下游密钥。
+  const openCcSwitch = useCallback(async (model: ModelRow) => {
+    const busyKey = `${model.siteId}:${model.modelName}`;
+    setCcSwitchBusyKey(busyKey);
+    try {
+      const res = await api.getModelMonitorChatChannels(model.siteId, model.modelName);
+      const credentials = Array.isArray(res?.credentials) ? res.credentials : [];
+      const tokenCredential = credentials.find(
+        (item: { credential?: string; tokenId?: number | null }) =>
+          item?.credential === 'api_token' && Number(item?.tokenId) > 0,
+      );
+      if (!tokenCredential?.tokenId) {
+        toast.error(tr('该站点还没有 sk- 密钥，先在「站点」里生成一个再导入 CC Switch'));
+        return;
+      }
+      const value = await api.getAccountTokenValue(tokenCredential.tokenId);
+      const apiKey = String(value?.token || '').trim();
+      if (!apiKey) {
+        toast.error(tr('读取 sk- 密钥失败，请到「站点」里查看该密钥'));
+        return;
+      }
+      setCcSwitchTarget({
+        item: {
+          id: model.siteId,
+          name: `${model.siteName} · ${model.modelName}`,
+          key: apiKey,
+          supportedModels: [model.modelName],
+        },
+        baseUrl: String(model.siteUrl || '').trim(),
+      });
+    } catch (error: any) {
+      toast.error(error?.message || tr('读取原站配置失败'));
+    } finally {
+      setCcSwitchBusyKey(null);
+    }
+  }, [toast]);
 
   // 打开「挂到转发」弹窗时再拉一次对外模型清单，保证是当前的。
   const openAttach = useCallback(async (model: ModelRow) => {
@@ -352,6 +393,21 @@ export default function ModelMonitor() {
 
   const models = overview?.models ?? [];
   const sites = overview?.sites ?? [];
+  // CC Switch 导入弹窗里的模型候选：当前这份清单里的「站点 · 模型」，方便换模型名。
+  const ccSwitchModelOptions = useMemo(() => {
+    const byName = new Map<string, { value: string; label: string; description?: string }>();
+    for (const model of models) {
+      const name = String(model.modelName || '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (byName.has(key)) continue;
+      const siteName = String(model.siteName || '').trim();
+      byName.set(key, siteName && siteName !== name
+        ? { value: name, label: name, description: siteName }
+        : { value: name, label: name });
+    }
+    return [...byName.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [models]);
   // 「全部模型」这一项要说清当前是在哪个范围里全部：选了站点之后，它就是该
   // 站点的全部模型，而不是全部站点的全部模型。
   const selectedSiteName = siteFilter
@@ -749,6 +805,15 @@ export default function ModelMonitor() {
                 >
                   {tr('挂到转发')}
                 </button>
+                <button
+                  type="button"
+                  className="btn model-monitor-ccswitch-btn"
+                  title={tr('把原站的地址与 sk- 密钥导入到 CC Switch')}
+                  disabled={ccSwitchBusyKey === `${model.siteId}:${model.modelName}`}
+                  onClick={() => void openCcSwitch(model)}
+                >
+                  {ccSwitchBusyKey === `${model.siteId}:${model.modelName}` ? tr('读取中…') : tr('导入到 CC Switch')}
+                </button>
               </div>
             </div>
             );
@@ -823,6 +888,15 @@ export default function ModelMonitor() {
                       >
                         {tr('挂到转发')}
                       </button>
+                      <button
+                        type="button"
+                        className="btn model-monitor-ccswitch-btn"
+                        title={tr('把原站的地址与 sk- 密钥导入到 CC Switch')}
+                        disabled={ccSwitchBusyKey === `${model.siteId}:${model.modelName}`}
+                        onClick={() => void openCcSwitch(model)}
+                      >
+                        {ccSwitchBusyKey === `${model.siteId}:${model.modelName}` ? tr('读取中…') : tr('导入到 CC Switch')}
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -852,6 +926,21 @@ export default function ModelMonitor() {
           siteUrl: chatTarget.siteUrl,
         } : null}
         onClose={() => setChatTarget(null)}
+      />
+
+      <DownstreamKeyCcSwitchModal
+        open={ccSwitchTarget !== null}
+        onClose={() => setCcSwitchTarget(null)}
+        item={ccSwitchTarget?.item || null}
+        modelOptions={ccSwitchModelOptions}
+        initialBaseUrl={ccSwitchTarget?.baseUrl}
+        title={tr('把原站配置导入到 CC Switch')}
+        sourceHint={(
+          <>
+            <div>{tr('导入的是「原站」自己的地址与 sk- 密钥，不经过我们的网关。')}</div>
+            <div>{tr('CC Switch 里会新增一个直连该站点的供应商，模型名保持原样。')}</div>
+          </>
+        )}
       />
 
       <CenteredModal

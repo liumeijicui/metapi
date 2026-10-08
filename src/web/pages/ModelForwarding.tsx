@@ -181,6 +181,24 @@ export default function ModelForwarding() {
     }
   };
 
+  const handleDeleteTarget = async (rule: ModelForwardRuleRow, target: ModelForwardTargetRow) => {
+    const label = target.siteName || `#${target.siteId}`;
+    const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function'
+      ? true
+      : window.confirm(tr(`确认删除该转发目标（${label} / ${target.upstreamModel}）吗？`));
+    if (!confirmed) return;
+    setBusyTargetKey(`${rule.id}:${target.id}`);
+    try {
+      await api.deleteModelForwardTarget(rule.id, target.id);
+      toast.success(tr('转发目标已删除'));
+      await load();
+    } catch (error: any) {
+      toast.error(error?.message || tr('删除转发目标失败'));
+    } finally {
+      setBusyTargetKey(null);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -357,6 +375,17 @@ export default function ModelForwarding() {
                         onClick={() => void handleToggleTarget(rule, target)}
                       >
                         {target.enabled ? tr('停用') : tr('启用')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-link btn-link-danger"
+                        style={{ fontSize: 11.5, padding: '0 4px' }}
+                        title={tr('删除该转发目标（直接删除，无需进入编辑）')}
+                        disabled={targetBusy}
+                        data-testid={`forward-target-delete-${target.id}`}
+                        onClick={() => void handleDeleteTarget(rule, target)}
+                      >
+                        {tr('删除')}
                       </button>
                     </div>
                   );

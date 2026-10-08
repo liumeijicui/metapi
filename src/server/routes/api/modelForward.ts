@@ -4,6 +4,7 @@ import {
   attachModelForwardTarget,
   createModelForwardRule,
   deleteModelForwardRule,
+  deleteModelForwardTarget,
   listModelForwardOptions,
   listModelForwardRules,
   moveModelForwardTarget,
@@ -113,6 +114,21 @@ export async function modelForwardRoutes(app: FastifyInstance) {
           success: true,
           rule: await setModelForwardTargetEnabled(id, targetId, !!request.body?.enabled),
         };
+      } catch (error) {
+        return sendModelForwardError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string; targetId: string } }>(
+    '/api/model-forward-rules/:id/targets/:targetId',
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      const targetId = parseId(request.params.targetId);
+      if (id === null) return reply.code(400).send({ success: false, message: '规则 id 不合法' });
+      if (targetId === null) return reply.code(400).send({ success: false, message: '目标 id 不合法' });
+      try {
+        return { success: true, rule: await deleteModelForwardTarget(id, targetId) };
       } catch (error) {
         return sendModelForwardError(reply, error);
       }

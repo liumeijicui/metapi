@@ -1027,6 +1027,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
+  deleteModelForwardTarget: (ruleId: number, targetId: number) =>
+    request(`/api/model-forward-rules/${ruleId}/targets/${targetId}`, { method: "DELETE" }),
   deleteModelForwardRule: (id: number) =>
     request(`/api/model-forward-rules/${id}`, { method: "DELETE" }),
   addRoute: (data: any) =>

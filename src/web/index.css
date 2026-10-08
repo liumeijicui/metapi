@@ -2091,6 +2091,50 @@ body {
   white-space: normal !important;
 }
 
+.site-balance-cell-inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.site-balance-cell-inner.align-end {
+  justify-content: flex-end;
+}
+
+.site-balance-cell-inner .site-balance-inline {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 「总余额」后面的单站点刷新小按钮。 */
+.site-balance-refresh {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.site-balance-refresh:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-card));
+}
+
+.site-balance-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .site-balance-inline {
   display: flex;
   width: 100%;
@@ -6047,13 +6091,36 @@ a.model-monitor-site-name:hover {
   align-self: flex-start;
 }
 
+/* 「导入到 CC Switch」：细边框 + 淡色底，表明它是个按钮而不是文字链接。 */
+.model-monitor-ccswitch-btn {
+  font-size: 11.5px;
+  padding: 1px 7px;
+  line-height: 1.55;
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  border: 1px solid color-mix(in srgb, var(--color-primary) 32%, transparent);
+  color: var(--color-primary);
+  border-radius: var(--radius-sm);
+}
+
+.model-monitor-ccswitch-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--color-bg-card));
+  border-color: color-mix(in srgb, var(--color-primary) 50%, transparent);
+}
+
+.model-monitor-ccswitch-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* 「对话」轻量聊天窗：目标信息 + 可滚动消息区 + 快捷提示词 + 输入框。 */
 .model-chat {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
+  /* 内容超出上限时在内部滚动 / 裁切，不能溢出去压住弹窗底部的按钮。 */
   max-height: min(72vh, 640px);
+  overflow: hidden;
 }
 
 .model-chat-target {
@@ -6124,7 +6191,7 @@ a.model-monitor-site-name:hover {
 
 .model-chat-messages {
   flex: 1 1 auto;
-  min-height: 200px;
+  min-height: 120px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -6227,8 +6294,6 @@ a.model-monitor-site-name:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--color-border);
 }
 
 .model-chat-prompt-head input {
@@ -6294,11 +6359,49 @@ a.model-monitor-site-name:hover {
   font-size: 11px;
 }
 
+.model-chat-prompt-list-modal {
+  max-height: 46vh;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  margin-top: 10px;
+}
+
+.model-chat-prompt-tip {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
 .model-chat-prompt-empty {
   padding: 12px;
   text-align: center;
   font-size: 12px;
   color: var(--color-text-muted);
+}
+
+.model-chat-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.model-chat-footer-btn {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+}
+
+.model-chat-footer-btn:hover {
+  background: var(--color-bg-secondary);
+  border-color: var(--color-primary);
+}
+
+.model-chat-footer-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .model-chat-composer {

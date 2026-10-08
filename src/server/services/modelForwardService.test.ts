@@ -272,6 +272,50 @@ describe('modelForwardService', () => {
       .rejects.toThrow(/转发目标不存在/);
   });
 
+  it('可以直接删除中间的转发目标，剩余目标重排并清掉对应通道', async () => {
+    const rule = await service.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [
+        { siteId, accountId, upstreamModel: 'model-a' },
+        { siteId, accountId, upstreamModel: 'model-b' },
+        { siteId, accountId, upstreamModel: 'model-c' },
+      ],
+    });
+    const removed = rule.targets.find((target) => target.upstreamModel === 'model-b')!;
+    const removedChannelId = removed.channelId as number;
+
+    const afterDelete = await service.deleteModelForwardTarget(rule.id, removed.id);
+
+    expect(afterDelete.targets.map((target) => target.upstreamModel)).toEqual(['model-a', 'model-c']);
+    expect(afterDelete.targets.map((target) => target.sortOrder)).toEqual([0, 1]);
+    // 被删目标同步出来的通道要一起清掉。
+    expect(await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, removedChannelId)).get()).toBeUndefined();
+    // 剩下的通道 priority 跟着新顺序走。
+    const channels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, rule.routeId as number))
+      .all();
+    const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+    for (const target of afterDelete.targets) {
+      expect(channelById.get(target.channelId as number)?.priority).toBe(target.sortOrder);
+    }
+
+    await expect(service.deleteModelForwardTarget(rule.id, 999_999))
+      .rejects.toThrow(/转发目标不存在/);
+  });
+
+  it('最后一个转发目标不允许删掉，必须整条规则删', async () => {
+    const rule = await service.createModelForwardRule({
+      modelName: 'solo-model',
+      targets: [{ siteId, accountId, upstreamModel: 'model-a' }],
+    });
+    await expect(service.deleteModelForwardTarget(rule.id, rule.targets[0].id))
+      .rejects.toThrow(/最后一个转发目标/);
+    // 拒绝后规则仍然完整。
+    const still = await service.listModelForwardRules();
+    expect(still[0]?.targets).toHaveLength(1);
+  });
+
   it('缺少账号或模型名会被拒绝', async () => {
     await expect(service.createModelForwardRule({ modelName: 'x', targets: [] }))
       .rejects.toThrow(/至少需要一个转发目标/);

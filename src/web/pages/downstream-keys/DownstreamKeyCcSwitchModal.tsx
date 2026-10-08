@@ -27,6 +27,15 @@ type Props = {
   item: CcSwitchKeyTarget | null;
   /** 我们已获取的全部模型，作为下拉候选（仍允许直接输入）。 */
   modelOptions?: CcSwitchModelOption[];
+  /**
+   * 网关地址的初始值。默认取当前面板地址（导入的是我们自己网关的下游密钥）；
+   * 「模型监控」里导入原站配置时传站点地址，导入的就是那个站自己的配置。
+   */
+  initialBaseUrl?: string | null;
+  /** 顶部标题，默认「导入到 CC Switch」。 */
+  title?: string;
+  /** 提示语里的「来源」说明，默认按网关口径解释。 */
+  sourceHint?: React.ReactNode;
 };
 
 async function copyToClipboard(text: string): Promise<void> {
@@ -66,7 +75,15 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: Reac
   );
 }
 
-export default function DownstreamKeyCcSwitchModal({ open, onClose, item, modelOptions = [] }: Props) {
+export default function DownstreamKeyCcSwitchModal({
+  open,
+  onClose,
+  item,
+  modelOptions = [],
+  initialBaseUrl,
+  title,
+  sourceHint,
+}: Props) {
   const toast = useToast();
   const [app, setApp] = useState<CcSwitchApp>('claude');
   const [baseUrl, setBaseUrl] = useState(() => resolveDefaultGatewayBaseUrl());
@@ -78,11 +95,11 @@ export default function DownstreamKeyCcSwitchModal({ open, onClose, item, modelO
   // domain) and a stale value would silently point the client at the wrong host.
   useEffect(() => {
     if (!open) return;
-    setBaseUrl(resolveDefaultGatewayBaseUrl());
+    setBaseUrl(String(initialBaseUrl || '').trim() || resolveDefaultGatewayBaseUrl());
     setModel('');
     setEnabled(true);
     setCopiedLink(false);
-  }, [open, item?.id]);
+  }, [open, item?.id, initialBaseUrl]);
 
   const fullKey = (item?.key || '').trim();
   const keyModelNames = useMemo(
@@ -140,7 +157,7 @@ export default function DownstreamKeyCcSwitchModal({ open, onClose, item, modelO
     <CenteredModal
       open={open}
       onClose={onClose}
-      title="导入到 CC Switch"
+      title={title || '导入到 CC Switch'}
       maxWidth={640}
       closeOnBackdrop
       closeOnEscape
@@ -187,8 +204,12 @@ export default function DownstreamKeyCcSwitchModal({ open, onClose, item, modelO
             border: '1px solid var(--color-border-light)',
           }}
         >
-          <div>本机已安装 CC Switch 时，点「打开 CC Switch」即可直接新增一个供应商。</div>
-          <div>未安装时请复制链接，或在客户端里手动粘贴下面的配置。</div>
+          {sourceHint ?? (
+            <>
+              <div>本机已安装 CC Switch 时，点「打开 CC Switch」即可直接新增一个供应商。</div>
+              <div>未安装时请复制链接，或在客户端里手动粘贴下面的配置。</div>
+            </>
+          )}
         </div>
 
         <div>
