@@ -40,6 +40,7 @@
     "typecheck:desktop": "tsc --noEmit -p tsconfig.desktop.json",
     "typecheck": "npm run typecheck:web && npm run typecheck:web:test && npm run typecheck:server && npm run typecheck:desktop",
     "dist:desktop": "npm run build && electron-builder --config electron-builder.yml --publish never",
+    "dist:desktop:edge": "npm run build && electron-builder --config electron-builder.edge.yml --publish never",
     "dist:desktop:mac:intel": "npm run build && electron-builder --config electron-builder.yml --publish never --mac --x64",
     "package:desktop": "npm run dist:desktop",
     "package:desktop:mac:intel": "npm run dist:desktop:mac:intel",

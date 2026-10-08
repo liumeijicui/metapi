@@ -1,8 +1,14 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildDesktopServerEnv,
   createDesktopServerUrl,
   isFatalServerExit,
+  resolveDesktopDefaultPort,
+  resolveDesktopEdgeMode,
+  resolveDesktopServerEntryRelativePath,
   resolveDesktopServerPort,
   resolveDesktopServerWorkingDir,
   waitForServerReady,
@@ -26,6 +32,45 @@ describe('desktop runtime helpers', () => {
     expect(env.METAPI_LOG_DIR).toBe('/tmp/metapi-logs');
     expect(env.AUTH_TOKEN).toBe('admin-token');
     expect(env.PROXY_TOKEN).toBe('proxy-token');
+  });
+
+  it('边缘版环境强制回环监听并打开边缘闸门', () => {
+    const env = buildDesktopServerEnv({
+      inheritedEnv: { HOST: '0.0.0.0' },
+      userDataDir: '/tmp/metapi-edge-data',
+      logsDir: '/tmp/metapi-edge-logs',
+      port: 4312,
+      edgeMode: true,
+    });
+
+    expect(env.HOST).toBe('127.0.0.1');
+    expect(env.METAPI_EDGE_MODE).toBe('1');
+    expect(env.DATA_DIR).toBe('/tmp/metapi-edge-data');
+  });
+
+  it('边缘版使用独立入口与端口', () => {
+    expect(resolveDesktopDefaultPort(true)).toBe(30086);
+    expect(resolveDesktopDefaultPort(false)).toBe(4000);
+    expect(resolveDesktopServerEntryRelativePath(true)).toBe('dist/server/edge/main.js');
+    expect(resolveDesktopServerEntryRelativePath(false)).toBe('dist/server/index.js');
+    expect(resolveDesktopServerPort({}, resolveDesktopDefaultPort(true))).toBe(30086);
+    expect(resolveDesktopServerPort({ METAPI_DESKTOP_SERVER_PORT: '4312' }, 30086)).toBe(4312);
+  });
+
+  it('按打包元数据或环境变量判定边缘版', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metapi-desktop-edge-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ metapiBuildVariant: 'edge' }), 'utf8');
+      expect(resolveDesktopEdgeMode({ appPath: dir })).toBe(true);
+      expect(resolveDesktopEdgeMode({ appPath: dir, env: { METAPI_DESKTOP_EDGE_MODE: '0' } })).toBe(false);
+
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'metapi' }), 'utf8');
+      expect(resolveDesktopEdgeMode({ appPath: dir })).toBe(false);
+      expect(resolveDesktopEdgeMode({ appPath: dir, env: { METAPI_DESKTOP_EDGE_MODE: '1' } })).toBe(true);
+      expect(resolveDesktopEdgeMode({ appPath: join(dir, 'missing') })).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('creates the browser URL from the local desktop port', () => {

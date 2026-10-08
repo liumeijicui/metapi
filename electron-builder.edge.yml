@@ -1,0 +1,30 @@
+# 边缘版（只转发 + 使用日志）桌面安装包配置。
+#
+# 与 electron-builder.yml 的区别：
+# - 独立 appId / 产品名 / 产物名，装出来是另一个应用，不会覆盖完整版。
+# - extraMetadata 把 metapiBuildVariant=edge 写进应用元数据，桌面壳据此改用
+#   dist/server/edge/main.js 入口、独立数据目录与 127.0.0.1:30086（见 src/desktop/runtime.ts）。
+# - 不带 publish 配置：边缘版不参与自动更新。
+appId: me.cita777.metapi.edge
+productName: Metapi Edge
+artifactName: ${name}-edge-${version}-${os}-${arch}.${ext}
+directories:
+  output: release/edge
+electronDist: node_modules/electron/dist
+icon: build/desktop-icon.png
+asar: false
+extraMetadata:
+  metapiBuildVariant: edge
+files:
+  - dist/**/*
+  - drizzle/**/*
+  - package.json
+win:
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+

@@ -17,6 +17,9 @@ import {
   createDesktopHealthUrl,
   createDesktopServerUrl,
   isFatalServerExit,
+  resolveDesktopDefaultPort,
+  resolveDesktopEdgeMode,
+  resolveDesktopServerEntryRelativePath,
   resolveDesktopServerPort,
   resolveDesktopServerWorkingDir,
   waitForServerReady,
@@ -35,8 +38,13 @@ let isRestartingBackend = false;
 
 log.initialize();
 
+/** 边缘版（只转发 + 使用日志）用独立入口、独立数据目录与默认端口。 */
+function isEdgeMode() {
+  return resolveDesktopEdgeMode({ appPath: app.getAppPath(), env: process.env });
+}
+
 function getUserDataDir() {
-  return join(app.getPath('userData'), 'data');
+  return join(app.getPath('userData'), isEdgeMode() ? 'edge-data' : 'data');
 }
 
 function getLogsDir() {
@@ -49,7 +57,7 @@ function ensureDesktopDirs() {
 }
 
 function getServerEntryPath() {
-  return join(app.getAppPath(), 'dist', 'server', 'index.js');
+  return join(app.getAppPath(), resolveDesktopServerEntryRelativePath(isEdgeMode()));
 }
 
 function getTrayIconPath() {
@@ -200,12 +208,14 @@ async function waitForManagedServerReady(url: string) {
 
 async function startManagedBackend() {
   ensureDesktopDirs();
+  const edgeMode = isEdgeMode();
   const serverEntryPath = getServerEntryPath();
-  const port = resolveDesktopServerPort(process.env);
+  const port = resolveDesktopServerPort(process.env, resolveDesktopDefaultPort(edgeMode));
   serverUrl = createDesktopServerUrl(port);
 
   const env = buildDesktopServerEnv({
     inheritedEnv: process.env,
+    edgeMode,
     userDataDir: getUserDataDir(),
     logsDir: getLogsDir(),
     port,
