@@ -137,6 +137,18 @@ export function buildServerAddress(input: { scheme: string; host: string; port: 
 }
 
 /**
+ * 界面上显示服务器地址用的简写：只留「IP:端口」（默认端口不写），协议看 title 里的完整 URL。
+ * 拆不出来时返回空串，调用方自己决定显示什么。
+ */
+export function formatServerHostPort(raw: string): string {
+  const parts = splitServerAddress(raw);
+  if (!parts.host) return '';
+
+  const defaultPort = parts.scheme === 'https' ? '443' : '80';
+  return parts.port && parts.port !== defaultPort ? `${parts.host}:${parts.port}` : parts.host;
+}
+
+/**
  * 保存服务器地址与令牌（登录、改地址都走这里）。
  * 服务端会先用一个 GET 探针到服务器验令牌，验过了才落库；这里只负责把结果告诉界面。
  */

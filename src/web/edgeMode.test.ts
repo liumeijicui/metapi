@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildServerAddress, formatEdgeSyncTime, splitServerAddress } from './edgeMode.js';
+import {
+  buildServerAddress,
+  formatEdgeSyncTime,
+  formatServerHostPort,
+  splitServerAddress,
+} from './edgeMode.js';
 
 describe('边缘版：服务器地址填写与回填', () => {
   it('只填 IP 或 IP:端口 时按 http 处理，带协议的地址按原协议', () => {
@@ -32,5 +37,12 @@ describe('边缘版：服务器地址填写与回填', () => {
     expect(formatEdgeSyncTime('')).toBe('');
     expect(formatEdgeSyncTime('not-a-date')).toBe('');
     expect(formatEdgeSyncTime('2026-10-08T02:00:00.000Z')).not.toBe('');
+  });
+
+  it('侧边栏/摘要只显示 IP:端口，默认端口与协议都不写出来', () => {
+    expect(formatServerHostPort('http://43.142.48.105:81')).toBe('43.142.48.105:81');
+    expect(formatServerHostPort('http://43.142.48.105')).toBe('43.142.48.105');
+    expect(formatServerHostPort('https://metapi.cita777.me')).toBe('metapi.cita777.me');
+    expect(formatServerHostPort('')).toBe('');
   });
 });

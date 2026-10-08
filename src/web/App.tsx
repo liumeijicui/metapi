@@ -26,6 +26,7 @@ import {
   EDGE_DEFAULT_SERVER_HOST,
   EDGE_DEFAULT_SERVER_PORT,
   formatEdgeSyncTime,
+  formatServerHostPort,
   refreshEdgeStatus,
   saveEdgeSyncSource,
   splitServerAddress,
@@ -155,14 +156,29 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const savedParts = splitServerAddress(edgeServerUrl);
   const [serverFields, setServerFields] = useState(() => {
-    const parts = splitServerAddress(edgeServerUrl);
     // 边缘版第一次打开还没有已保存的地址：回填默认服务器，用户只要填令牌就能登录。
-    if (edgeMode && !parts.host) {
+    if (edgeMode && !savedParts.host) {
       return { address: EDGE_DEFAULT_SERVER_HOST, port: EDGE_DEFAULT_SERVER_PORT };
     }
-    return { address: parts.host, port: parts.port };
+    return { address: savedParts.host, port: savedParts.port };
   });
+  // null 表示跟着「有没有配过」自动走：配过就折叠成一行，没配过就展开让用户填。
+  const [settingsExpanded, setSettingsExpanded] = useState<boolean | null>(null);
+  const serverFieldsTouchedRef = useRef(false);
+  // 用户已经动过输入框就别折叠：晚到的地址不该把正在填的表单收走。
+  const configSourceExpanded = edgeMode
+    && (settingsExpanded ?? (!savedParts.host || serverFieldsTouchedRef.current));
+
+  // 已保存的地址是通过状态接口拿到的，可能比登录页晚一步：到货后回填一次，
+  // 用户已经动过输入框就不再覆盖。
+  useEffect(() => {
+    if (serverFieldsTouchedRef.current) return;
+    const parts = splitServerAddress(edgeServerUrl);
+    if (!parts.host) return;
+    setServerFields({ address: parts.host, port: parts.port });
+  }, [edgeServerUrl]);
   const capabilityRows = [
     {
       title: t('统一代理网关'),
@@ -374,23 +390,56 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
               {loading ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />{t('验证中...')}</> : t('登录')}
             </button>
             {edgeMode ? (
-              <div className="edge-login-settings">
-                <div className="edge-login-settings-title">{t('同步设置 · 配置来源')}</div>
-                <EdgeServerFields
-                  value={serverFields}
-                  onChange={(patch) => {
-                    setServerFields((prev) => ({ ...prev, ...patch }));
-                    setError('');
-                  }}
-                  disabled={loading}
-                />
-                <div className="edge-server-hint" style={{ marginTop: 8 }}>
-                  {t('令牌填服务器上的管理员令牌；本机只从服务器拉取配置，不会向服务器写入任何数据。')}
+              configSourceExpanded ? (
+                <div className="edge-login-settings">
+                  <div className="edge-login-settings-title">{t('同步设置 · 配置来源')}</div>
+                  <EdgeServerFields
+                    value={serverFields}
+                    onChange={(patch) => {
+                      serverFieldsTouchedRef.current = true;
+                      setServerFields((prev) => ({ ...prev, ...patch }));
+                      setError('');
+                    }}
+                    disabled={loading}
+                  />
+                  <div className="edge-server-hint" style={{ marginTop: 8 }}>
+                    {t('令牌填服务器上的管理员令牌；本机只从服务器拉取配置，不会向服务器写入任何数据。')}
+                  </div>
+                  <div className="edge-server-hint" style={{ marginTop: 4 }}>
+                    {t('同步下来的配置只放在内存里，关闭 Metapi Edge 后需要重新登录。')}
+                  </div>
+                  {savedParts.host ? (
+                    <div style={{ marginTop: 8, textAlign: 'right' }}>
+                      <button
+                        type="button"
+                        className="edge-login-settings-toggle"
+                        onClick={() => setSettingsExpanded(false)}
+                      >
+                        {t('收起')}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
-                <div className="edge-server-hint" style={{ marginTop: 4 }}>
-                  {t('同步下来的配置只放在内存里，关闭 Metapi Edge 后需要重新登录。')}
+              ) : (
+                <div className="edge-login-settings">
+                  <div className="edge-login-settings-title">{t('同步设置 · 配置来源')}</div>
+                  <div className="edge-login-settings-summary">
+                    <span className="edge-server-hint" title={edgeServerUrl}>
+                      {t('已保存')}：{formatServerHostPort(edgeServerUrl)}
+                    </span>
+                    <button
+                      type="button"
+                      className="edge-login-settings-toggle"
+                      onClick={() => setSettingsExpanded(true)}
+                    >
+                      {t('修改')}
+                    </button>
+                  </div>
+                  <div className="edge-server-hint" style={{ marginTop: 6 }}>
+                    {t('令牌填服务器上的管理员令牌；本机只从服务器拉取配置，不会向服务器写入任何数据。')}
+                  </div>
                 </div>
-              </div>
+              )
             ) : null}
             <div className="login-auth-note">{t('仅校验本地服务访问权限，不会把令牌发送到第三方。')}</div>
             <div className="login-auth-footer">
@@ -1035,9 +1084,16 @@ function AppShell() {
             ))}
             {edgeMode && !sidebarCollapsed ? (
               <div className="edge-sidebar-panel">
-                <div className="edge-sidebar-source">
-                  {t('服务器')}: {edgeStatus?.configSource.url || t('未配置')}
+                {/* 对外发布的就是登录页里配的那台服务器：这里只显示 IP:端口，完整地址放 title。 */}
+                <div className="edge-sidebar-source" title={edgeStatus?.configSource.url || undefined}>
+                  {t('对外发布')}: {formatServerHostPort(edgeStatus?.configSource.url || '') || t('未配置')}
                 </div>
+                {edgeStatus?.port ? (
+                  // 本机这台的转发入口：客户端的 API 地址就填它（+ /v1）。
+                  <div className="edge-sidebar-source" title={`http://127.0.0.1:${edgeStatus.port}/v1`}>
+                    {t('本地转发')}: 127.0.0.1:{edgeStatus.port}
+                  </div>
+                ) : null}
                 <div className="edge-sidebar-source">
                   {t('上次同步')}: {formatEdgeSyncTime(edgeStatus?.lastSyncAt) || t('尚未同步')}
                 </div>
