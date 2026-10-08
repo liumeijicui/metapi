@@ -22,7 +22,31 @@ export interface CheckinContext {
   externalCheckinUrl?: string | null;
   /** Raw account `extraConfig` that may carry the welfare site session. */
   extraConfig?: string | null;
+  /** Present only for sites whose daily grant is paid inside the login handler. */
+  browserRelogin?: BrowserReloginGate;
 }
+
+/**
+ * Whether this run may spend a headed-browser sign-in.
+ *
+ * The caller owns this because it depends on state the adapter cannot see — when
+ * the account last spent one, and whether the day's grant is already settled —
+ * and because adapters do not touch the database. On a relay that pays its daily
+ * grant inside the login handler, a sign-in is worth exactly one grant a day, so
+ * replaying it on every hourly run buys nothing and feeds the edge's IP throttle,
+ * which then answers the whole site with `403 denied by http_ratelimit`.
+ */
+export interface BrowserReloginGate {
+  /** The day's grant has been settled, so no sign-in is owed until tomorrow. */
+  isSettledToday(): boolean;
+  /** Milliseconds left in the back-off after a failed attempt; 0 when ready. */
+  cooldownRemainingMs(): number;
+  /** Records that a sign-in is about to be spent. Called before the attempt. */
+  recordAttempt(): Promise<void>;
+  /** Records that the day ended with nothing more to collect. */
+  markSettled(): Promise<void>;
+}
+
 
 export interface SubscriptionPlanSummary {
   id?: number;
@@ -297,6 +321,15 @@ export interface PlatformAdapter {
    * failure the operator cannot act on; login and check-in are unaffected.
    */
   readonly balanceUnavailableReason?: string;
+
+  /**
+   * Set when the site pays its daily grant inside the login handler.
+   *
+   * The check-in then has to replay a sign-in to collect it, and the caller
+   * arms `CheckinContext.browserRelogin` so that sign-in is spent once a day
+   * instead of once an hour.
+   */
+  readonly dailyGrantBehindLogin?: boolean;
   detect(url: string): Promise<boolean>;
   login(baseUrl: string, username: string, password: string): Promise<LoginResult>;
   getUserInfo(baseUrl: string, accessToken: string, platformUserId?: number): Promise<UserInfo | null>;

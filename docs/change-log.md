@@ -1,3 +1,30 @@
+### 85. anyrouter 不再每小时重放一次「退出重登」：新增每日一次的浏览器重登闸门
+
+- **类型**：缺陷修复（签到节流 + 每日发放口径）
+- **需求来源**：本会话需求（“拉取最新代码，然后看看又有一些网站 401 或者登不上了，帮我检查一下是网站挂了，还是自动重登没有生效”）
+- **背景**：anyrouter.top 的每日 $25 是在**登录处理器里**发的，所以它的「签到」= 重放一次 Linux.do 退出重登，再比一次余额。可这条重登分支此前没有任何节流：只要余额没涨就**每个整点**都跑一次完整 OAuth 握手。最近 24 小时的日志正好说明了代价 —— 账号 #28 共 24 次重登：18 次跑完才得出「今日已签到」，6 次直接失败 `站点未返回 Linux.do 客户端标识（站点返回 403 拦截页）`，而真正领到额度的只有 1 次。站点前面是阿里云 ESA（不是 Cloudflare），按 IP 限流，被反复登录之后连 `/api/user/self` 都开始回 403，于是「签到失败」被误读成「凭据/站点有问题」。
+- **根因**：一次登录只可能领到一份日额度，但 `AnyRouterAdapter.checkin()` 每小时都花掉一次浏览器重登，且不留任何落盘状态。对照实现是 agentrouter：它的重登走 `autoRelogin`，有 15 分钟冷却（`extraConfig.browserRelogin.attemptedAt`）且只在「确实需要重登」时触发 —— anyrouter 的签到路径完全绕开了这套机制。
+- **改动**：
+  1. `PlatformAdapter` 新增可选标记 `readonly dailyGrantBehindLogin?: boolean`（`platforms/base.ts`），并给 `CheckinContext` 加 `browserRelogin?: BrowserReloginGate`（`isSettledToday` / `cooldownRemainingMs` / `recordAttempt` / `markSettled`）。闸门由**拥有账号行的调用方**提供（`checkinService` 只为带标记的站点 arm），adapter 一如既往不碰数据库；没有闸门时行为与之前完全一致（老调用方与单测不受影响）。
+  2. 新增 `services/dailyBrowserReloginGate.ts`：状态存在账号行 `extraConfig.dailyBrowserRelogin = { day, settled, attemptedAt }`，冷却 **3 小时**（一天最多 8 次机会，又不会变成整点洪水）。`settled` / `attemptedAt` 都按站点自然日（+08:00）打戳，**记的不是今天就直接作废** —— 否则 23:30 用掉的冷却会平白压住 00:00 就该领的新一天。写库是 best-effort：只想少一次冷却，不值得因此把签到判失败。
+  3. `AnyRouterAdapter` 声明 `dailyGrantBehindLogin = true`，并在重登分支前查闸门：当天已结清 → 直接回「今日已签到（日额度 $25 今日已结清，无需再次退出重登）」；冷却中 → 回「退出重登冷却中（剩余 X），本轮跳过：站点按 IP 限流，今日仍会再试」，两者都**不起浏览器**；站点本身读不出来时仍旧按站点报错（`站点接口不可用`），因为那才是此刻更真实的原因。真正尝试前先 `recordAttempt()`（放在握手**之前**：驱动中途挂掉也会留下冷却，不会下一秒又撞上限流）；重登后只要余额可读就 `markSettled()`（涨了 = $25 到账，没涨 = 今天确实没得领），读不到余额则不结算，留给几小时后重试。
+  4. 新增 `shared/siteDay.ts`（`siteDayKey` / `startOfSiteDaySeconds` / `startOfSiteDayMs`，`SITE_UTC_OFFSET_SECONDS = +08:00`）：站点自然日不再继承宿主时区（容器 `TZ` 为空，本地午夜会把 00:11 +08 的到账算成前一天）。agentrouter 里那份 `startOfLocalDaySeconds` 这次没改，后续可统一到这一处。
+- **验证**：
+  - 单测：`anyrouter.test.ts` 由 11 例加到 19 例（当天已结清不重登 / 冷却中不重登 / 站点不可读时按站点报错 / 重登前先记尝试 / 到账与「没得领」都 `markSettled` / 无法确认时不结算 / 未 arm 闸门时行为不变）；新增 `dailyBrowserReloginGate.test.ts` 11 例（含「跨自然日不继承冷却」「写库失败仍守冷却」「尝试与结算回写账号行且不动其它键」）、`shared/siteDay.test.ts` 3 例。回归 `checkinService.autoRelogin` / `checkinScheduler` / `agentRouter` 共 39 例通过。
+  - 门禁：`npx tsc -p tsconfig.server.json --noEmit`、`npm run repo:drift-check`（0 违规，登记债务仍是 5 条）、`npm run build:server` 通过。
+  - 实机（`systemctl restart metapi` 后 `POST /api/checkin/trigger/28`）：
+    - 第 1 次 32.3s（起了浏览器重登，站点此刻仍在限流）→ `{"success":false,"message":"站点未返回 Linux.do 客户端标识（站点返回 403 拦截页）"}`；账号行新增 `dailyBrowserRelogin = {"day":"2026-10-09","settled":false,"attemptedAt":"2026-10-08T16:53:31.495Z"}`，`oauth` / `platformUserId` / `credentialMode` / `runtimeHealth` 等原有键一个没丢。
+    - 第 2 次 10.6s、**不再起浏览器**，直接回 `站点接口不可用`（站点自己仍在 403），`attemptedAt` 未变 —— 冷却确实挡住了重复重登。
+    - 限流窗口过去后 `curl -x 127.0.0.1:7890 https://anyrouter.top/api/status` → `200`（2/2）、`api.fengwind.com` → `200`，说明这类 403 是站点按 IP 的短时限流，不是凭据失效。
+- **本次其余失败站点的结论**（同一轮排查，非代码问题）：
+  - **站点真的挂了**：Lanln（`ai.venlacy.com` Cloudflare 502）、motomoto（`motomoto.lol` 连接超时）、Columbina（`newapi.columbina.eu.org` TLS 握手内部错误）—— 三站当前实测仍不可达，站点恢复后会自动重试。
+  - **瞬时抖动，下一轮自愈**：Fengwind API（24h 内 26 成功 / 2 失败，探针 200）、123nhh、42 API、Ark API (WindHub)、SeekAi（`session_rejected` 1 次）、GN公益站 —— 重登/重试机制正常，是它生效的正面证据。
+  - **自己好了**：luckyg 10-07 19:09 → 10-08 08:08 连续「登录会话数已达上限」，09:08 起恢复正常且此后全绿（会话过期 + 登录时清理其他会话生效）。
+  - **需要人工处理**：蛙蛙公益站（账号密码已被站点判无效或封禁，其公告写明测活即封，只能重新绑定）；X-API、coee 两个账号本身已停用签到。
+- **主要文件**：`src/server/services/platforms/anyrouter.ts`、`src/server/services/platforms/base.ts`、`src/server/services/dailyBrowserReloginGate.ts`、`src/server/services/checkinService.ts`、`src/server/shared/siteDay.ts`（含各自 `.test.ts`）
+- **状态**：已完成（每个自然日最多一次退出重登，失败后 3 小时冷却；已构建并重启上线）
+
+
 ### 84. Metapi Edge（exe）本地只转发：登录页填服务器地址，配置只拉不推
 
 - **类型**：新功能（独立桌面版）

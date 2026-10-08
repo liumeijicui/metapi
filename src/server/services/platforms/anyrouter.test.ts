@@ -8,6 +8,7 @@ vi.mock('../assistedLogin/sites/anyRouter.js', () => ({
 
 import { NewApiAdapter, QUOTA_PER_UNIT } from './newApi.js';
 import { AnyRouterAdapter } from './anyrouter.js';
+import type { BrowserReloginGate } from './base.js';
 
 const BASE_URL = 'https://anyrouter.top';
 const USER_ID = 166294;
@@ -204,6 +205,134 @@ describe('AnyRouterAdapter', () => {
     expect(result).toEqual({ success: false, message: '站点接口不可用' });
     expect(parentCheckin).not.toHaveBeenCalled();
     expect(linuxdoLoginMock).not.toHaveBeenCalled();
+  });
+
+  /** The once-a-day sign-in gate, as the check-in owner arms it for this adapter. */
+  function fakeGate(overrides: Partial<BrowserReloginGate> = {}): BrowserReloginGate {
+    return {
+      isSettledToday: () => false,
+      cooldownRemainingMs: () => 0,
+      recordAttempt: vi.fn(async () => undefined),
+      markSettled: vi.fn(async () => undefined),
+      ...overrides,
+    };
+  }
+
+  it('spends no sign-in once the day is already settled', async () => {
+    balances = [100, 100];
+    const gate = fakeGate({ isSettledToday: () => true });
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result.message).toContain('今日已签到');
+    expect(linuxdoLoginMock).not.toHaveBeenCalled();
+    expect(gate.recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('stays off the edge while a sign-in that did not settle is cooling down', async () => {
+    balances = [100, 100];
+    const gate = fakeGate({ cooldownRemainingMs: () => 2 * 60 * 60_000 + 30_000 });
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('退出重登冷却中');
+    expect(result.message).toContain('2小时1分');
+    expect(linuxdoLoginMock).not.toHaveBeenCalled();
+  });
+
+  it('reports the site itself when it is unreadable during a cooldown', async () => {
+    httpShielded = true;
+    const gate = fakeGate({ cooldownRemainingMs: () => 60_000 });
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result).toEqual({ success: false, message: '站点接口不可用' });
+    expect(linuxdoLoginMock).not.toHaveBeenCalled();
+  });
+
+  it('spends the attempt before the handshake so a dead driver cannot loop', async () => {
+    balances = [100, 100, 125];
+    const gate = fakeGate();
+    linuxdoLoginMock.mockImplementation(async () => {
+      // The gate has to be armed by the time the browser starts, not after it
+      // returns: a driver killed mid-login must still leave a cooldown behind.
+      expect(gate.recordAttempt).toHaveBeenCalledTimes(1);
+      return { ok: true, message: 'Linux.do 重新登录完成' };
+    });
+
+    await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(gate.recordAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles the day when the sign-in pays the grant', async () => {
+    balances = [100, 100, 125];
+    const gate = fakeGate();
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result.reward).toBe('25');
+    expect(gate.markSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles the day when a sign-in confirms nothing is left to collect', async () => {
+    balances = [100, 100, 100];
+    const gate = fakeGate();
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result.message).toContain('今日已签到');
+    expect(gate.markSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an unverifiable sign-in unsettled so a later tick may retry', async () => {
+    httpShielded = true;
+    linuxdoLoginMock.mockResolvedValue({
+      ok: true,
+      message: 'Linux.do 重新登录完成',
+      quotaBefore: null,
+      quotaAfter: null,
+    });
+    const gate = fakeGate();
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+      browserRelogin: gate,
+    });
+
+    expect(result.message).toContain('未确认发放');
+    expect(gate.recordAttempt).toHaveBeenCalledTimes(1);
+    expect(gate.markSettled).not.toHaveBeenCalled();
+  });
+
+  it('keeps re-logging every run when no gate is armed', async () => {
+    balances = [100, 100, 125];
+
+    const result = await adapter.checkin(BASE_URL, 'session=abc', USER_ID, {
+      extraConfig: LINUXDO_ACCOUNT,
+    });
+
+    expect(result.reward).toBe('25');
+    expect(linuxdoLoginMock).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a failed browser login instead of a silent success', async () => {

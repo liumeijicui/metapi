@@ -24,6 +24,14 @@ import { quotaToUsd } from './quota.js';
  * handshake in the managed browser and look at the balance again. Nothing less is
  * a verdict — the log holds no check-in entries and the two `success` answers the
  * site gives cannot be told apart without the balance.
+ *
+ * That handshake is a once-a-day move, not an hourly one: one sign-in can only
+ * ever collect the one grant, and the same edge that shields the API answers a
+ * stream of logins with `403 denied by http_ratelimit` for the whole site. The
+ * dance is therefore armed through `CheckinContext.browserRelogin` (see
+ * `dailyGrantBehindLogin`), which bounds it to one attempt a day and backs off
+ * for hours after one that did not settle — the behavior this adapter lacked
+ * while it re-logged on every tick.
  */
 
 const ANY_ROUTER_HOST = 'anyrouter.top';
@@ -33,6 +41,12 @@ const QUOTA_EPSILON_USD = 0.01;
 
 export class AnyRouterAdapter extends NewApiAdapter {
   readonly platformName = 'anyrouter';
+
+  /**
+   * The daily $25 is paid inside the login handler, so collecting it means
+   * replaying a sign-in — and a sign-in is worth exactly one grant a day.
+   */
+  readonly dailyGrantBehindLogin = true;
 
   /** Shortest useful backoff: the throttle window clears in seconds to minutes. */
   protected override get edgeRateLimitRetryDelaysMs(): readonly number[] {
@@ -78,12 +92,32 @@ export class AnyRouterAdapter extends NewApiAdapter {
       return httpReadable ? { success: false, message: ALREADY_CHECKED_IN_MESSAGE } : siteCheckin;
     }
 
+    // A sign-in is the only thing that can move this balance, and it is worth one
+    // grant a day. Its edge throttles by egress IP, so replaying the handshake on
+    // every hourly tick is what turns a quiet day into a wall of
+    // `403 denied by http_ratelimit` — the gate below is armed by the caller that
+    // owns the account row and remembers what today already spent.
+    const gate = context?.browserRelogin;
+    if (gate?.isSettledToday()) return { success: false, message: SETTLED_TODAY_MESSAGE };
+    const cooldownMs = gate?.cooldownRemainingMs() ?? 0;
+    if (cooldownMs > 0) {
+      // An unreadable site is the more truthful reason, so it outranks the
+      // back-off this branch would otherwise report.
+      return httpReadable
+        ? { success: false, message: reloginCooldownMessage(cooldownMs) }
+        : siteCheckin;
+    }
+
     const clientId = await this.readLinuxDoClientId(baseUrl, accessToken, platformUserId);
 
     // Imported lazily: the site module pulls in the browser stack, and only the
     // Linux.do accounts ever need it. A client id read over HTTP is only a
     // head start — the driver resolves it inside the page when the edge hid it.
     const { loginAnyRouterWithLinuxDo } = await import('../assistedLogin/sites/anyRouter.js');
+    // Spend the attempt before the handshake, not after: a driver that dies
+    // mid-login would otherwise leave the cooldown unset and the next hourly tick
+    // would walk straight back into the throttle that just killed it.
+    await gate?.recordAttempt();
     const relogin = await loginAnyRouterWithLinuxDo({
       baseUrl,
       clientId: clientId ?? '',
@@ -105,13 +139,22 @@ export class AnyRouterAdapter extends NewApiAdapter {
       : this.measureBrowserGain(relogin, before);
 
     if (gain !== null && gain > 0) {
+      // The day's grant landed on this sign-in; the account is settled until the
+      // site's next day, and no further handshake is owed.
+      await gate?.markSettled();
       return {
         success: true,
         message: `退出重登后签到到账（额度 +$${formatUsd(gain)}）`,
         reward: formatUsd(gain),
       };
     }
-    if (gain === 0) return { success: false, message: ALREADY_CHECKED_IN_MESSAGE };
+    if (gain === 0) {
+      // Readable before and after with no movement: the $25 is not waiting behind
+      // a login today, so mark the day settled rather than re-running the
+      // handshake on every tick to keep re-learning that.
+      await gate?.markSettled();
+      return { success: false, message: ALREADY_CHECKED_IN_MESSAGE };
+    }
     // The login itself worked but no balance could be read around it, so there is
     // no evidence of a grant to report — and calling a real check-in a failure
     // would be worse than saying so.
@@ -194,6 +237,25 @@ export class AnyRouterAdapter extends NewApiAdapter {
  * the phrase the check-in scheduler treats as a satisfied check-in.
  */
 const ALREADY_CHECKED_IN_MESSAGE = `今日已签到（站点未发放额度，日额度 $${ANY_ROUTER_DAILY_REWARD_USD} 需退出重登后到账）`;
+
+/** The day's grant already landed on an earlier sign-in; a fresh one buys nothing. */
+const SETTLED_TODAY_MESSAGE = `今日已签到（日额度 $${ANY_ROUTER_DAILY_REWARD_USD} 今日已结清，无需再次退出重登）`;
+
+/**
+ * The sign-in was already spent and did not settle the day, so this tick stays
+ * away from an edge that throttles by IP. Says "today still retries" on purpose:
+ * the back-off is three hours, not a write-off.
+ */
+function reloginCooldownMessage(remainingMs: number): string {
+  return `退出重登冷却中（剩余 ${formatDuration(remainingMs)}），本轮跳过：站点按 IP 限流，今日仍会再试`;
+}
+
+function formatDuration(ms: number): string {
+  const minutes = Math.ceil(ms / 60_000);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return hours > 0 ? `${hours}小时${rest}分` : `${rest}分钟`;
+}
 
 function readQuotaUsd(quota: unknown): number | null {
   // `Number(null)` is 0, and this value is read off a page that reports an

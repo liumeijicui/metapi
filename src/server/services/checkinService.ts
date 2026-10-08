@@ -1,5 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
+import { createDailyBrowserReloginGate } from './dailyBrowserReloginGate.js';
 import { eq, and, inArray } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { isCloudflareChallenge, isTokenExpiredError } from './alertRules.js';
@@ -427,6 +428,12 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       () => adapter.checkin(site.url, token, platformUserId, {
         externalCheckinUrl: site.externalCheckinUrl,
         extraConfig: account.extraConfig,
+        // Only the relays that pay their grant inside the login handler get the
+        // gate: they are the ones where a sign-in is worth at most one grant a
+        // day, and where replaying it hourly is what trips the edge's throttle.
+        browserRelogin: adapter.dailyGrantBehindLogin
+          ? createDailyBrowserReloginGate(account)
+          : undefined,
       })));
 
   // A Sub2API access token is a JWT that lives for hours, so the daily check-in
