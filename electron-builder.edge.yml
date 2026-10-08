@@ -13,8 +13,16 @@ directories:
 electronDist: node_modules/electron/dist
 icon: build/desktop-icon.png
 asar: false
+# better-sqlite3 是原生模块，必须换成 Electron ABI 版本才能被 exe 里的服务进程加载；
+# 这一步由 scripts/desktop/packEdgeDesktop.mjs 按 ABI 替换完成。
+# 关掉 electron-builder 自带的 @electron/rebuild：它依赖的 node-abi 还不认识 Electron 42 的 ABI，
+# 开启时会直接以「无法探测 ABI」中止打包。
+npmRebuild: false
 extraMetadata:
   metapiBuildVariant: edge
+  # Electron 按 package.json 的 productName 决定 userData 目录；不写的话边缘版和完整版
+  # 会共用 %APPDATA%\metapi，两个 Chromium 实例同时跑会互相抢同一个用户数据目录。
+  productName: Metapi Edge
 files:
   - dist/**/*
   - drizzle/**/*
