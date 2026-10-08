@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { matchesModelPattern } from './tokenRouter.js';
@@ -116,6 +116,15 @@ let monitorRunInFlight: Promise<ModelMonitorRunSummary> | null = null;
 let monitorSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 let monitorLastRunStartedAtMs = 0;
 let monitorNextRunAtMs: number | null = null;
+/**
+ * 上一轮真正落库的采集时间（读库得到，重启后仍然有效）。
+ *
+ * 调度器的「下次可跑时间」只活在进程内，重启就丢；没有它，重启就等于「立刻
+ * 再全量采一轮」——实测 10:57:22 重启、10:57:25 就起跑，而 10:56:26 刚跑完。
+ */
+let monitorLastFetchedAtMs: number | null = null;
+/** 读上一轮时间这个动作是否已经完成；没完成前 tick 一律不抢跑。 */
+let monitorSchedulerReady = false;
 let monitorLastRunStartedAtIso: string | null = null;
 let monitorLastRunFinishedAtIso: string | null = null;
 let monitorSkippedRuns = 0;
@@ -810,8 +819,9 @@ export function getModelMonitorSchedulerState(): ModelMonitorSchedulerState {
  * 单线程、按站点顺序一个个采集（见 executeModelMonitorFetch），同一时刻只有一轮。
  *
  * 与旧实现的区别：
- * - 用显式的「下次可跑时间」代替 `now - 上次开始 < interval` 的隐式判断，重启后
- *   进窗口会立刻补一轮，不会因为计时器起点而整段时间都不跑；
+ * - 用显式的「下次可跑时间」代替 `now - 上次开始 < interval` 的隐式判断；
+ * - 启动时先读上一轮落库的采集时间：只落后超过一个间隔才补一轮，刚刚采过就等
+ *   下一个间隔。否则每次重启都会立刻再全量采一轮（「一进去就采集」）；
  * - 到点发现上一轮还没跑完时，直接跳过这一次（不排队、不并发），并计数 + 打日志；
  * - 每次起跑 / 跑完都打日志，任务有没有活着一眼能从 journalctl 看出来。
  */
@@ -830,13 +840,17 @@ export function startModelMonitorScheduler(): ModelMonitorSchedulerState {
   }
 
   const tick = () => {
+    // 还没读到上一轮采集时间就什么都别做：这一瞬间开跑正是「重启就采集」。
+    if (!monitorSchedulerReady) return;
     const nowMs = Date.now();
     if (!isModelMonitorWindowOpen(new Date(nowMs), state.windowStartHour, state.windowEndHour)) {
       // 窗口外什么都不做；进窗口后的第一次 tick 会立刻补一轮。
       monitorNextRunAtMs = null;
       return;
     }
-    if (monitorNextRunAtMs === null) monitorNextRunAtMs = nowMs;
+    if (monitorNextRunAtMs === null) {
+      monitorNextRunAtMs = resolveInitialNextRunAtMs(nowMs, state.intervalMs, monitorLastFetchedAtMs);
+    }
     if (nowMs < monitorNextRunAtMs) return;
     if (isModelMonitorRunning()) {
       monitorSkippedRuns += 1;
@@ -865,10 +879,62 @@ export function startModelMonitorScheduler(): ModelMonitorSchedulerState {
       });
   };
 
-  tick();
-  monitorSchedulerTimer = setInterval(tick, MONITOR_TICK_MS);
-  monitorSchedulerTimer.unref?.();
+  // 先占位，让返回的调度状态里「下次采集」不是空的；真正的值等读库回来再定。
+  monitorNextRunAtMs = Date.now();
+  monitorLastFetchedAtMs = null;
+  monitorSchedulerReady = false;
+  void loadLastMonitorFetchedAtMs()
+    .then((lastFetchedAtMs) => {
+      monitorLastFetchedAtMs = lastFetchedAtMs;
+      // 上一轮跑完的时间也顺手补上：重启后页面显示的「上次跑完」不该是空的。
+      if (lastFetchedAtMs !== null) {
+        monitorLastRunFinishedAtIso = new Date(lastFetchedAtMs).toISOString();
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      monitorSchedulerReady = true;
+      monitorNextRunAtMs = null;
+      tick();
+      monitorSchedulerTimer = setInterval(tick, MONITOR_TICK_MS);
+      monitorSchedulerTimer.unref?.();
+    });
   return getModelMonitorSchedulerState();
+}
+
+/**
+ * 决定本轮是「现在就跑」还是「等满一个采集间隔」。
+ *
+ * 只有落后超过一个间隔（或压根没有记录）才立刻补一轮；刚刚采过就让位给下一个
+ * 间隔，否则每次重启都会多出一轮毫无必要的全量采集。
+ */
+function resolveInitialNextRunAtMs(
+  nowMs: number,
+  intervalMs: number,
+  lastFetchedAtMs: number | null,
+): number {
+  if (
+    lastFetchedAtMs !== null
+    // 未来时间（时钟回拨 / 假时钟）当成没有记录，不然会一直等下去。
+    && lastFetchedAtMs <= nowMs
+    && nowMs - lastFetchedAtMs < intervalMs
+  ) {
+    return lastFetchedAtMs + intervalMs;
+  }
+  return nowMs;
+}
+
+/** 上一轮采集落库的时间：`site_model_monitor_sites.fetched_at` 里最新的那个。 */
+async function loadLastMonitorFetchedAtMs(): Promise<number | null> {
+  const row = await db
+    .select({ fetchedAt: schema.siteModelMonitorSites.fetchedAt })
+    .from(schema.siteModelMonitorSites)
+    .where(isNotNull(schema.siteModelMonitorSites.fetchedAt))
+    .orderBy(desc(schema.siteModelMonitorSites.fetchedAt))
+    .limit(1)
+    .get();
+  const parsed = row?.fetchedAt ? Date.parse(String(row.fetchedAt)) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function stopModelMonitorScheduler(): void {

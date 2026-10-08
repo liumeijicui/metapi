@@ -643,6 +643,48 @@ describe('modelMonitorService', () => {
       }
     });
 
+    it('重启后刚采过就等下一个间隔，不再「一进去就采集」', async () => {
+      const site = await seedSiteWithAccount('sched-eager');
+      // 上一轮刚在 7:55 落库（现在是 8:00），只差 5 分钟。
+      await db.insert(schema.siteModelMonitorSites).values({
+        siteId: site.id,
+        status: 'ok',
+        modelsCount: 0,
+        fetchedAt: new Date(2026, 9, 5, 7, 55, 0).toISOString(),
+      }).run();
+
+      const state = service.startModelMonitorScheduler();
+      // 读上一轮时间之前，状态里也不该是空的。
+      expect(state.nextRunAt).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAdapterMock).toHaveBeenCalledTimes(0);
+      // 下次采集 = 上一轮 + 一个间隔（8:10），而不是「立刻」。
+      const nextRunAt = service.getModelMonitorSchedulerState().nextRunAt;
+      expect(nextRunAt).toBe(new Date(2026, 9, 5, 8, 10, 0).toISOString());
+
+      // 到了 8:10 才真的开跑。
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      expect(getAdapterMock).toHaveBeenCalledTimes(0);
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(getAdapterMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('落后超过一个间隔时仍然立刻补一轮', async () => {
+      const site = await seedSiteWithAccount('sched-overdue');
+      await db.insert(schema.siteModelMonitorSites).values({
+        siteId: site.id,
+        status: 'ok',
+        modelsCount: 0,
+        // 已是两小时前的事：重启后该补跑，别把这一轮吞掉。
+        fetchedAt: new Date(2026, 9, 5, 6, 0, 0).toISOString(),
+      }).run();
+
+      service.startModelMonitorScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAdapterMock).toHaveBeenCalledTimes(1);
+    });
+
     it('关闭开关时不启动调度器', () => {
       const originalEnabled = config.modelMonitorEnabled;
       config.modelMonitorEnabled = false;
