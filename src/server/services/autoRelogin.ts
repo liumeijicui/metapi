@@ -24,6 +24,7 @@ import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
 import {
   buildReloginMarkerPatch,
+  getAgentRouterProvider,
   getAutoReloginConfig,
   getOauthProviderFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
@@ -325,6 +326,15 @@ async function tryOauthRelogin(
   site: any,
   options?: AutoReloginOptions,
 ): Promise<AutoReloginResult | null> {
+  // Agent Router is its own case, and it is answered first: nothing on the
+  // account says "OAuth" in the generic sense — the binding lives under the
+  // site's own marker, because the flow is the deployment's login handler
+  // rather than a provider session the router can replay by itself.
+  const agentRouterProvider = getAgentRouterProvider(account.extraConfig);
+  if (agentRouterProvider) {
+    return tryAgentRouterRelogin(account, site, agentRouterProvider, options);
+  }
+
   const provider = getOauthProviderFromExtraConfig(account.extraConfig)
     ?? getReloginProviderFromExtraConfig(account.extraConfig);
   if (provider === 'linuxdo') {
@@ -385,6 +395,88 @@ async function tryOauthRelogin(
 
 /** Default callback route new-api forks answer the Linux.do handshake on. */
 const LINUXDO_CALLBACK_PATH = '/api/oauth/linuxdo';
+
+/**
+ * Signs an Agent Router account back in through the provider it was bound with.
+ *
+ * The deployment has no password form: accounts are created through GitHub or
+ * Linux.do, and the binding is recorded on `extraConfig.agentRouter.provider`
+ * because the account record itself does not say which one it was. Both routes
+ * end the same way — the sign-in leaves a session cookie on the deployment —
+ * and both need that cookie turned back into the account's bearer before it is
+ * worth writing down (see `issueAccessTokenFromSession`), so the renewal ends
+ * with the credential shape every other call on this account already uses.
+ *
+ * GitHub replays over plain HTTP with the imported GitHub session. Linux.do
+ * cannot: its consent page is behind Cloudflare and the OAuth state is bound to
+ * the browsing session, so it runs in the managed browser — the same handshake
+ * the check-in uses, which is also why the cooldown below matters: that site
+ * grants its daily quota inside the login handler, so every renewal is a login
+ * and a burst of them is what gets the account throttled.
+ */
+async function tryAgentRouterRelogin(
+  account: any,
+  site: any,
+  provider: 'github' | 'linuxdo',
+  options?: AutoReloginOptions,
+): Promise<AutoReloginResult | null> {
+  const { isAgentRouterSite, loginAgentRouterWithGitHub, loginAgentRouterWithLinuxDo } =
+    await import('./assistedLogin/sites/agentRouter.js');
+  if (!isAgentRouterSite(site.url)) return null;
+
+  const expectedUserId = getPlatformUserIdFromExtraConfig(account.extraConfig);
+  let login;
+  if (provider === 'github') {
+    // A refused GitHub reply (a retired imported session) is the provider's
+    // verdict, and reporting it verbatim is what stops the operator from hunting
+    // the site for a problem that lives on GitHub.
+    login = await loginAgentRouterWithGitHub({ baseUrl: site.url });
+  } else {
+    if (isBrowserReloginCoolingDown(account.extraConfig)) return null;
+    await recordBrowserReloginAttempt(account);
+    const clientId = await readLinuxDoClientId(site.url);
+    login = await browserLane.run(() => loginAgentRouterWithLinuxDo({
+      baseUrl: site.url,
+      clientId,
+      expectedUserId,
+    }));
+  }
+
+  if (!login.ok || !login.sessionCookie) {
+    if (login.message) options?.onRefusal?.({ code: 'relogin_refused', reason: login.message });
+    return null;
+  }
+
+  // The exchange runs under the account's proxy: it is part of the site
+  // conversation, and agentrouter is only reachable through the system proxy.
+  const adapter = getAdapter(site.platform);
+  const bearer = adapter?.issueAccessTokenFromSession
+    ? await withAccountProxyOverride(
+      resolveProxyUrlFromExtraConfig(account.extraConfig),
+      () => adapter.issueAccessTokenFromSession!(
+        site.url,
+        login.sessionCookie as string,
+        login.platformUserId ?? expectedUserId,
+      ),
+    ).catch(() => null)
+    : null;
+
+  const persisted = await persistCredential(account, {
+    accessToken: bearer || login.sessionCookie,
+    platformUserId: login.platformUserId ?? expectedUserId,
+  });
+  const prune = await pruneAfterSignIn({
+    account,
+    site,
+    accessToken: persisted.accessToken,
+    platformUserId: persisted.platformUserId,
+  });
+  return {
+    ...persisted,
+    accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+    extraConfig: await persistExtraFields(account, prune.extraFields),
+  };
+}
 
 /**
  * Signs the account back in through Linux.do.
@@ -711,6 +803,10 @@ export function describeRenewalGap(
   if (getAutoReloginConfig(extraConfig)) return undefined;
   if (getOauthProviderFromExtraConfig(extraConfig) || account.oauthProvider) return undefined;
   if (getReloginProviderFromExtraConfig(extraConfig)) return undefined;
+  // Agent Router records its binding under the site's own marker rather than the
+  // generic one (see `tryAgentRouterRelogin`), and it does have a replay, so it
+  // must not be described as an account with nothing to replay.
+  if (getAgentRouterProvider(extraConfig)) return undefined;
   return '该账号没有保存可自动续期的登录凭据（未存账号密码、也未绑定 OAuth），'
     + '需要人工在站点上重新登录一次';
 }

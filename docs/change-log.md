@@ -1,3 +1,30 @@
+### 83. agentrouter 自动续期 + 自动保活：签到失败的真因是请求头、时区、以及「没人在看这个账号」
+
+- **类型**：缺陷修复 + 新增保活机制
+- **需求来源**：本会话需求（“加上自动续期自动保活，他是linux do快捷登录的”）；上一批遗留的 agentrouter 签到失败（`连续 5 次退出重登仍未到账`、`令牌失效`）一并定位
+- **背景**：agentrouter.org 没有签到接口，每日 $25 是在**登录处理器里**发的，站点 FAQ 直说要「退出后重新登陆才到账」。所以它的「签到」= 用绑定的登录方式（GitHub / Linux.do）重放一次登录，再去系统日志里确认到账。这条链路此前一直失败，而且失败原因被记成了三条都不对的东西。
+- **真因（三条，全部实测确认）**：
+  1. **请求头自相矛盾**：`buildCredentialRequestHeaders` 为兼容各版本 new-api，会把同一个用户 id 用七种拼写一起发（`New-API-User` / `New-Api-User` / `Veloera-User` / …）。HTTP 头名大小写不敏感，Node 会把两种拼写**折叠成一个逗号值**，而 agentrouter 逐条校验并直接拒绝：`401 无权进行此操作，New-Api-User 格式错误`。实测逐项二分：只发 `New-Api-User` → 200 且日志正常；只发 `New-API-User` → 200；两个一起发 → 401。日志因此永远读不出来，签到逻辑看到的是「日志不可读」，于是带着那把**其实还活着的**凭据去重登 5 次，而登录本身又不换 token，`after.claimed` 恒为 false —— `连续 5 次退出重登仍未到账` 就是这么来的。之前记的「`/api/log/self` 被阿里云 WAF 盾」是误判。
+  2. **时区口径错了 8 小时**：`startOfLocalDaySeconds()` 用 `new Date(y, m, d)`（进程本地时区），而容器 `TZ` 为空 → 按 UTC 算当天 00:00。站点按 Asia/Shanghai 记日，于是 00:11 +08 到账的那条日志（UTC 戳为前一天 16:11）被算成「昨天」，判定永远是「今天没到账」。已把偏移固定成站点时区（+08:00），不再继承宿主时区。
+  3. **没人看着这个账号**：`/api/user/self` 确实读不出来（阿里云 WAF `acw_sc_v2` 挑战页，实测 2/2），所以 `balanceUnavailableReason` 让余额轮询**整个跳过**这个账号。于是两次签到之间没有任何东西碰过它的凭据：会话中途死掉也照样显示健康，直到下一次签到才暴露。另外 `expired` 状态一旦被打上，interval 模式的签到会把它过滤掉（cron 模式不会），等于把它锁在唯一能救它的任务之外。
+- **改动**：
+  1. **凭据请求头只发一种拼写**：`AgentRouterAdapter` 覆写 `buildCredentialRequestHeaders()`，不再继承父类的兼容集（用「不传 id 给父类」的方式跳过），只保留站点前端自己发的 `New-Api-User`。`newApi.buildCredentialRequestHeaders` 由 `private` 改 `protected` 供覆写。
+  2. **日志读取改走能过盾的通道**：`readDailyClaim()` 从 `fetchJson` 改成 `fetchSiteJson`（会补同源 `Origin`/`Referer`、解 `acw_sc__v2`、带重试），并且读到的 `success:false` 现在会用 `isCredentialRefusal()` 区分「站点说凭据无效」和「日志读不到」——前者直接返回 `访问令牌已失效…需要重新登录后再签到`，交给 `autoRelogin` 续期，而不是白跑 5 次登录。
+  3. **时区**：`startOfLocalDaySeconds()` 固定按站点时区（+08:00）取当天 00:00。
+  4. **自动续期**：`autoRelogin` 新增 `tryAgentRouterRelogin()`，按 `extraConfig.agentRouter.provider` 选路 —— GitHub 走纯 HTTP 回放（并把 `github.com` 加进 `SITES_REQUIRING_SYSTEM_PROXY`：undici 直连必然超时，curl 不会），Linux.do 走受管浏览器（`browserLane` 单车道 + 15 分钟冷却，因为这个站点每次登录都是一次额度发放，突发登录正是被限流的原因）。拿到会话后调新增的 `issueAccessTokenFromSession()` 用 `/api/user/token` 换成站点 bearer 再落库（该接口会轮换 token，旧值立即失效），最后走 `pruneAfterSignIn` 清掉站点上的其它会话。
+  5. **自动保活（新增 `credentialKeepalive.ts`）**：给适配器加可选能力 `probeCredential()`（返回 `ok` / `refused` / `unknown`），agentrouter 用「读一次系统日志」实现 —— 一次请求同时回答「凭据还认不认」和「今天到账没有」，不多花站点任何一次登录。余额轮询里原本 `balanceUnavailableReason` 直接 return 的那条分支，现在顺手跑一次保活：`refused` 才续期，`unknown`（盾页 / 超时 / 站点挂了）**一律不动**，避免把「读不到」当成「死了」而每小时登录一次。探针答 `ok` 时，还会把此前被误标成 `expired` 的账号纠正回 `active`（其它所有恢复路径都要求发生一次真正的登录，凭据好好的账号会永远显示「过期」）。`refused` 且续期失败时按真实原因写 runtimeHealth 并报一次事件（已经是 `expired` 的不重复报，避免整点告警刷屏）。
+  6. **签到调度**：interval 模式的状态过滤补上 `expired`，与 cron 模式（`checkinAll`）一致。
+  7. **`checkedIn` 透出**：`judgeLinuxDoCallback()` 把回调里的 `checked_in` 透出来（agentrouter / anyrouter 都靠回调解读到账）；Linux.do 支持方 `loginAgentRouterWithLinuxDo()` 一并往下传，日志彻底读不到时它仍是可用的判据。
+- **验证**：
+  - 单测全绿（`credentialKeepalive.test.ts` 8 例、`autoRelogin.agentrouter.test.ts` 6 例、`platforms/agentRouter.test.ts` 12 例、`assistedLogin/sites/agentRouter.test.ts` 15 例、`balanceService.autoRelogin.test.ts` 15 例、`checkinScheduler.test.ts`；`src` 全量 519 文件 3304 例，仅剩 5 个与本改动无关的环境性失败）。
+  - 类型门 `tsc -p tsconfig.server.json --noEmit` 通过；`npm run build:server` + 重启 `metapi` 成功（`/` 200）。
+  - **端到端实测（真实站点 + 真实库，探针跑完即删）**：
+    1. 保活纠正状态：账号 19 `expired → active`（探针答 `ok`），账号 20 陈旧的 `unhealthy`（上次演练留下的「连续 5 次未到账」）被换成真实的 `degraded`（余额接口被 WAF 挡住）。
+    2. 自动续期：把一份**必被拒绝**的凭据喂给 `keepAliveCredential()`（库里那份不动）→ 24 秒完成 Linux.do 浏览器重登 + `/api/user/token` 换发 → 落库 `28 → 32` 字符的新 bearer，`status=active`，`sessionHygiene=no-other-session`，runtimeHealth 记「已自动重新登录并换成新凭据」。
+    3. 签到：账号 19/20 现在 **1 秒内**返回 `success=true 今日已签到`（修复前是 127 秒、跑满 5 次登录、最后报「仍未到账」）；用新 bearer 复查 `probe=ok`、`claimed=true`、`reward=25`。
+- **主要文件**：`src/server/services/platforms/agentRouter.ts`、`src/server/services/platforms/base.ts`、`src/server/services/platforms/newApi.ts`、`src/server/services/autoRelogin.ts`、`src/server/services/credentialKeepalive.ts`、`src/server/services/balanceService.ts`、`src/server/services/assistedLogin/sites/{agentRouter,linuxDoOAuthRelogin}.ts`、`src/server/services/siteProfiles.ts`、`src/server/services/checkinScheduler.ts`。
+- **状态**：已完成
+
 ### 82. 新路由「连续上游失败自动降级到最低优先级，成功即恢复」：重试自动切到其他源
 
 - **类型**：需求 + 选路健壮性

@@ -39,6 +39,10 @@ export const SITES_REQUIRING_SYSTEM_PROXY: readonly string[] = [
   // Direct connections time out for every route; the proxy reaches the site,
   // and its OAuth provider (connect.linux.do) needs the proxy as well.
   'agentrouter.org',
+  // github.com resolves to addresses this network cannot open from Node (curl
+  // reaches it, undici's fetch times out), which silently broke every GitHub
+  // OAuth replay that runs over plain HTTP — the authorize hop never answered.
+  'github.com',
 ];
 
 function normalizeHost(value: string): string {

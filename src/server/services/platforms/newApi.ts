@@ -1469,7 +1469,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   /** Headers that carry either a cookie session or a bearer token, plus the id. */
-  private buildCredentialRequestHeaders(
+  protected buildCredentialRequestHeaders(
     accessToken: string,
     platformUserId?: number,
   ): Record<string, string> {

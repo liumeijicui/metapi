@@ -276,6 +276,18 @@ export type PerfMetricsOutcome =
   | { ok: true; data: PerfMetricsSummary }
   | { ok: false; unsupported: boolean; message: string };
 
+/**
+ * Verdict of a credential keep-alive probe.
+ *
+ * `refused` is a statement the site itself made about the account, so it is the
+ * only verdict worth spending a sign-in on. `unknown` covers every way the probe
+ * failed to get an answer — a shield page, a timeout, an outage — and must never
+ * be read as a dead credential: renewing on it would sign the account in on
+ * every tick, and on a site that grants its quota per login that burst is what
+ * gets the account throttled.
+ */
+export type CredentialProbeVerdict = 'ok' | 'refused' | 'unknown';
+
 export interface PlatformAdapter {
   readonly platformName: string;
   /**
@@ -293,6 +305,29 @@ export interface PlatformAdapter {
   getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo>;
   getModels(baseUrl: string, token: string, platformUserId?: number, contextSourceScope?: string): Promise<string[]>;
   getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null>;
+  /**
+   * Trades a session the sign-in just established for the site's own bearer.
+   *
+   * Only sites that hand out both credentials need this: their login leaves a
+   * session cookie, while the account row (and every path that sends
+   * `Authorization: Bearer`) expects the access token the deployment mints from
+   * it. Optional on purpose — a site with a single credential shape has nothing
+   * to exchange, and callers keep the session when this answers null.
+   */
+  issueAccessTokenFromSession?(baseUrl: string, sessionCookie: string, platformUserId?: number): Promise<string | null>;
+  /**
+   * Cheap authenticated probe answering one question: is this credential still
+   * accepted?
+   *
+   * Only sites whose balance endpoint cannot be read over HTTP need it. Those
+   * accounts are skipped by the balance pass (`balanceUnavailableReason`), so
+   * without a probe nothing at all looks at their credential between check-ins,
+   * and a session that dies in between stays dead — and keeps reading as healthy
+   * — until the next scheduled sign-in. `refused` must mean the site said so in
+   * its own words; anything unreadable is `unknown`, which callers treat as
+   * "no verdict" rather than as a reason to spend a sign-in.
+   */
+  probeCredential?(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CredentialProbeVerdict>;
   getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]>;
   getSiteAnnouncements(baseUrl: string, accessToken: string, platformUserId?: number): Promise<SiteAnnouncement[]>;
   /**

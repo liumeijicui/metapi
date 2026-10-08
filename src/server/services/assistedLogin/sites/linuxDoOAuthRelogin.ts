@@ -70,6 +70,15 @@ export type LinuxDoReloginResult = {
   ok: boolean;
   message: string;
   /**
+   * `checked_in` from the callback, on deployments that grant their daily quota
+   * inside the login handler.
+   *
+   * It is the only verdict available when the site's system log cannot be read
+   * back: the login plainly happened, and this is the site saying what it did
+   * with it. Left undefined when the deployment answers without the flag.
+   */
+  checkedIn?: boolean;
+  /**
    * Account quota in new-api units, read inside the page before signing out and
    * after landing back on the site. Both are null when the site refused to
    * answer, and callers must only ever subtract one from the other — the value
@@ -257,7 +266,11 @@ export function judgeLinuxDoCallback(
   body: string,
   options: { expectedUserId?: number } = {},
 ): LinuxDoReloginResult {
-  let payload: { success?: unknown; message?: unknown; data?: { id?: unknown } } | null = null;
+  let payload: {
+    success?: unknown;
+    message?: unknown;
+    data?: { id?: unknown; checked_in?: unknown };
+  } | null = null;
   try {
     payload = JSON.parse(body);
   } catch {}
@@ -287,7 +300,11 @@ export function judgeLinuxDoCallback(
   if (options.expectedUserId && Number.isFinite(userId) && userId !== options.expectedUserId) {
     return { ok: false, message: `登录到了其他账号（id ${userId}，期望 ${options.expectedUserId}）` };
   }
-  return { ok: true, message: 'Linux.do 重新登录完成' };
+  return {
+    ok: true,
+    message: 'Linux.do 重新登录完成',
+    checkedIn: payload?.data?.checked_in === true,
+  };
 }
 
 export async function reloginWithLinuxDo(

@@ -3,13 +3,13 @@ import { NewApiAdapter } from './newApi.js';
 import type {
   CheckinContext,
   CheckinResult,
+  CredentialProbeVerdict,
   PerfMetricsModel,
   PerfMetricsOutcome,
   PerfMetricsSample,
   PerfMetricsSummary,
 } from './base.js';
 import { getAgentRouterProvider } from '../accountExtraConfig.js';
-import { readImportedSession } from '../assistedLogin/importedSession.js';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 /**
@@ -31,7 +31,6 @@ import { withSiteProxyRequestInit } from '../siteProxy.js';
  * because nothing else on the account record distinguishes the two.
  */
 
-const GITHUB_ORIGIN = 'https://github.com';
 const REQUEST_TIMEOUT_MS = 30_000;
 /** The FAQ asks for one logout+login; a stuck day gives up after five. */
 const MAX_LOGIN_ATTEMPTS = 5;
@@ -45,6 +44,13 @@ type DailyClaimState = {
   /** False when the log could not be read — that is not the same as "not claimed". */
   known: boolean;
   claimed: boolean;
+  /**
+   * True when the site answered "this credential is not usable", which is a
+   * verdict about the account rather than about the log. The renewal path keys
+   * off it: without the distinction a dead credential looks like an unreadable
+   * log, and the check-in would replay five logins instead of renewing once.
+   */
+  unauthorized?: boolean;
   reward?: string;
 };
 
@@ -199,6 +205,25 @@ export function isDailyCheckinLogEntry(content: unknown): boolean {
   return typeof content === 'string' && content.includes(CLAIM_LOG_KEYWORD);
 }
 
+/**
+ * True when the site's own words say the credential was refused.
+ *
+ * agentrouter answers a rejected access token with the same HTTP 200 and
+ * `success:false` envelope it uses for every refusal, so the only signal is the
+ * message. Kept as a narrowing check on purpose: a generic "not success" must
+ * stay an unreadable log, or a site-side outage would be filed as a dead
+ * credential and trigger a re-login it cannot help with.
+ */
+export function isCredentialRefusal(message: unknown): boolean {
+  if (typeof message !== 'string') return false;
+  const text = message.trim();
+  if (!text) return false;
+  return /access\s*token\s*无效/i.test(text)
+    || /access\s+token\s+(?:is\s+)?(?:invalid|expired)/i.test(text)
+    || /令牌(?:无效|已过期|失效)/.test(text)
+    || /未登录且未提供\s*access\s*token/i.test(text);
+}
+
 /** Pulls the reward out of "每日签到成功，增加额度 ＄25.000000 额度". */
 export function extractDailyReward(content: unknown): string | undefined {
   if (typeof content !== 'string') return undefined;
@@ -208,23 +233,36 @@ export function extractDailyReward(content: unknown): string | undefined {
   return Number.isFinite(value) && value > 0 ? String(value) : undefined;
 }
 
-/** The site and this deployment both live in Asia/Shanghai. */
+/**
+ * Midnight of the day the site is counting, in the site's own timezone.
+ *
+ * The site files its log in Asia/Shanghai, and the container this runs in
+ * usually has no `TZ` set — which makes the local-midnight arithmetic below read
+ * the host clock as UTC. That lands eight hours early, in the direction that
+ * matters here: a grant arriving at 00:11 +08 is stamped 16:11 the previous day
+ * in UTC, so it fell outside the "today" window and looked like yesterday's
+ * entry. The offset is therefore pinned to the site's timezone instead of being
+ * inherited from the host.
+ */
+const SITE_UTC_OFFSET_SECONDS = 8 * 3600;
+const SECONDS_PER_DAY = 86_400;
+
 function startOfLocalDaySeconds(now: Date = new Date()): number {
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  return Math.floor(start.getTime() / 1000);
+  const shifted = Math.floor(now.getTime() / 1000) + SITE_UTC_OFFSET_SECONDS;
+  return Math.floor(shifted / SECONDS_PER_DAY) * SECONDS_PER_DAY - SITE_UTC_OFFSET_SECONDS;
 }
 
 export class AgentRouterAdapter extends NewApiAdapter {
   readonly platformName = 'agentrouter';
 
   /**
-   * `/api/user/self` answers every HTTP client with an Aliyun WAF challenge
-   * page (`aliyun_waf_aa`/`bb`), no matter the headers or the proxy, while the
-   * neighbouring routes (`/api/log/self`, `/api/status`) serve JSON normally.
+   * `/api/user/self` intermittently answers with the Aliyun WAF challenge page
+   * (`<!doctype ...`) no matter the credential or the proxy — measured 5/5
+   * refusals in a row while `/api/log/self` and `/api/status` kept serving JSON.
    * The console reads the quota from a browser that has cleared that challenge,
-   * so nothing here can; the balance is reported as unavailable instead of as a
-   * broken credential. Daily check-in is unaffected — it goes through the OAuth
-   * login and the system log.
+   * so nothing here reliably can; the balance is reported as unavailable instead
+   * of as a broken credential. Check-in and login are unaffected: they go
+   * through the OAuth login and the system log.
    */
   readonly balanceUnavailableReason =
     '站点余额接口受阿里云 WAF 保护，HTTP 无法读取余额（签到与登录不受影响）';
@@ -255,7 +293,7 @@ export class AgentRouterAdapter extends NewApiAdapter {
 
     const url = `${root}/api/user/model-status`;
     const headers: Record<string, string> = {
-      ...this.buildAuthHeaders(accessToken, platformUserId),
+      ...this.buildCredentialRequestHeaders(accessToken, platformUserId),
       'User-Agent': BROWSER_USER_AGENT,
       Origin: root,
       Referer: `${root}/console/model-status`,
@@ -323,6 +361,16 @@ export class AgentRouterAdapter extends NewApiAdapter {
     }
 
     const before = await this.readDailyClaim(baseUrl, accessToken, platformUserId);
+    // A refused credential is not a claim verdict, and the daily grant can only
+    // be read back with a live one. Failing here — rather than replaying the
+    // login with the same dead token — is what lets the caller renew first (see
+    // `autoRelogin`), after which this run is retried with the fresh credential.
+    if (before.unauthorized) {
+      return {
+        success: false,
+        message: '访问令牌已失效（access token 无效），需要重新登录后再签到',
+      };
+    }
     if (before.claimed) {
       return { success: false, message: '今日已签到' };
     }
@@ -337,6 +385,10 @@ export class AgentRouterAdapter extends NewApiAdapter {
         continue;
       }
 
+      // The sign-in only drops the cookie session; the account's access token
+      // survives it, so the grant is read back with the credential this run
+      // started from. A token that had died never reaches this loop — the
+      // unauthorized check above sends the caller to renew it first.
       const after = await this.readDailyClaim(baseUrl, accessToken, platformUserId);
       if (after.claimed) {
         return {
@@ -370,12 +422,28 @@ export class AgentRouterAdapter extends NewApiAdapter {
     platformUserId?: number,
   ): Promise<DailyClaimState> {
     try {
-      const res = await this.fetchJson<any>(
+      // Read through the shield-aware path on purpose. This site's management
+      // endpoints sit behind the Aliyun WAF, which answers a plain request with
+      // its JS challenge page instead of JSON (measured 5/5 refusals), and only
+      // this path sends the same-origin headers the console sends and solves
+      // `acw_sc__v2`. Without it the log reads as unreadable, and an unreadable
+      // log is exactly what made a refused credential look like a site outage.
+      const res = await this.fetchSiteJson<any>(
         `${baseUrl}/api/log/self?p=1&page_size=${CLAIM_LOG_PAGE_SIZE}&type=4`,
-        { headers: this.buildAuthHeaders(accessToken, platformUserId) },
+        accessToken,
+        platformUserId,
       );
       const items = Array.isArray(res?.data?.items) ? res.data.items : null;
-      if (!res?.success || !items) return { known: false, claimed: false };
+      if (!res?.success || !items) {
+        // The site answers a refused credential with HTTP 200 and
+        // `success:false, message:"无权进行此操作，access token 无效"`, so the
+        // credential verdict has to be read out of the body.
+        return {
+          known: false,
+          claimed: false,
+          unauthorized: isCredentialRefusal(res?.message),
+        };
+      }
 
       const todayStart = startOfLocalDaySeconds();
       for (const item of items) {
@@ -392,64 +460,8 @@ export class AgentRouterAdapter extends NewApiAdapter {
 
   /** Replays the GitHub OAuth login with the imported GitHub session. */
   private async loginWithGitHub(baseUrl: string): Promise<LoginOutcome> {
-    const imported = await readImportedSession('github');
-    if (!imported?.cookieHeader) {
-      return { ok: false, message: '未导入 GitHub 会话，请先在辅助登录中导入' };
-    }
-
-    const clientId = await this.readOAuthClientId(baseUrl, 'github');
-    if (!clientId) return { ok: false, message: '站点未启用 GitHub 登录' };
-    const state = await this.readOAuthState(baseUrl);
-    if (!state) return { ok: false, message: '站点未返回 OAuth state' };
-
-    const authorize = new URL('/login/oauth/authorize', GITHUB_ORIGIN);
-    authorize.search = new URLSearchParams({ client_id: clientId, scope: 'user:email', state }).toString();
-
-    // Provider cookies only ever go to GitHub: the redirect is followed by hand,
-    // so nothing is forwarded to the callback host.
-    const github = await fetch(authorize, await withSiteProxyRequestInit(String(authorize), {
-      headers: {
-        Accept: 'text/html',
-        Cookie: imported.cookieHeader,
-        'User-Agent': BROWSER_USER_AGENT,
-      },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    }));
-    await github.body?.cancel();
-
-    const location = github.headers.get('location');
-    if (github.status === 200 || github.status === 401) {
-      return { ok: false, message: 'GitHub 会话需要重新登录或重新授权' };
-    }
-    if ((github.status !== 302 && github.status !== 303) || !location) {
-      return { ok: false, message: `GitHub 授权未完成（HTTP ${github.status}）` };
-    }
-
-    const callback = new URL(location, GITHUB_ORIGIN);
-    const code = callback.searchParams.get('code');
-    const site = new URL(baseUrl);
-    if (
-      callback.host !== site.host
-      || callback.pathname !== '/oauth/github'
-      || !code
-      || callback.searchParams.get('state') !== state
-    ) {
-      return { ok: false, message: 'GitHub OAuth 回调校验失败' };
-    }
-
-    const completed = await this.fetchJson<any>(
-      `${baseUrl}/api/oauth/github?${new URLSearchParams({ code, state, mode: 'login' })}`,
-      { headers: { Accept: 'application/json' } },
-    );
-    if (!completed?.success) {
-      return { ok: false, message: completed?.message || '站点未完成 GitHub 登录' };
-    }
-    return {
-      ok: true,
-      message: 'GitHub 重新登录成功',
-      checkedIn: completed?.data?.checked_in === true,
-    };
+    const { loginAgentRouterWithGitHub } = await import('../assistedLogin/sites/agentRouter.js');
+    return loginAgentRouterWithGitHub({ baseUrl });
   }
 
   /** Replays the Linux.do OAuth login in the managed Linux.do browser. */
@@ -464,16 +476,47 @@ export class AgentRouterAdapter extends NewApiAdapter {
     return loginAgentRouterWithLinuxDo({ baseUrl, clientId, expectedUserId: platformUserId });
   }
 
-  private async readOAuthState(baseUrl: string): Promise<string | null> {
-    try {
-      const res = await this.fetchJson<any>(`${baseUrl}/api/oauth/state?mode=login`, {
-        headers: { Accept: 'application/json' },
-      });
-      const state = typeof res?.data === 'string' ? res.data.trim() : '';
-      return state || null;
-    } catch {
-      return null;
-    }
+  /**
+   * Exchanges a session the sign-in established for the account's bearer token.
+   *
+   * The deployment mints exactly one `access_token` per user: `GET
+   * /api/user/token` rotates it and answers with the new value, retiring the
+   * previous one. That is the credential shape these accounts hold and the only
+   * one the paths that send `Authorization: Bearer` can use, so a renewal that
+   * stopped at the session cookie would leave the account half alive. The
+   * cookie is still the fallback: the management routes accept it too, and a
+   * site that answers no token is better held by it than dropped.
+   */
+  async issueAccessTokenFromSession(
+    baseUrl: string,
+    sessionCookie: string,
+    platformUserId?: number,
+  ): Promise<string | null> {
+    const root = (baseUrl || '').replace(/\/+$/, '');
+    if (!root || !sessionCookie) return null;
+    const res = await this.fetchSiteJson<any>(`${root}/api/user/token`, sessionCookie, platformUserId);
+    if (res?.success !== true) return null;
+    const token = typeof res.data === 'string' ? res.data.trim() : '';
+    return token || null;
+  }
+
+  /**
+   * 保活探针：读一次系统日志，只取「凭据被拒」这一个判断。
+   *
+   * 这个站点的余额接口读不出来（见 `balanceUnavailableReason`），所以余额轮询
+   * 会整天跳过它，而下次签到要等到定时任务。中间这段时间里凭据死了没人知道：
+   * 账号继续显示健康，直到某次调用报 401。用日志做探针是因为它同时是签到要读
+   * 的那份数据 —— 一次请求既确认凭据，又顺带知道今天有没有到账，不会多花站点
+   * 的任何一次登录。
+   */
+  async probeCredential(
+    baseUrl: string,
+    accessToken: string,
+    platformUserId?: number,
+  ): Promise<CredentialProbeVerdict> {
+    const state = await this.readDailyClaim(baseUrl, accessToken, platformUserId);
+    if (state.unauthorized) return 'refused';
+    return state.known ? 'ok' : 'unknown';
   }
 
   private async readOAuthClientId(
@@ -495,11 +538,29 @@ export class AgentRouterAdapter extends NewApiAdapter {
     }
   }
 
-  private buildAuthHeaders(accessToken: string, platformUserId?: number): Record<string, string> {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/json',
-    };
+  /**
+   * Carries whichever credential shape the account holds, plus exactly one id
+   * header — the spelling this site's frontend sends.
+   *
+   * The renewed credential is the site's bearer, but a renewal whose token
+   * exchange did not answer keeps the session cookie instead, and this site's
+   * console routes accept either. Sending `Bearer <cookie>` for the second shape
+   * is what would make a usable account read as dead.
+   *
+   * The parent's compatibility set is deliberately not inherited here. It sends
+   * the same id under seven spellings because new-api deployments differ in
+   * which one they read; this deployment reads every spelling it recognises and
+   * refuses a caller that carries more than one. Header names are
+   * case-insensitive, so Node folds `New-API-User` and `New-Api-User` into a
+   * single comma-joined value, and the site answers 401「New-Api-User 格式错误」
+   * — which is what every log read and balance refresh on this account was
+   * hitting. Passing no id to the parent is what keeps its set out of the way.
+   */
+  protected override buildCredentialRequestHeaders(
+    accessToken: string,
+    platformUserId?: number,
+  ): Record<string, string> {
+    const headers = super.buildCredentialRequestHeaders(accessToken);
     if (platformUserId) headers['New-Api-User'] = String(platformUserId);
     return headers;
   }

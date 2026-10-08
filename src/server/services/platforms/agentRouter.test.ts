@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { fetchMock, readSessionMock, linuxdoLoginMock } = vi.hoisted(() => ({
+const { fetchMock, linuxdoLoginMock, githubLoginMock } = vi.hoisted(() => ({
   fetchMock: vi.fn(),
-  readSessionMock: vi.fn(),
   linuxdoLoginMock: vi.fn(),
+  githubLoginMock: vi.fn(),
 }));
 
 vi.mock('undici', () => ({ fetch: fetchMock }));
-vi.mock('../assistedLogin/importedSession.js', () => ({ readImportedSession: readSessionMock }));
 vi.mock('../assistedLogin/sites/agentRouter.js', () => ({
   loginAgentRouterWithLinuxDo: linuxdoLoginMock,
+  loginAgentRouterWithGitHub: githubLoginMock,
 }));
 vi.mock('../siteProxy.js', () => ({
   UNLIMITED_BODY_TIMEOUT: { bodyTimeout: 0 },
@@ -19,6 +19,7 @@ vi.mock('../siteProxy.js', () => ({
 import {
   AgentRouterAdapter,
   extractDailyReward,
+  isCredentialRefusal,
   isDailyCheckinLogEntry,
 } from './agentRouter.js';
 
@@ -35,6 +36,14 @@ const STATUS_PAYLOAD = {
     linuxdo_oauth: true,
     linuxdo_client_id: 'linuxdo-client-id',
   },
+};
+
+const GITHUB_LOGIN_OK = {
+  ok: true,
+  message: 'GitHub 重新登录成功',
+  checkedIn: true,
+  platformUserId: 99102,
+  sessionCookie: 'session=github-session; acw_tc=token',
 };
 
 function jsonResponse(body: unknown): Response {
@@ -59,26 +68,11 @@ function defaultLogResponse(): unknown {
 function setupRoutes(overrides: { status?: unknown; state?: unknown; callback?: unknown } = {}): void {
   fetchMock.mockImplementation(async (input: unknown) => {
     const url = urlOf(input);
-    if (url.startsWith('https://github.com/login/oauth/authorize')) {
-      const state = new URL(url).searchParams.get('state') || '';
-      return new Response(null, {
-        status: 302,
-        headers: { location: `${BASE_URL}/oauth/github?code=code-1&state=${state}` },
-      });
-    }
     if (url.includes('/api/log/self')) {
       const payload = logQueue.length > 1 ? logQueue.shift() : logQueue[0];
       return jsonResponse(payload ?? defaultLogResponse());
     }
     if (url.includes('/api/status')) return jsonResponse(overrides.status ?? STATUS_PAYLOAD);
-    if (url.includes('/api/oauth/state')) {
-      return jsonResponse(overrides.state ?? { success: true, data: 'state-token' });
-    }
-    if (url.includes('/api/oauth/github') || url.includes('/api/oauth/linuxdo')) {
-      return jsonResponse(
-        overrides.callback ?? { success: true, message: '', data: { id: 99102, checked_in: true } },
-      );
-    }
     throw new Error(`unexpected fetch: ${url}`);
   });
 }
@@ -95,12 +89,6 @@ function claimLogResponse(): unknown {
   };
 }
 
-function githubAuthorizeCalls(): string[] {
-  return fetchMock.mock.calls
-    .map(([input]) => urlOf(input))
-    .filter((url) => url.startsWith('https://github.com/login/oauth/authorize'));
-}
-
 describe('AgentRouterAdapter', () => {
   let adapter: AgentRouterAdapter;
 
@@ -108,8 +96,13 @@ describe('AgentRouterAdapter', () => {
     vi.resetAllMocks();
     logQueue = [defaultLogResponse()];
     adapter = new AgentRouterAdapter();
-    readSessionMock.mockResolvedValue({ cookieHeader: 'user_session=github-session' });
-    linuxdoLoginMock.mockResolvedValue({ ok: true, message: 'Linux.do 重新登录完成' });
+    linuxdoLoginMock.mockResolvedValue({
+      ok: true,
+      message: 'Linux.do 重新登录完成',
+      platformUserId: 116261,
+      sessionCookie: 'session=linuxdo-session; acw_tc=token',
+    });
+    githubLoginMock.mockResolvedValue(GITHUB_LOGIN_OK);
     setupRoutes();
   });
 
@@ -141,7 +134,7 @@ describe('AgentRouterAdapter', () => {
     });
 
     expect(result.message).toContain('今日已签到');
-    expect(githubAuthorizeCalls()).toHaveLength(0);
+    expect(githubLoginMock).not.toHaveBeenCalled();
   });
 
   it('claims the daily quota by replaying the GitHub login', async () => {
@@ -154,12 +147,12 @@ describe('AgentRouterAdapter', () => {
     expect(result.success).toBe(true);
     expect(result.reward).toBe('25');
     expect(result.message).toContain('第 1 次');
-    expect(githubAuthorizeCalls()).toHaveLength(1);
-    expect(githubAuthorizeCalls()[0]).toContain('client_id=github-client-id');
+    expect(githubLoginMock).toHaveBeenCalledTimes(1);
+    expect(githubLoginMock.mock.calls[0][0]).toEqual({ baseUrl: BASE_URL });
   });
 
   it('gives up after five logins that never land in the log', async () => {
-    setupRoutes({ callback: { success: true, message: '', data: { id: 99102, checked_in: false } } });
+    githubLoginMock.mockResolvedValue({ ...GITHUB_LOGIN_OK, checkedIn: false });
 
     const result = await adapter.checkin(BASE_URL, 'session-token', 99102, {
       extraConfig: GITHUB_EXTRA_CONFIG,
@@ -167,29 +160,16 @@ describe('AgentRouterAdapter', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toContain('连续 5 次');
-    expect(githubAuthorizeCalls()).toHaveLength(5);
+    expect(githubLoginMock).toHaveBeenCalledTimes(5);
   });
 
   it('falls back to the login verdict when the log cannot be read', async () => {
     fetchMock.mockImplementation(async (input: unknown) => {
       const url = urlOf(input);
-      if (url.startsWith('https://github.com/login/oauth/authorize')) {
-        const state = new URL(url).searchParams.get('state') || '';
-        return new Response(null, {
-          status: 302,
-          headers: { location: `${BASE_URL}/oauth/github?code=code-1&state=${state}` },
-        });
-      }
       if (url.includes('/api/log/self')) {
         return new Response('<html>waf</html>', { status: 200, headers: { 'content-type': 'text/html' } });
       }
       if (url.includes('/api/status')) return jsonResponse(STATUS_PAYLOAD);
-      if (url.includes('/api/oauth/state')) {
-        return jsonResponse({ success: true, data: 'state-token' });
-      }
-      if (url.includes('/api/oauth/github')) {
-        return jsonResponse({ success: true, message: '', data: { id: 99102, checked_in: true } });
-      }
       throw new Error(`unexpected fetch: ${url}`);
     });
 
@@ -209,7 +189,7 @@ describe('AgentRouterAdapter', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(githubAuthorizeCalls()).toHaveLength(0);
+    expect(githubLoginMock).not.toHaveBeenCalled();
     expect(linuxdoLoginMock).toHaveBeenCalledTimes(1);
     expect(linuxdoLoginMock.mock.calls[0][0]).toEqual({
       baseUrl: BASE_URL,
@@ -228,5 +208,52 @@ describe('AgentRouterAdapter', () => {
     expect(result.success).toBe(false);
     expect(result.message).toContain('Cloudflare 未通过');
     expect(linuxdoLoginMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('fails fast on a refused credential instead of replaying five logins', async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf(input);
+      if (url.includes('/api/log/self')) {
+        return jsonResponse({ success: false, message: '无权进行此操作，access token 无效' });
+      }
+      if (url.includes('/api/status')) return jsonResponse(STATUS_PAYLOAD);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const result = await adapter.checkin(BASE_URL, 'dead-token', 99102, {
+      extraConfig: GITHUB_EXTRA_CONFIG,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('access token 无效');
+    expect(githubLoginMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a generic refusal as an unreadable log, not a dead credential', () => {
+    expect(isCredentialRefusal('无权进行此操作，access token 无效')).toBe(true);
+    expect(isCredentialRefusal('未登录且未提供 access token')).toBe(true);
+    expect(isCredentialRefusal('令牌已过期')).toBe(true);
+    expect(isCredentialRefusal('当前分组负载已饱和')).toBe(false);
+    expect(isCredentialRefusal('')).toBe(false);
+  });
+
+  it('answers the keep-alive probe with the site’s own verdict only', async () => {
+    logQueue = [claimLogResponse()];
+    expect(await adapter.probeCredential(BASE_URL, 'session-token', 99102)).toBe('ok');
+
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf(input);
+      if (url.includes('/api/log/self')) {
+        return jsonResponse({ success: false, message: '无权进行此操作，access token 无效' });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    expect(await adapter.probeCredential(BASE_URL, 'dead-token', 99102)).toBe('refused');
+
+    fetchMock.mockImplementation(async () => new Response('<html>waf</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }));
+    expect(await adapter.probeCredential(BASE_URL, 'session-token', 99102)).toBe('unknown');
   });
 });

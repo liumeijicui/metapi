@@ -110,7 +110,14 @@ async function runIntervalCheckinPass(now = new Date()) {
 
   const dueAccountIds = selectDueIntervalCheckinAccountIds(
     rows
-      .filter((row: any) => row.accounts?.checkinEnabled === true && row.accounts?.status === 'active' && row.sites?.status !== 'disabled')
+      // `expired` is included for the same reason the cron pass includes it (see
+      // `checkinAll`): this job is the one that can replay a sign-in, and an
+      // account that a failed balance refresh marked expired is exactly the one
+      // that needs that replay. Filtering it out froze it out of the only pass
+      // that could ever bring it back.
+      .filter((row: any) => row.accounts?.checkinEnabled === true
+        && (row.accounts?.status === 'active' || row.accounts?.status === 'expired')
+        && row.sites?.status !== 'disabled')
       .map((row: any) => ({
         id: row.accounts.id,
         lastCheckinAt: row.accounts.lastCheckinAt,

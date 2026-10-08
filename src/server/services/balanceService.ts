@@ -12,6 +12,7 @@ import {
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { tryAutoRelogin } from './autoRelogin.js';
+import { keepAliveCredential } from './credentialKeepalive.js';
 import { createSerialQueue } from '../shared/serialQueue.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { classifyFailureReason } from './failureReasonService.js';
@@ -261,6 +262,10 @@ export async function refreshBalance(accountId: number) {
       reason: adapter.balanceUnavailableReason,
       source: 'balance',
     });
+    // ...but that skip is also why nothing else looks at this account between
+    // sign-ins, so the credential is probed here instead. A site-verdict
+    // refusal re-logs in; anything unreadable is left alone.
+    await keepAliveCredential(account, site);
     return {
       balance: account.balance ?? 0,
       used: account.balanceUsed ?? 0,

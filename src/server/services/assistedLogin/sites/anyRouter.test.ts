@@ -57,6 +57,7 @@ describe('judgeAnyRouterCallback', () => {
     expect(judgeAnyRouterCallback(200, callbackBody(), 166294)).toEqual({
       ok: true,
       message: 'Linux.do 重新登录完成',
+      checkedIn: false,
     });
   });
 
