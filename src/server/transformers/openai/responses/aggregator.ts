@@ -1,5 +1,9 @@
 import { type StreamTransformContext } from '../../shared/normalized.js';
 import type { OpenAiResponsesStreamEvent } from './streamBridge.js';
+import {
+  extractPartialCustomToolCallInput,
+  unwrapCustomToolCallArguments,
+} from './toolCompat.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -77,12 +81,27 @@ export type OpenAiResponsesAggregateState = {
   customToolIndexById: Record<string, number>;
   imageGenerationIndexById: Record<string, number>;
   usageExtras: Record<string, unknown>;
+  customToolNames: Set<string>;
+  customToolIndexFlags: Record<number, boolean>;
+  customToolRawArguments: Record<number, string>;
   completed: boolean;
   failed: boolean;
   incomplete: boolean;
 };
 
-export function createOpenAiResponsesAggregateState(modelName: string): OpenAiResponsesAggregateState {
+export type OpenAiResponsesAggregateOptions = {
+  customToolNames?: Iterable<string>;
+};
+
+export function createOpenAiResponsesAggregateState(
+  modelName: string,
+  options?: OpenAiResponsesAggregateOptions,
+): OpenAiResponsesAggregateState {
+  const customToolNames = new Set<string>();
+  for (const name of options?.customToolNames ?? []) {
+    const trimmed = asTrimmedString(name);
+    if (trimmed) customToolNames.add(trimmed);
+  }
   return {
     modelName,
     responseId: null,
@@ -95,6 +114,9 @@ export function createOpenAiResponsesAggregateState(modelName: string): OpenAiRe
     customToolIndexById: {},
     imageGenerationIndexById: {},
     usageExtras: {},
+    customToolNames,
+    customToolIndexFlags: {},
+    customToolRawArguments: {},
     completed: false,
     failed: false,
     incomplete: false,
@@ -1134,23 +1156,71 @@ function buildSyntheticToolEvents(
   const lines: string[] = [];
   if (!Array.isArray(event.toolCallDeltas)) return lines;
   for (const toolDelta of event.toolCallDeltas) {
+    const toolName = asTrimmedString(toolDelta.name);
+    const deltaText = toolDelta.argumentsDelta !== undefined && toolDelta.argumentsDelta.length > 0
+      ? toolDelta.argumentsDelta
+      : '';
+
+    if (toolName && state.customToolNames.has(toolName)) {
+      state.customToolIndexFlags[toolDelta.index] = true;
+    }
+    const isCustomToolDelta = state.customToolIndexFlags[toolDelta.index] === true;
+
+    if (isCustomToolDelta) {
+      const entry = ensureCustomToolItem(state, undefined, toolDelta.id, toolName, toolDelta.index);
+      if (entry.created) {
+        lines.push(serializeOutputItemAdded(entry.index, entry.item));
+      }
+      if (!deltaText) continue;
+      const rawArguments = `${state.customToolRawArguments[entry.index] ?? ''}${deltaText}`;
+      state.customToolRawArguments[entry.index] = rawArguments;
+      const unwrapped = extractPartialCustomToolCallInput(rawArguments);
+      const currentInput = typeof entry.item.input === 'string' ? entry.item.input : '';
+      if (!unwrapped || unwrapped === currentInput) continue;
+      if (unwrapped.startsWith(currentInput)) {
+        entry.item.input = unwrapped;
+        lines.push(serializeSse('response.custom_tool_call_input.delta', {
+          type: 'response.custom_tool_call_input.delta',
+          item_id: entry.item.id,
+          call_id: entry.item.call_id,
+          output_index: entry.index,
+          delta: unwrapped.slice(currentInput.length),
+        }));
+      } else if (unwrapped.length >= currentInput.length) {
+        entry.item.input = unwrapped;
+      }
+      continue;
+    }
+
     const entry = ensureFunctionCallItem(state, toolDelta.id, toolDelta.name, toolDelta.index);
     if (entry.created) {
       lines.push(serializeOutputItemAdded(entry.index, entry.item));
     }
-    if (toolDelta.argumentsDelta !== undefined && toolDelta.argumentsDelta.length > 0) {
-      entry.item.arguments = `${typeof entry.item.arguments === 'string' ? entry.item.arguments : ''}${toolDelta.argumentsDelta}`;
+    if (deltaText) {
+      entry.item.arguments = `${typeof entry.item.arguments === 'string' ? entry.item.arguments : ''}${deltaText}`;
       lines.push(serializeSse('response.function_call_arguments.delta', {
         type: 'response.function_call_arguments.delta',
         item_id: entry.item.id,
         call_id: entry.item.call_id,
         output_index: entry.index,
         name: entry.item.name,
-        delta: toolDelta.argumentsDelta,
+        delta: deltaText,
       }));
     }
   }
   return lines;
+}
+
+function finalizeCustomToolCallItems(state: OpenAiResponsesAggregateState): void {
+  for (const index of Object.keys(state.customToolRawArguments)) {
+    const numericIndex = Number(index);
+    const item = state.outputItems[numericIndex];
+    if (!isRecord(item)) continue;
+    if (asTrimmedString(item.type).toLowerCase() !== 'custom_tool_call') continue;
+    const rawArguments = state.customToolRawArguments[numericIndex] ?? '';
+    if (!rawArguments) continue;
+    item.input = unwrapCustomToolCallArguments(rawArguments);
+  }
 }
 
 function buildMissingSubordinateDoneEventsForItem(
@@ -1256,6 +1326,7 @@ function buildSyntheticTerminalItemDoneEvents(
   status: 'completed' | 'failed' | 'incomplete',
 ): string[] {
   const lines: string[] = [];
+  finalizeCustomToolCallItems(state);
 
   for (let index = 0; index < state.outputItems.length; index += 1) {
     const item = state.outputItems[index];

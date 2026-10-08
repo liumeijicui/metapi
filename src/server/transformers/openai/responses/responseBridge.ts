@@ -4,6 +4,7 @@ import {
 } from '../../shared/normalized.js';
 import { decodeOpenAiEncryptedReasoning } from '../../shared/reasoningTransport.js';
 import { decodeResponsesMcpCompatToolCall } from './mcpCompatibility.js';
+import { unwrapCustomToolCallArguments } from './toolCompat.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -18,6 +19,15 @@ let syntheticIdCounter = 0;
 function createSyntheticId(prefix: 'resp' | 'msg' | 'call'): string {
   syntheticIdCounter += 1;
   return `${prefix}_${Date.now()}_${syntheticIdCounter}`;
+}
+
+function toCustomToolCallItemId(callId: string): string {
+  const trimmed = callId.trim();
+  if (!trimmed) {
+    const syntheticCallId = createSyntheticId('call');
+    return `ctc_${syntheticCallId.slice('call_'.length)}`;
+  }
+  return trimmed.startsWith('call_') ? `ctc_${trimmed.slice('call_'.length)}` : `ctc_${trimmed}`;
 }
 
 function toFunctionCallItemId(callId: string): string {
@@ -329,6 +339,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
   normalized: NormalizedFinalResponse;
   usage: ResponsesUsageSummary;
   serializationMode?: ResponsesFinalSerializationMode;
+  customToolNames?: string[];
 }): Record<string, unknown> {
   const {
     upstreamPayload,
@@ -336,6 +347,11 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
     usage,
     serializationMode = 'response',
   } = input;
+  const customToolNames = new Set(
+    (input.customToolNames ?? [])
+      .map((name) => asTrimmedString(name))
+      .filter((name) => name.length > 0),
+  );
   if (isRecord(upstreamPayload)) {
     if (upstreamPayload.object === 'response.compaction') {
       return upstreamPayload;
@@ -418,6 +434,18 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
       const mcpItem = decodeResponsesMcpCompatToolCall(toolCall.name, toolCall.arguments);
       if (mcpItem) {
         output.push(mcpItem);
+        continue;
+      }
+
+      if (customToolNames.has(asTrimmedString(toolCall.name))) {
+        output.push({
+          id: toCustomToolCallItemId(toolCall.id),
+          type: 'custom_tool_call',
+          status: 'completed',
+          call_id: toolCall.id,
+          name: toolCall.name,
+          input: unwrapCustomToolCallArguments(toolCall.arguments),
+        });
         continue;
       }
 

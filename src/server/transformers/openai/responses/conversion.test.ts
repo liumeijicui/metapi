@@ -5,6 +5,7 @@ import {
   convertResponsesBodyToOpenAiBody,
   sanitizeResponsesBodyForProxy,
 } from './conversion.js';
+import { collectResponsesCustomToolNames } from './toolCompat.js';
 import {
   buildResponsesCompatibilityBodies,
   buildResponsesCompatibilityHeaderCandidates,
@@ -1279,9 +1280,21 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       verbosity: 'high',
       tools: [
         {
-          type: 'custom',
-          name: 'browser',
-          format: { type: 'grammar', syntax: 'lark' },
+          type: 'function',
+          function: {
+            name: 'browser',
+            parameters: {
+              type: 'object',
+              properties: {
+                input: {
+                  type: 'string',
+                  description: 'Free-form input for this tool, passed through verbatim.',
+                },
+              },
+              required: ['input'],
+              additionalProperties: false,
+            },
+          },
         },
         {
           type: 'image_generation',
@@ -1291,6 +1304,69 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         },
       ],
     });
+  });
+
+  it('hoists Codex additional_tools input items into top-level tools and flattens namespaces', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: [
+          {
+            type: 'additional_tools',
+            role: 'developer',
+            tools: [
+              {
+                type: 'namespace',
+                name: 'functions',
+                tools: [
+                  { type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark' } },
+                  { type: 'function', name: 'wait', parameters: { type: 'object' } },
+                ],
+              },
+              { type: 'function', name: 'sleep', parameters: { type: 'object' } },
+            ],
+          },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        ],
+      },
+      'gpt-5',
+      true,
+    );
+
+    const tools = result.tools as Array<Record<string, unknown>>;
+    expect(tools.map((tool) => (tool as any).function?.name ?? tool.name)).toEqual(['exec', 'wait', 'sleep']);
+    const execTool = tools[0] as any;
+    expect(execTool.type).toBe('function');
+    expect(execTool.function.parameters.properties.input.type).toBe('string');
+    expect(JSON.stringify(result.messages)).not.toContain('additional_tools');
+    expect(result.messages.length).toBeGreaterThan(0);
+  });
+
+  it('keeps custom tools reachable when the Responses input is sanitized for proxy', () => {
+    const sanitized = sanitizeResponsesBodyForProxy(
+      {
+        model: 'gpt-5',
+        input: [
+          {
+            type: 'additional_tools',
+            role: 'developer',
+            tools: [
+              { type: 'custom', name: 'apply_patch', format: { type: 'grammar', syntax: 'lark' } },
+            ],
+          },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        ],
+      },
+      'gpt-5',
+      true,
+    );
+
+    expect((sanitized.input as Array<Record<string, unknown>>).map((item) => item.type)).toEqual(['message']);
+    const tools = sanitized.tools as Array<Record<string, unknown>>;
+    expect(tools).toEqual([
+      { type: 'custom', name: 'apply_patch', format: { type: 'grammar', syntax: 'lark' } },
+    ]);
+    expect(collectResponsesCustomToolNames(sanitized)).toEqual(['apply_patch']);
   });
 
   it('converts custom tool calls and outputs into OpenAI-compatible tool messages', () => {

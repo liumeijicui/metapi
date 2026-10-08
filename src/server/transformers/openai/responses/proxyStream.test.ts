@@ -3,6 +3,94 @@ import { describe, expect, it } from 'vitest';
 import { createResponsesProxyStreamSession } from './proxyStream.js';
 
 describe('createResponsesProxyStreamSession', () => {
+  it('emits custom_tool_call events when a custom tool is called through a chat upstream', async () => {
+    const encoder = new TextEncoder();
+    const usage = {
+      promptTokens: 5,
+      completionTokens: 3,
+      totalTokens: 8,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
+    };
+    const chunks = [
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'gpt-6-astra',
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            tool_calls: [{
+              index: 0,
+              id: 'call_exec_1',
+              type: 'function',
+              function: { name: 'exec', arguments: '' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'gpt-6-astra',
+        choices: [{
+          index: 0,
+          delta: { tool_calls: [{ index: 0, function: { arguments: '{"input":"text(' } }] },
+          finish_reason: null,
+        }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'gpt-6-astra',
+        choices: [{
+          index: 0,
+          delta: { tool_calls: [{ index: 0, function: { arguments: '1+1)"}' } }] },
+          finish_reason: 'tool_calls',
+        }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    let cursor = 0;
+    const lines: string[] = [];
+    const session = createResponsesProxyStreamSession({
+      modelName: 'gpt-6-astra',
+      successfulUpstreamPath: '/v1/chat/completions',
+      customToolNames: ['exec'],
+      getUsage: () => usage,
+      writeLines: (nextLines) => {
+        lines.push(...nextLines);
+      },
+      writeRaw: () => {},
+    });
+
+    const result = await session.run(
+      {
+        async read() {
+          if (cursor < chunks.length) {
+            return { done: false, value: encoder.encode(chunks[cursor++]) };
+          }
+          return { done: true };
+        },
+        async cancel() {
+          return null;
+        },
+        releaseLock() {},
+      },
+      { end() {} },
+    );
+
+    expect(result).toEqual({ status: 'completed', errorMessage: null });
+    const output = lines.join('');
+    expect(output).toContain('"type":"custom_tool_call"');
+    expect(output).toContain('event: response.custom_tool_call_input.done');
+    expect(output).toContain('"input":"text(1+1)"');
+    expect(output).not.toContain('"type":"function_call"');
+  });
+
   it('serializes non-SSE fallback payloads into canonical responses SSE closeout events', () => {
     const lines: string[] = [];
     let ended = false;

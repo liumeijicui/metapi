@@ -327,6 +327,57 @@ describe('openai responses response bridge', () => {
     ]);
   });
 
+  it('serializes custom tool calls as custom_tool_call items when the tool was declared custom', () => {
+    const payload = buildNormalizedFinalToOpenAiResponsesPayload({
+      upstreamPayload: {
+        id: 'chatcmpl-custom-1',
+        object: 'chat.completion',
+        model: 'gpt-5',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'call_exec_9',
+              type: 'function',
+              function: { name: 'exec', arguments: '{"input":"text(2+2)"}' },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      },
+      normalized: {
+        id: 'chatcmpl-custom-1',
+        model: 'gpt-5',
+        created: 1700000000,
+        content: '',
+        reasoningContent: '',
+        finishReason: 'tool_calls',
+        toolCalls: [{
+          id: 'call_exec_9',
+          name: 'exec',
+          arguments: '{"input":"text(2+2)"}',
+        }],
+      },
+      usage: {
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+      },
+      customToolNames: ['exec'],
+    });
+
+    expect(payload.output).toEqual([
+      expect.objectContaining({
+        type: 'custom_tool_call',
+        call_id: 'call_exec_9',
+        name: 'exec',
+        input: 'text(2+2)',
+      }),
+    ]);
+  });
+
   it('keeps the outbound facade pointed at the response bridge object', () => {
     expect(openAiResponsesOutbound).toBe(openAiResponsesResponseBridge);
   });

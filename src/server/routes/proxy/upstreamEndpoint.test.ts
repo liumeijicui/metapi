@@ -2389,7 +2389,7 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
-  it('drops Responses-only tools when /v1/responses falls back to /v1/chat/completions', () => {
+  it('maps Responses-only tools onto chat function tools when /v1/responses falls back to /v1/chat/completions', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
       modelName: 'gpt-5.4',
@@ -2457,9 +2457,30 @@ describe('buildUpstreamEndpointRequest', () => {
             },
           },
         },
+        {
+          type: 'function',
+          function: {
+            name: 'browser',
+            parameters: {
+              type: 'object',
+              properties: {
+                input: {
+                  type: 'string',
+                  description: 'Free-form input for this tool, passed through verbatim.',
+                },
+              },
+              required: ['input'],
+              additionalProperties: false,
+            },
+          },
+        },
       ],
     });
-    expect(request.body.tool_choice).toBeUndefined();
+    expect((request.body.tools as unknown[]).length).toBe(2);
+    expect(request.body.tool_choice).toEqual({
+      type: 'function',
+      function: { name: 'browser' },
+    });
   });
 
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {

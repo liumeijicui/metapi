@@ -11,6 +11,10 @@ import {
   convertOpenAiBodyToResponsesBody as convertOpenAiBodyToResponsesBodyViaTransformer,
   sanitizeResponsesBodyForProxy as sanitizeResponsesBodyForProxyViaTransformer,
 } from '../transformers/openai/responses/conversion.js';
+import {
+  convertResponsesCustomToolToChatTool,
+  flattenResponsesToolList,
+} from '../transformers/openai/responses/toolCompat.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import {
   convertOpenAiBodyToAnthropicMessagesBody,
@@ -292,7 +296,14 @@ function ensureResponsesAcceptHeader(
 
 function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<string, unknown> | null {
   if (!isRecord(rawTool)) return null;
-  if (asTrimmedString(rawTool.type).toLowerCase() !== 'function') return null;
+  const toolType = asTrimmedString(rawTool.type).toLowerCase();
+  if (toolType === 'custom') {
+    return convertResponsesCustomToolToChatTool(rawTool);
+  }
+  if (toolType === 'namespace') {
+    return null;
+  }
+  if (toolType !== 'function') return null;
 
   if (isRecord(rawTool.function)) {
     const name = asTrimmedString(rawTool.function.name);
@@ -337,10 +348,14 @@ function normalizeResponsesFallbackChatToolChoice(
   }
 
   if (!isRecord(rawToolChoice)) return undefined;
-  if (asTrimmedString(rawToolChoice.type).toLowerCase() !== 'function') return undefined;
+  const choiceType = asTrimmedString(rawToolChoice.type).toLowerCase();
+  if (choiceType !== 'function' && choiceType !== 'custom' && choiceType !== 'tool') return undefined;
 
   const nestedFunction = isRecord(rawToolChoice.function) ? rawToolChoice.function : null;
-  const name = asTrimmedString(nestedFunction?.name ?? rawToolChoice.name);
+  const nestedCustom = isRecord(rawToolChoice.custom) ? rawToolChoice.custom : null;
+  const name = asTrimmedString(
+    nestedFunction?.name ?? nestedCustom?.name ?? rawToolChoice.name,
+  );
   if (!name || !allowedToolNames.has(name)) return undefined;
 
   return {
@@ -357,7 +372,7 @@ function sanitizeResponsesFallbackChatBody(
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...body };
   const normalizedTools = Array.isArray(body.tools)
-    ? body.tools
+    ? flattenResponsesToolList(body.tools)
       .map((tool) => normalizeResponsesFallbackChatFunctionTool(tool))
       .filter((tool): tool is Record<string, unknown> => !!tool)
     : [];

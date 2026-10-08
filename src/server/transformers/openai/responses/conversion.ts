@@ -10,6 +10,11 @@ import {
 } from './mcpCompatibility.js';
 import { normalizeInputFileBlock, toOpenAiChatFileBlock } from '../../shared/inputFile.js';
 import { buildShortToolNameMap, getShortToolName } from '../../shared/toolNameShortener.js';
+import {
+  convertResponsesCustomToolToChatTool,
+  flattenResponsesToolList,
+  hoistResponsesAdditionalTools,
+} from './toolCompat.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -558,10 +563,13 @@ export function sanitizeResponsesBodyForProxy(
     }
   }
 
-  normalized = normalizeResponsesRequestFieldParity(normalized, {
-    verbositySource: body.verbosity,
-    defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
-  });
+  normalized = normalizeResponsesRequestFieldParity(
+    hoistResponsesAdditionalTools(normalized),
+    {
+      verbositySource: body.verbosity,
+      defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
+    },
+  );
 
   const sanitized: Record<string, unknown> = { ...normalized };
   for (const key of RESPONSES_COMPATIBILITY_FILTER_FIELDS) {
@@ -890,32 +898,36 @@ function toOpenAiMessageContent(content: unknown): string | Array<string | Recor
   return blocks;
 }
 
+function convertResponsesToolToOpenAiChat(item: Record<string, unknown>): Record<string, unknown> | null {
+  const type = asTrimmedString(item.type).toLowerCase();
+
+  if (type === 'custom') {
+    return convertResponsesCustomToolToChatTool(item);
+  }
+  if (type === 'image_generation') return item;
+  if (type !== 'function') return item;
+  if (isRecord(item.function) && asTrimmedString(item.function.name)) return item;
+
+  const name = asTrimmedString(item.name);
+  if (!name) return null;
+
+  const fn: Record<string, unknown> = { name };
+  const description = asTrimmedString(item.description);
+  if (description) fn.description = description;
+  if (item.parameters !== undefined) fn.parameters = item.parameters;
+  if (item.strict !== undefined) fn.strict = item.strict;
+
+  return {
+    type: 'function',
+    function: fn,
+  };
+}
+
 function convertResponsesToolsToOpenAi(rawTools: unknown): unknown {
   if (!Array.isArray(rawTools)) return rawTools;
 
-  return rawTools
-    .map((item) => {
-      if (!isRecord(item)) return item;
-      const type = asTrimmedString(item.type).toLowerCase();
-
-      if (type === 'custom' || type === 'image_generation') return item;
-      if (type !== 'function') return item;
-      if (isRecord(item.function) && asTrimmedString(item.function.name)) return item;
-
-      const name = asTrimmedString(item.name);
-      if (!name) return null;
-
-      const fn: Record<string, unknown> = { name };
-      const description = asTrimmedString(item.description);
-      if (description) fn.description = description;
-      if (item.parameters !== undefined) fn.parameters = item.parameters;
-      if (item.strict !== undefined) fn.strict = item.strict;
-
-      return {
-        type: 'function',
-        function: fn,
-      };
-    })
+  return flattenResponsesToolList(rawTools)
+    .map((item) => convertResponsesToolToOpenAiChat(item))
     .filter((item): item is Record<string, unknown> => !!item);
 }
 
@@ -925,8 +937,9 @@ function convertResponsesToolChoiceToOpenAi(rawToolChoice: unknown): unknown {
   if (!isRecord(rawToolChoice)) return rawToolChoice;
 
   const type = asTrimmedString(rawToolChoice.type).toLowerCase();
-  if (type === 'tool') {
-    const name = asTrimmedString(rawToolChoice.name);
+  if (type === 'tool' || type === 'custom') {
+    const nested = isRecord(rawToolChoice.custom) ? rawToolChoice.custom : null;
+    const name = asTrimmedString(rawToolChoice.name ?? nested?.name);
     if (!name) return 'required';
     return {
       type: 'function',
@@ -960,9 +973,11 @@ export function convertResponsesBodyToOpenAiBody(
   options?: { defaultEncryptedReasoningInclude?: boolean },
 ): Record<string, unknown> {
   const normalizedBody = normalizeResponsesBodyForCompatibility(
-    normalizeResponsesRequestFieldParity(body, {
-      defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
-    }),
+    hoistResponsesAdditionalTools(
+      normalizeResponsesRequestFieldParity(body, {
+        defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
+      }),
+    ),
   );
   const messages: Array<Record<string, unknown>> = [];
   const input = stripOrphanedResponsesToolOutputs(normalizedBody.input);
