@@ -15,6 +15,7 @@ describe('edge 配置同步（只拉不推）', () => {
   let eq: AnyRecord;
   let syncEdgeConfig: () => Promise<SyncResult>;
   let saveEdgeSyncSource: (input: { url: string; token: string }) => Promise<unknown>;
+  let stopEdgeLogArchive: () => void;
   let detectLocalSystemProxyUrl: () => string;
   let sourceUrl = '';
   let payloads: Record<string, unknown> = {};
@@ -54,13 +55,25 @@ describe('edge 配置同步（只拉不推）', () => {
     process.env.HOST = '127.0.0.1';
     process.env.PORT = '30086';
     process.env.METAPI_EDGE_CONFIG_SYNC_INTERVAL_MS = '30000';
+    // 与边缘入口一致：工作库是内存库，本机设置与使用日志都落数据目录下的本地 SQLite。
+    process.env.DB_URL = ':memory:';
 
-    await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const drizzleModule = await import('drizzle-orm');
     db = dbModule.db;
     schema = dbModule.schema;
     eq = drizzleModule.eq;
+    // 内存库的表只存在于这条连接上，迁移必须落在同一条连接里。
+    (await import('../db/migrate.js')).runSqliteMigrationsOn(dbModule.getSqliteConnection());
+    // 与边缘入口一致：写代理日志/归档要用的兼容列先补齐，归档的列清单也按补完之后的表生成。
+    await dbModule.ensureProxyLogStreamTimingColumns();
+    await dbModule.ensureProxyLogClientColumns();
+    await dbModule.ensureProxyLogDownstreamApiKeyIdColumn();
+    await dbModule.ensureProxyLogBillingDetailsColumn();
+    await dbModule.ensureSiteCompatibilityColumns();
+    const archiveModule = await import('./logArchive.js');
+    archiveModule.setupEdgeLogArchive({ dataDirAbsolute: dataDir });
+    stopEdgeLogArchive = archiveModule.stopEdgeLogArchive;
 
     server = createServer((request, reply) => { void handleRequest(request, reply); });
     await new Promise<void>((resolve) => { server!.listen(0, '127.0.0.1', () => resolve()); });
@@ -76,8 +89,10 @@ describe('edge 配置同步（只拉不推）', () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve) => { server ? server.close(() => resolve()) : resolve(); });
+    stopEdgeLogArchive();
     delete process.env.DATA_DIR;
     delete process.env.METAPI_EDGE_MODE;
+    delete process.env.DB_URL;
     try {
       rmSync(dataDir, { recursive: true, force: true });
     } catch {}
@@ -144,7 +159,7 @@ describe('edge 配置同步（只拉不推）', () => {
     await db.delete(schema.sites).run();
     await db.delete(schema.settings).run();
 
-    // 登录：地址写连接文件、令牌只进内存，同步就按这份来。
+    // 登录：地址写本地 SQLite、令牌只进内存，同步就按这份来。
     await saveEdgeSyncSource({ url: sourceUrl, token: 'edge-test-token' });
 
     const result = await syncEdgeConfig();

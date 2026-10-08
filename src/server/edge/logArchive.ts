@@ -4,11 +4,13 @@ import type Database from 'better-sqlite3';
 import { getSqliteConnection } from '../db/index.js';
 
 /**
- * 边缘实例的「使用日志」归档。
+ * 边缘实例的本地 SQLite 存储（使用日志 + 本机设置）。
  *
  * 工作库是内存库：从服务器同步下来的配置只在内存里，进程退出就没了。
  * 使用日志是本地产生的数据，必须留下来，所以这里把 proxy_logs 的行镜像到
  * DATA_DIR 下的一个 SQLite 文件里，并在启动时把归档读回内存。
+ * 服务器地址这类「跨重启必须还在」的本机设置也放同一个文件的 edge_settings 表里，
+ * 这样本机的持久数据只有一个库，不用再维护 JSON 边车文件。
  *
  * 为什么不做成两个库各管一半：日志列表要跟账号/站点做 join（见 routes/api/stats.ts），
  * 拆开就没法再用同一条 SQL 查询，所以内存库里仍然是那张真实的 proxy_logs 表，
@@ -20,6 +22,9 @@ const ARCHIVE_SCHEMA = 'edge_logs';
 
 /** 归档文件名。 */
 const ARCHIVE_FILE = 'edge-logs.db';
+
+/** 本机设置表：跨重启要保留的边缘本地参数（例如服务器地址）都存在这里。 */
+const SETTINGS_TABLE = 'edge_settings';
 
 /** 旧版边缘实例把配置和日志放在同一个 hub.db，升级后只搬走日志，再删掉这个文件。 */
 const LEGACY_DB_FILE = 'hub.db';
@@ -55,6 +60,11 @@ function attachArchive(conn: Database.Database, archivePath: string): void {
 /** 建归档表：列照抄主库（CTAS 不复制主键/外键，正好——历史日志引用的账号可能早就不在了）。 */
 function ensureArchiveSchema(conn: Database.Database): void {
   conn.exec(`CREATE TABLE IF NOT EXISTS ${ARCHIVE_SCHEMA}.proxy_logs AS SELECT * FROM main.proxy_logs WHERE 0`);
+
+  // 本机设置的落点：键值对，和日志共用一个文件，省掉额外的配置文件。
+  conn.exec(
+    `CREATE TABLE IF NOT EXISTS ${ARCHIVE_SCHEMA}.${SETTINGS_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+  );
 
   logColumns = readTableColumns(conn, 'main', 'proxy_logs');
   const archivedColumns = readTableColumns(conn, ARCHIVE_SCHEMA, 'proxy_logs');
@@ -176,6 +186,37 @@ function startFlusher(): void {
   }, FLUSH_INTERVAL_MS);
   // 别让定时器挡着进程退出。
   flushTimer.unref?.();
+}
+
+/**
+ * 读一个本机设置。归档还没就绪（例如单元测试没调 setupEdgeLogArchive）时按「没设过」处理。
+ */
+export function readEdgeLocalSetting(key: string): string {
+  const conn = connection;
+  if (!conn) return '';
+  try {
+    const row = conn.prepare(
+      `SELECT value FROM ${ARCHIVE_SCHEMA}.${SETTINGS_TABLE} WHERE key = ?`,
+    ).get(key) as { value?: unknown } | undefined;
+    return typeof row?.value === 'string' ? row.value : '';
+  } catch (error) {
+    console.warn(`[edge] 读取本机设置失败（${key}）：${(error as Error)?.message || String(error)}`);
+    return '';
+  }
+}
+
+/**
+ * 写一个本机设置。归档不可用时直接抛错：宁可让界面报错，也不能假装存下来了。
+ */
+export function writeEdgeLocalSetting(key: string, value: string): void {
+  const conn = connection;
+  if (!conn) {
+    throw new Error('边缘本地存储还没就绪，本机设置无法保存。');
+  }
+  conn.prepare(
+    `INSERT INTO ${ARCHIVE_SCHEMA}.${SETTINGS_TABLE} (key, value) VALUES (?, ?)`
+    + ' ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  ).run(key, value);
 }
 
 /** 建立在内存库上的日志归档：只在边缘入口启动时调用一次。 */

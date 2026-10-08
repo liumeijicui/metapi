@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -18,6 +19,9 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
   let readEdgeSyncSource: () => Promise<{ url: string; token: string }>;
   let saveEdgeSyncSource: (input: { url: string; token: string }) => Promise<{ url: string; token: string }>;
   let isEdgeOpenRoute: (method: string, url: string) => boolean;
+  let readEdgeLocalSetting: (key: string) => string;
+  let stopEdgeLogArchive: () => void;
+  let sourceUrlSettingKey = '';
   const requests: Array<{ method: string; url: string; authorization: string }> = [];
 
   /** 假的「服务器」：只提供一个鉴权探针，令牌对才回 200。 */
@@ -47,13 +51,21 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     process.env.METAPI_EDGE_MODE = '1';
     process.env.HOST = '127.0.0.1';
     process.env.PORT = '30086';
+    // 与边缘入口一致：工作库是内存库，本机设置与日志都落数据目录下的本地 SQLite。
+    process.env.DB_URL = ':memory:';
 
-    await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const configModule = await import('../config.js');
     db = dbModule.db;
     schema = dbModule.schema;
     config = configModule.config;
+    // 内存库的表只存在于这条连接上，迁移必须落在同一条连接里。
+    (await import('../db/migrate.js')).runSqliteMigrationsOn(dbModule.getSqliteConnection());
+
+    const archiveModule = await import('./logArchive.js');
+    readEdgeLocalSetting = archiveModule.readEdgeLocalSetting;
+    stopEdgeLogArchive = archiveModule.stopEdgeLogArchive;
+    archiveModule.setupEdgeLogArchive({ dataDirAbsolute: dataDir });
 
     server = createServer((request, reply) => { void handleRequest(request, reply); });
     await new Promise<void>((resolve) => { server!.listen(0, '127.0.0.1', () => resolve()); });
@@ -65,13 +77,16 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     normalizeEdgeSourceUrl = module.normalizeEdgeSourceUrl;
     readEdgeSyncSource = module.readEdgeSyncSource;
     saveEdgeSyncSource = module.saveEdgeSyncSource;
+    sourceUrlSettingKey = module.SOURCE_URL_SETTING_KEY;
     isEdgeOpenRoute = (await import('./statusRoutes.js')).isEdgeOpenRoute;
   }, 60_000);
 
   afterAll(async () => {
     await new Promise<void>((resolve) => { server ? server.close(() => resolve()) : resolve(); });
+    stopEdgeLogArchive();
     delete process.env.DATA_DIR;
     delete process.env.METAPI_EDGE_MODE;
+    delete process.env.DB_URL;
     try {
       rmSync(dataDir, { recursive: true, force: true });
     } catch {}
@@ -92,19 +107,33 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     expect(isEdgeOpenRoute('GET', '/api/model-forward-rules')).toBe(false);
   });
 
-  it('保存同步源会把地址写进连接文件、令牌只进内存，并热加载成本机管理员令牌', async () => {
+  it('旧版 edge-connection.json 会在首次读取时搬进本地 SQLite，然后删掉旧文件', async () => {
+    const legacyFile = join(dataDir, 'edge-connection.json');
+    writeFileSync(legacyFile, JSON.stringify({ url: 'https://legacy.example.com:8443/' }));
+    expect(existsSync(legacyFile)).toBe(true);
+
+    expect((await readEdgeSyncSource()).url).toBe('https://legacy.example.com:8443');
+
+    expect(readEdgeLocalSetting(sourceUrlSettingKey)).toBe('https://legacy.example.com:8443');
+    expect(existsSync(legacyFile)).toBe(false);
+  });
+
+  it('保存同步源会把地址写进本地 SQLite、令牌只进内存，并热加载成本机管理员令牌', async () => {
     const saved = await saveEdgeSyncSource({ url: sourceUrl, token: 'good-token' });
     expect(saved).toEqual({ url: `http://${sourceUrl}`, token: 'good-token' });
 
-    // 地址落在数据目录的连接文件里（登录页要回填）；令牌只在内存库里，进程重启要重新登录。
-    const connectionFile = join(dataDir, 'edge-connection.json');
-    expect(existsSync(connectionFile)).toBe(true);
-    expect(JSON.parse(readFileSync(connectionFile, 'utf8')).url).toBe(`http://${sourceUrl}`);
+    // 地址落在数据目录的本地 SQLite 文件里（登录页要回填），不再产生 JSON 边车文件。
+    expect(existsSync(join(dataDir, 'edge-connection.json'))).toBe(false);
+    const archive = new Database(join(dataDir, 'edge-logs.db'), { readonly: true, fileMustExist: true });
+    const stored = archive.prepare('SELECT value FROM edge_settings WHERE key = ?').get(sourceUrlSettingKey) as AnyRecord;
+    archive.close();
+    expect(stored?.value).toBe(`http://${sourceUrl}`);
 
+    // 令牌只在内存库里，进程重启要重新登录。
     const rows = await db.select().from(schema.settings).all();
-    const stored = new Map(rows.map((row: AnyRecord) => [row.key, row.value]));
-    expect(JSON.parse(String(stored.get('auth_token')))).toBe('good-token');
-    expect(stored.has('edge_sync_source_url')).toBe(false);
+    const settings = new Map(rows.map((row: AnyRecord) => [row.key, row.value]));
+    expect(JSON.parse(String(settings.get('auth_token')))).toBe('good-token');
+    expect(settings.has(sourceUrlSettingKey)).toBe(false);
     // 热加载之后本地 /api/* 就认这个令牌。
     expect(config.authToken).toBe('good-token');
 
@@ -156,3 +185,4 @@ describe('edge 同步源配置（服务器地址 + 登录令牌）', () => {
     }
   }, 30_000);
 });
+
