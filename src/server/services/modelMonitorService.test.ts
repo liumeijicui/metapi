@@ -685,6 +685,27 @@ describe('modelMonitorService', () => {
       expect(getAdapterMock).toHaveBeenCalledTimes(1);
     });
 
+    it('起跑时标出触发来源：定时任务 vs 页面手点', async () => {
+      await seedSiteWithAccount('sched-trigger');
+
+      service.startModelMonitorScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      // 定时任务触发的这一轮。
+      expect(service.getModelMonitorSchedulerState().lastRunTrigger).toBe('scheduler');
+
+      // 等这一轮跑完，再看手点「立即采集」：不带参数即 manual。
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.isModelMonitorRunning()).toBe(false);
+      await service.runModelMonitorFetch();
+      expect(service.getModelMonitorSchedulerState().lastRunTrigger).toBe('manual');
+
+      // 并发时复用在跑的那一轮，来源保持最先起跑的那一轮，不会被后来的调用改写。
+      const first = service.runModelMonitorFetch('scheduler');
+      const second = service.runModelMonitorFetch('manual');
+      expect(service.getModelMonitorSchedulerState().lastRunTrigger).toBe('scheduler');
+      await Promise.all([first, second]);
+    });
+
     it('关闭开关时不启动调度器', () => {
       const originalEnabled = config.modelMonitorEnabled;
       config.modelMonitorEnabled = false;

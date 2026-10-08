@@ -260,7 +260,8 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         notifyOnSuccess: false,
         notifyOnFailure: false,
       },
-      () => runModelMonitorFetch(),
+      // 页面上的「立即采集」：标成 manual，日志和页面都能和定时采集区分开。
+      () => runModelMonitorFetch('manual'),
     );
     return { success: true, queued: !reused, reused, running: true, taskId: task.id };
   });

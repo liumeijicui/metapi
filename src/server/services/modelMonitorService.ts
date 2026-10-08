@@ -128,6 +128,17 @@ let monitorSchedulerReady = false;
 let monitorLastRunStartedAtIso: string | null = null;
 let monitorLastRunFinishedAtIso: string | null = null;
 let monitorSkippedRuns = 0;
+/**
+ * 当前这一轮是谁发起的。
+ *
+ * 页面只是读库（打开「模型监控」不会触发采集，页面只调 GET overview、并且全前端
+ * 只有「立即采集」按钮会打 refresh），但定时任务每 15 分钟会跑一轮、一轮约两分钟，
+ * 赶上这一窗口打开页面就像「一进去就采集」。把来源显式标出来，省得再猜。
+ */
+let monitorLastRunTrigger: ModelMonitorRunTrigger | null = null;
+
+/** 采集由谁触发：定时任务还是页面上的「立即采集」。 */
+export type ModelMonitorRunTrigger = 'scheduler' | 'manual';
 
 export type ModelMonitorSchedulerState = {
   enabled: boolean;
@@ -140,6 +151,8 @@ export type ModelMonitorSchedulerState = {
   /** 因为上一轮还没跑完而被跳过的次数（跳过而不是排队，避免堆任务）。 */
   skippedRuns: number;
   nextRunAt: string | null;
+  /** 最近一轮（进行中或已结束）的触发来源。 */
+  lastRunTrigger: ModelMonitorRunTrigger | null;
 };
 
 const MONITOR_TICK_MS = 60_000;
@@ -791,8 +804,15 @@ async function executeModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
  * 采集全部活跃站点的模型监控。单飞：同一时刻只有一轮，上一轮没跑完时
  * 再次调用会直接复用那一轮，而不是把请求翻倍。
  */
-export function runModelMonitorFetch(): Promise<ModelMonitorRunSummary> {
+export function runModelMonitorFetch(
+  trigger: ModelMonitorRunTrigger = 'manual',
+): Promise<ModelMonitorRunSummary> {
+  // 已有一轮在跑就直接复用：不排队、不并发，来源保持最开始那一轮的值。
   if (monitorRunInFlight) return monitorRunInFlight;
+  monitorLastRunTrigger = trigger;
+  if (trigger === 'manual') {
+    console.log(`[ModelMonitor] run requested by hand at ${new Date().toISOString()}`);
+  }
   const run = executeModelMonitorFetch().finally(() => {
     monitorRunInFlight = null;
   });
@@ -811,6 +831,7 @@ export function getModelMonitorSchedulerState(): ModelMonitorSchedulerState {
     lastRunFinishedAt: monitorLastRunFinishedAtIso,
     skippedRuns: monitorSkippedRuns,
     nextRunAt: monitorNextRunAtMs === null ? null : new Date(monitorNextRunAtMs).toISOString(),
+    lastRunTrigger: monitorLastRunTrigger,
   };
 }
 
@@ -861,8 +882,8 @@ export function startModelMonitorScheduler(): ModelMonitorSchedulerState {
     monitorNextRunAtMs = nowMs + state.intervalMs;
     monitorLastRunStartedAtMs = nowMs;
     monitorLastRunStartedAtIso = new Date(nowMs).toISOString();
-    console.log(`[Scheduler] Model monitor run started at ${monitorLastRunStartedAtIso}`);
-    void runModelMonitorFetch()
+    console.log(`[Scheduler] Model monitor run started at ${monitorLastRunStartedAtIso} (trigger=scheduler)`);
+    void runModelMonitorFetch('scheduler')
       .then((summary) => {
         monitorLastRunFinishedAtIso = summary.finishedAt;
         console.log(

@@ -57,6 +57,8 @@ type Overview = {
     windowEndHour: number;
     running: boolean;
     lastRunStartedAt: string | null;
+    /** 最近一轮是谁触发的：定时任务，还是页面上的「立即采集」。 */
+    lastRunTrigger?: 'scheduler' | 'manual' | null;
     lastRunFinishedAt: string | null;
     skippedRuns: number;
     nextRunAt: string | null;
@@ -415,7 +417,18 @@ export default function ModelMonitor() {
           </div>
         </div>
         <div className="page-actions">
-          {overview?.running ? <span className="badge badge-info">{tr('采集中')}</span> : null}
+          {overview?.running ? (
+            // 采集中往往只是赶上了每 15 分钟那一轮定时任务：写清来源，免得以为
+            // 是「打开页面触发的采集」。页面本身只读库，不会启动采集。
+            <span
+              className="badge badge-info"
+              title={overview.scheduler?.lastRunTrigger === 'manual'
+                ? tr('由页面上的「立即采集」触发')
+                : tr('由定时任务触发（每 15 分钟一轮），和打开页面无关')}
+            >
+              {overview.scheduler?.lastRunTrigger === 'manual' ? tr('手动采集中') : tr('定时采集中')}
+            </span>
+          ) : null}
           <button
             onClick={triggerRefresh}
             disabled={starting || overview?.running}
