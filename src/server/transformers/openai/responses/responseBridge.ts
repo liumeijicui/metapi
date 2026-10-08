@@ -4,7 +4,10 @@ import {
 } from '../../shared/normalized.js';
 import { decodeOpenAiEncryptedReasoning } from '../../shared/reasoningTransport.js';
 import { decodeResponsesMcpCompatToolCall } from './mcpCompatibility.js';
-import { unwrapCustomToolCallArguments } from './toolCompat.js';
+import {
+  resolveResponsesToolNamespace,
+  unwrapCustomToolCallArguments,
+} from './toolCompat.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -340,6 +343,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
   usage: ResponsesUsageSummary;
   serializationMode?: ResponsesFinalSerializationMode;
   customToolNames?: string[];
+  toolNamespaces?: Record<string, string> | null;
 }): Record<string, unknown> {
   const {
     upstreamPayload,
@@ -352,6 +356,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
       .map((name) => asTrimmedString(name))
       .filter((name) => name.length > 0),
   );
+  const toolNamespaces = input.toolNamespaces ?? {};
   if (isRecord(upstreamPayload)) {
     if (upstreamPayload.object === 'response.compaction') {
       return upstreamPayload;
@@ -437,6 +442,8 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
         continue;
       }
 
+      const namespace = resolveResponsesToolNamespace(asTrimmedString(toolCall.name), toolNamespaces);
+
       if (customToolNames.has(asTrimmedString(toolCall.name))) {
         output.push({
           id: toCustomToolCallItemId(toolCall.id),
@@ -444,6 +451,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
           status: 'completed',
           call_id: toolCall.id,
           name: toolCall.name,
+          ...(namespace ? { namespace } : {}),
           input: unwrapCustomToolCallArguments(toolCall.arguments),
         });
         continue;
@@ -455,6 +463,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
         status: 'completed',
         call_id: toolCall.id,
         name: toolCall.name,
+        ...(namespace ? { namespace } : {}),
         arguments: toolCall.arguments,
       });
     }

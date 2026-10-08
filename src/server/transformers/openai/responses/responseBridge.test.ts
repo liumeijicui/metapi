@@ -381,4 +381,83 @@ describe('openai responses response bridge', () => {
   it('keeps the outbound facade pointed at the response bridge object', () => {
     expect(openAiResponsesOutbound).toBe(openAiResponsesResponseBridge);
   });
+
+  it('restores the namespace of calls to tools declared in a non-default namespace', () => {
+    const payload = buildNormalizedFinalToOpenAiResponsesPayload({
+      upstreamPayload: {
+        id: 'chatcmpl-ns-1',
+        object: 'chat.completion',
+        model: 'gpt-5',
+      },
+      normalized: {
+        id: 'chatcmpl-ns-1',
+        model: 'gpt-5',
+        created: 1700000000,
+        content: '',
+        reasoningContent: '',
+        finishReason: 'tool_calls',
+        toolCalls: [{
+          id: 'call_sleep_1',
+          name: 'sleep',
+          arguments: '{"duration_ms":1}',
+        }],
+      },
+      usage: {
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+      },
+      toolNamespaces: { sleep: 'clock' },
+    });
+
+    expect(payload.output).toEqual([
+      expect.objectContaining({
+        type: 'function_call',
+        call_id: 'call_sleep_1',
+        name: 'sleep',
+        namespace: 'clock',
+        arguments: '{"duration_ms":1}',
+      }),
+    ]);
+  });
+
+  it('leaves calls to default-namespace tools without a namespace', () => {
+    const payload = buildNormalizedFinalToOpenAiResponsesPayload({
+      upstreamPayload: {
+        id: 'chatcmpl-ns-2',
+        object: 'chat.completion',
+        model: 'gpt-5',
+      },
+      normalized: {
+        id: 'chatcmpl-ns-2',
+        model: 'gpt-5',
+        created: 1700000000,
+        content: '',
+        reasoningContent: '',
+        finishReason: 'tool_calls',
+        toolCalls: [{
+          id: 'call_exec_1',
+          name: 'exec',
+          arguments: '{"input":"pwd"}',
+        }],
+      },
+      usage: {
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+      },
+      toolNamespaces: { sleep: 'clock' },
+    });
+
+    expect(payload.output).toEqual([
+      expect.objectContaining({
+        type: 'function_call',
+        call_id: 'call_exec_1',
+        name: 'exec',
+        arguments: '{"input":"pwd"}',
+      }),
+    ]);
+    const [item] = payload.output as Array<Record<string, unknown>>;
+    expect(item.namespace).toBeUndefined();
+  });
 });

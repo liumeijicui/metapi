@@ -2461,12 +2461,13 @@ describe('buildUpstreamEndpointRequest', () => {
           type: 'function',
           function: {
             name: 'browser',
+            description: 'This tool takes freeform text. Put the complete raw text in the "input" argument.',
             parameters: {
               type: 'object',
               properties: {
                 input: {
                   type: 'string',
-                  description: 'Free-form input for this tool, passed through verbatim.',
+                  description: 'Raw input for the tool.',
                 },
               },
               required: ['input'],

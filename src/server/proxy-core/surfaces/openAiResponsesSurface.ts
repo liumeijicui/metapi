@@ -4,7 +4,7 @@ import { config } from '../../config.js';
 import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
-import { collectResponsesCustomToolNames } from '../../transformers/openai/responses/toolCompat.js';
+import { resolveResponsesToolState } from '../../transformers/openai/responses/toolCompat.js';
 import {
   extractResponsesTerminalResponseId,
   isResponsesPreviousResponseNotFoundError,
@@ -451,7 +451,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
           throw error;
         }
       }
-      const customToolNames = collectResponsesCustomToolNames(normalizedResponsesBody);
+      const { customToolNames, toolNamespaces } = resolveResponsesToolState(
+        body,
+        normalizedResponsesBody,
+      );
       const openAiBody = openAiResponsesTransformer.inbound.toOpenAiBody(
         normalizedResponsesBody,
         modelName,
@@ -933,6 +936,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             modelName,
             successfulUpstreamPath,
             customToolNames,
+            toolNamespaces,
             getUsage: () => parsedUsage,
             onParsedPayload: (payload) => {
               if (payload && typeof payload === 'object') {
@@ -1324,6 +1328,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           usage: parsedUsage,
           serializationMode: isCompactRequest ? 'compact' : 'response',
           customToolNames,
+          toolNamespaces,
         });
         try {
           await recordSurfaceSuccess({

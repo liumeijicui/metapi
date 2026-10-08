@@ -1,7 +1,7 @@
 import { type StreamTransformContext } from '../../shared/normalized.js';
 import type { OpenAiResponsesStreamEvent } from './streamBridge.js';
 import {
-  extractPartialCustomToolCallInput,
+  resolveResponsesToolNamespace,
   unwrapCustomToolCallArguments,
 } from './toolCompat.js';
 
@@ -84,6 +84,8 @@ export type OpenAiResponsesAggregateState = {
   customToolNames: Set<string>;
   customToolIndexFlags: Record<number, boolean>;
   customToolRawArguments: Record<number, string>;
+  customToolInputEmitted: Record<number, boolean>;
+  toolNamespaces: Record<string, string>;
   completed: boolean;
   failed: boolean;
   incomplete: boolean;
@@ -91,6 +93,7 @@ export type OpenAiResponsesAggregateState = {
 
 export type OpenAiResponsesAggregateOptions = {
   customToolNames?: Iterable<string>;
+  toolNamespaces?: Record<string, string> | null;
 };
 
 export function createOpenAiResponsesAggregateState(
@@ -117,10 +120,44 @@ export function createOpenAiResponsesAggregateState(
     customToolNames,
     customToolIndexFlags: {},
     customToolRawArguments: {},
+    customToolInputEmitted: {},
+    toolNamespaces: normalizeResponsesToolNamespaces(options?.toolNamespaces),
     completed: false,
     failed: false,
     incomplete: false,
   };
+}
+
+function normalizeResponsesToolNamespaces(
+  raw: Record<string, string> | null | undefined,
+): Record<string, string> {
+  if (!raw) return {};
+  const normalized: Record<string, string> = {};
+  for (const [rawName, rawNamespace] of Object.entries(raw)) {
+    const name = asTrimmedString(rawName);
+    const namespace = asTrimmedString(rawNamespace);
+    if (name && namespace) normalized[name] = namespace;
+  }
+  return normalized;
+}
+
+/**
+ * Codex resolves tool calls by name plus namespace, so a call to a tool that
+ * was declared in a non-default namespace must carry that namespace back.
+ */
+function applyResponsesToolNamespace(
+  item: AggregateOutputItem,
+  toolNamespaces: Record<string, string>,
+): AggregateOutputItem {
+  const itemType = asTrimmedString(item.type).toLowerCase();
+  if (itemType !== 'function_call' && itemType !== 'custom_tool_call') return item;
+  const name = asTrimmedString(item.name);
+  if (!name) return item;
+  const namespace = resolveResponsesToolNamespace(name, toolNamespaces);
+  if (namespace && asTrimmedString(item.namespace) !== namespace) {
+    item.namespace = namespace;
+  }
+  return item;
 }
 
 function markTerminalMarker(item: AggregateOutputItem, marker: symbol): void {
@@ -493,6 +530,7 @@ function ensureFunctionCallItem(
   if (callId) item.call_id = ensureOutputItemId(callId, 'call', index);
   if (name) item.name = name;
   if (typeof item.arguments !== 'string') item.arguments = '';
+  applyResponsesToolNamespace(item, state.toolNamespaces);
   return { index, item, created };
 }
 
@@ -524,6 +562,7 @@ function ensureCustomToolItem(
   if (callId || itemId) item.call_id = ensureOutputItemId(callId || itemId, 'call', index);
   if (name) item.name = name;
   if (typeof item.input !== 'string') item.input = '';
+  applyResponsesToolNamespace(item, state.toolNamespaces);
   return { index, item, created };
 }
 
@@ -776,6 +815,7 @@ function applyOriginalResponsesPayload(
         if (preservedContent) next.content = preservedContent;
         if (preservedSummary) next.summary = preservedSummary;
         if (preservedPartialImages) next.partial_images = preservedPartialImages;
+        applyResponsesToolNamespace(next, state.toolNamespaces);
         const stored = setOutputItem(state, outputIndex, next);
         if (preservedContent) stored.content = preservedContent;
         if (preservedSummary) stored.summary = preservedSummary;
@@ -1171,23 +1211,10 @@ function buildSyntheticToolEvents(
       if (entry.created) {
         lines.push(serializeOutputItemAdded(entry.index, entry.item));
       }
-      if (!deltaText) continue;
-      const rawArguments = `${state.customToolRawArguments[entry.index] ?? ''}${deltaText}`;
-      state.customToolRawArguments[entry.index] = rawArguments;
-      const unwrapped = extractPartialCustomToolCallInput(rawArguments);
-      const currentInput = typeof entry.item.input === 'string' ? entry.item.input : '';
-      if (!unwrapped || unwrapped === currentInput) continue;
-      if (unwrapped.startsWith(currentInput)) {
-        entry.item.input = unwrapped;
-        lines.push(serializeSse('response.custom_tool_call_input.delta', {
-          type: 'response.custom_tool_call_input.delta',
-          item_id: entry.item.id,
-          call_id: entry.item.call_id,
-          output_index: entry.index,
-          delta: unwrapped.slice(currentInput.length),
-        }));
-      } else if (unwrapped.length >= currentInput.length) {
-        entry.item.input = unwrapped;
+      // The argument stream carries the raw input wrapped in JSON, so the
+      // unwrapped text is only known once the call closes.
+      if (deltaText) {
+        state.customToolRawArguments[entry.index] = `${state.customToolRawArguments[entry.index] ?? ''}${deltaText}`;
       }
       continue;
     }
@@ -1211,7 +1238,8 @@ function buildSyntheticToolEvents(
   return lines;
 }
 
-function finalizeCustomToolCallItems(state: OpenAiResponsesAggregateState): void {
+function finalizeCustomToolCallItems(state: OpenAiResponsesAggregateState): string[] {
+  const lines: string[] = [];
   for (const index of Object.keys(state.customToolRawArguments)) {
     const numericIndex = Number(index);
     const item = state.outputItems[numericIndex];
@@ -1219,8 +1247,19 @@ function finalizeCustomToolCallItems(state: OpenAiResponsesAggregateState): void
     if (asTrimmedString(item.type).toLowerCase() !== 'custom_tool_call') continue;
     const rawArguments = state.customToolRawArguments[numericIndex] ?? '';
     if (!rawArguments) continue;
-    item.input = unwrapCustomToolCallArguments(rawArguments);
+    const input = unwrapCustomToolCallArguments(rawArguments);
+    item.input = input;
+    if (!input || state.customToolInputEmitted[numericIndex]) continue;
+    state.customToolInputEmitted[numericIndex] = true;
+    lines.push(serializeSse('response.custom_tool_call_input.delta', {
+      type: 'response.custom_tool_call_input.delta',
+      item_id: item.id,
+      call_id: item.call_id,
+      output_index: numericIndex,
+      delta: input,
+    }));
   }
+  return lines;
 }
 
 function buildMissingSubordinateDoneEventsForItem(
@@ -1325,8 +1364,7 @@ function buildSyntheticTerminalItemDoneEvents(
   state: OpenAiResponsesAggregateState,
   status: 'completed' | 'failed' | 'incomplete',
 ): string[] {
-  const lines: string[] = [];
-  finalizeCustomToolCallItems(state);
+  const lines: string[] = finalizeCustomToolCallItems(state);
 
   for (let index = 0; index < state.outputItems.length; index += 1) {
     const item = state.outputItems[index];

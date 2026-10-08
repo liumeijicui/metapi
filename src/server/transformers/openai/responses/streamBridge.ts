@@ -131,6 +131,7 @@ export function serializeResponsesUpstreamFinalAsStream(input: {
   fallbackText: string;
   usage: ResponsesUsageSummary;
   customToolNames?: string[];
+  toolNamespaces?: Record<string, string> | null;
 }): {
   normalizedFinal: ReturnType<typeof normalizeOpenAiResponsesFinalToNormalized>;
   streamPayload: Record<string, unknown>;
@@ -146,6 +147,7 @@ export function serializeResponsesUpstreamFinalAsStream(input: {
     usage,
     serializationMode: 'response',
     customToolNames: input.customToolNames,
+    toolNamespaces: input.toolNamespaces,
   });
   const payloadType = (isRecord(payload) && typeof payload.type === 'string')
     ? payload.type
@@ -185,6 +187,7 @@ export function serializeResponsesUpstreamFinalAsStream(input: {
     : (isIncompletePayload ? 'response.incomplete' : 'response.completed');
   const fallbackState = createOpenAiResponsesAggregateState(normalizedFinal.model || modelName, {
     customToolNames: input.customToolNames,
+    toolNamespaces: input.toolNamespaces,
   });
   const fallbackContext = createStreamTransformContext(normalizedFinal.model || modelName);
   fallbackContext.id = normalizedFinal.id;

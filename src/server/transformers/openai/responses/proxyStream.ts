@@ -29,6 +29,7 @@ type ResponsesProxyStreamSessionInput = {
   modelName: string;
   successfulUpstreamPath: string;
   customToolNames?: string[];
+  toolNamespaces?: Record<string, string> | null;
   strictTerminalEvents?: boolean;
   getUsage: () => {
     promptTokens: number;
@@ -92,6 +93,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
   const streamContext = openAiResponsesStream.createContext(input.modelName);
   const responsesState = createOpenAiResponsesAggregateState(input.modelName, {
     customToolNames: input.customToolNames,
+    toolNamespaces: input.toolNamespaces,
   });
   const requiresExplicitTerminalEvent = input.strictTerminalEvents
     || input.successfulUpstreamPath.endsWith('/responses')
@@ -247,6 +249,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         fallbackText,
         usage: input.getUsage(),
         customToolNames: input.customToolNames,
+        toolNamespaces: input.toolNamespaces,
       });
       const { normalizedFinal, streamPayload, isIncompletePayload, lines } = serializedFinal;
       streamContext.id = normalizedFinal.id;

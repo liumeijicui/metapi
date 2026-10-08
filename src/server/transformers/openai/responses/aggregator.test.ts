@@ -504,6 +504,58 @@ describe('serializeConvertedResponsesEvents', () => {
     });
   });
 
+  it('backfills the namespace of streamed calls to tools declared in a non-default namespace', () => {
+    const state = createOpenAiResponsesAggregateState('gpt-5', {
+      toolNamespaces: { sleep: 'clock' },
+    });
+    const streamContext = createStreamTransformContext('gpt-5');
+    const usage = {
+      promptTokens: 1,
+      completionTokens: 1,
+      totalTokens: 2,
+    };
+
+    const lines = serializeConvertedResponsesEvents({
+      state,
+      streamContext,
+      usage,
+      event: {
+        responsesEventType: 'response.function_call_arguments.delta',
+        responsesPayload: {
+          type: 'response.function_call_arguments.delta',
+          output_index: 0,
+          call_id: 'call_sleep_1',
+          name: 'sleep',
+          delta: '{"duration_ms":1}',
+        },
+      },
+    });
+
+    expect(parseSseEvents(lines)[0]?.payload).toMatchObject({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        call_id: 'call_sleep_1',
+        name: 'sleep',
+        namespace: 'clock',
+      },
+    });
+
+    const completed = parseSseEvents(completeResponsesStream(state, streamContext, usage))
+      .find((entry) => entry.event === 'response.completed');
+    expect(completed?.payload).toMatchObject({
+      response: {
+        output: [
+          expect.objectContaining({
+            type: 'function_call',
+            name: 'sleep',
+            namespace: 'clock',
+          }),
+        ],
+      },
+    });
+  });
+
   it('preserves richer image_generation_call fields while aggregating progress events', () => {
     const state = createOpenAiResponsesAggregateState('gpt-5');
     const streamContext = createStreamTransformContext('gpt-5');

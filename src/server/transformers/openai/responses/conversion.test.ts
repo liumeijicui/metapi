@@ -5,7 +5,12 @@ import {
   convertResponsesBodyToOpenAiBody,
   sanitizeResponsesBodyForProxy,
 } from './conversion.js';
-import { collectResponsesCustomToolNames } from './toolCompat.js';
+import {
+  collectResponsesCustomToolNames,
+  collectResponsesToolState,
+  convertResponsesCustomToolToChatTool,
+  resolveResponsesToolState,
+} from './toolCompat.js';
 import {
   buildResponsesCompatibilityBodies,
   buildResponsesCompatibilityHeaderCandidates,
@@ -1283,12 +1288,13 @@ describe('convertResponsesBodyToOpenAiBody', () => {
           type: 'function',
           function: {
             name: 'browser',
+            description: 'This tool takes freeform text. Put the complete raw text in the "input" argument.',
             parameters: {
               type: 'object',
               properties: {
                 input: {
                   type: 'string',
-                  description: 'Free-form input for this tool, passed through verbatim.',
+                  description: 'Raw input for the tool.',
                 },
               },
               required: ['input'],
@@ -1338,8 +1344,120 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     const execTool = tools[0] as any;
     expect(execTool.type).toBe('function');
     expect(execTool.function.parameters.properties.input.type).toBe('string');
+    expect(execTool.function.parameters.required).toEqual(['input']);
     expect(JSON.stringify(result.messages)).not.toContain('additional_tools');
     expect(result.messages.length).toBeGreaterThan(0);
+  });
+
+  it('reports the namespace of tools declared in a non-default namespace', () => {
+    const state = collectResponsesToolState({
+      model: 'gpt-5',
+      input: [
+        {
+          type: 'additional_tools',
+          role: 'developer',
+          tools: [
+            {
+              type: 'namespace',
+              name: 'functions',
+              tools: [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } }],
+            },
+            {
+              type: 'namespace',
+              name: 'clock',
+              tools: [{ type: 'function', name: 'sleep', parameters: { type: 'object' } }],
+            },
+          ],
+        },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      ],
+    });
+
+    expect(state.customToolNames).toEqual(['exec']);
+    expect(state.toolNamespaces).toEqual({ sleep: 'clock' });
+  });
+
+  it('keeps namespaces that sanitizing the body hoists away', () => {
+    const rawBody = {
+      model: 'gpt-5',
+      input: [
+        {
+          type: 'additional_tools',
+          role: 'developer',
+          tools: [
+            {
+              type: 'namespace',
+              name: 'functions',
+              tools: [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark' } }],
+            },
+            {
+              type: 'namespace',
+              name: 'clock',
+              tools: [{ type: 'function', name: 'sleep', parameters: { type: 'object' } }],
+            },
+          ],
+        },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      ],
+    };
+    const sanitized = sanitizeResponsesBodyForProxy(rawBody, 'gpt-5', false);
+
+    // Sanitizing flattens the namespaces away, which is exactly why the raw
+    // body has to be part of the lookup.
+    expect(collectResponsesToolState(sanitized).toolNamespaces).toEqual({});
+
+    const state = resolveResponsesToolState(rawBody, sanitized);
+    expect(state.customToolNames).toEqual(['exec']);
+    expect(state.toolNamespaces).toEqual({ sleep: 'clock' });
+  });
+
+  it('falls back to the sanitized body for tools only it knows', () => {
+    const state = resolveResponsesToolState(
+      { model: 'gpt-5', input: [{ type: 'message', role: 'user', content: 'hi' }] },
+      { model: 'gpt-5', tools: [{ type: 'custom', name: 'exec' }] },
+    );
+
+    expect(state.customToolNames).toEqual(['exec']);
+    expect(state.toolNamespaces).toEqual({});
+  });
+
+  it('describes a custom tool with its freeform instruction and declared grammar', () => {
+    const tool = convertResponsesCustomToolToChatTool({
+      type: 'custom',
+      name: 'exec',
+      description: 'Run JavaScript code.',
+      format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' },
+    });
+
+    const description = String((tool as any).function.description);
+    expect(description).toContain('Run JavaScript code.');
+    expect(description).toContain('This tool takes freeform text.');
+    expect(description).toContain('The input must match this Lark grammar:');
+    expect(description).toContain('start: SOURCE');
+    expect((tool as any).function.parameters.required).toEqual(['input']);
+    expect((tool as any).function.parameters.additionalProperties).toBe(false);
+  });
+
+  it('wraps a custom tool call from the input history into the input argument', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] },
+          { type: 'custom_tool_call', call_id: 'call_1', name: 'exec', input: 'text(1+1)' },
+          { type: 'custom_tool_call_output', call_id: 'call_1', output: '2' },
+        ],
+      },
+      'gpt-5',
+      true,
+    );
+
+    const assistant = (result.messages as Array<Record<string, unknown>>)
+      .find((message) => Array.isArray(message.tool_calls));
+    expect(assistant).toBeTruthy();
+    const toolCall = (assistant as any).tool_calls[0];
+    expect(toolCall.function.name).toBe('exec');
+    expect(JSON.parse(toolCall.function.arguments)).toEqual({ input: 'text(1+1)' });
   });
 
   it('keeps custom tools reachable when the Responses input is sanitized for proxy', () => {
@@ -1370,6 +1488,9 @@ describe('convertResponsesBodyToOpenAiBody', () => {
   });
 
   it('converts custom tool calls and outputs into OpenAI-compatible tool messages', () => {
+    // A custom tool reaches a Chat upstream as a function taking one "input"
+    // string argument, so the call history keeps that same shape.
+
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1402,7 +1523,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
             type: 'function',
             function: {
               name: 'browser',
-              arguments: 'open example.com',
+              arguments: '{"input":"open example.com"}',
             },
           },
         ],

@@ -14,6 +14,7 @@ import {
   convertResponsesCustomToolToChatTool,
   flattenResponsesToolList,
   hoistResponsesAdditionalTools,
+  wrapCustomToolCallArguments,
 } from './toolCompat.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -807,7 +808,11 @@ type OpenAiToolCall = {
   };
 };
 
-function toOpenAiToolCall(item: Record<string, unknown>, fallbackIndex: number): OpenAiToolCall | null {
+function toOpenAiToolCall(
+  item: Record<string, unknown>,
+  fallbackIndex: number,
+  itemType = '',
+): OpenAiToolCall | null {
   const callId = (
     asTrimmedString(item.call_id)
     || asTrimmedString(item.id)
@@ -816,12 +821,18 @@ function toOpenAiToolCall(item: Record<string, unknown>, fallbackIndex: number):
   const name = asTrimmedString(item.name);
   if (!name) return null;
 
+  // A custom tool call carries freeform input, while its declaration reaches a
+  // Chat upstream as a function taking one "input" string argument.
+  const argumentsText = asTrimmedString(itemType) === 'custom_tool_call'
+    ? wrapCustomToolCallArguments(item.input ?? item.arguments)
+    : normalizeOpenAiToolArguments(item.arguments ?? item.input);
+
   return {
     id: callId,
     type: 'function',
     function: {
       name,
-      arguments: normalizeOpenAiToolArguments(item.arguments ?? item.input),
+      arguments: argumentsText,
     },
   };
 }
@@ -1030,7 +1041,7 @@ export function convertResponsesBodyToOpenAiBody(
     }
 
     if (itemType === 'function_call' || itemType === 'custom_tool_call') {
-      const toolCall = toOpenAiToolCall(item, functionCallIndex);
+      const toolCall = toOpenAiToolCall(item, functionCallIndex, itemType);
       functionCallIndex += 1;
       if (toolCall) pendingToolCalls.push(toolCall);
       return;
