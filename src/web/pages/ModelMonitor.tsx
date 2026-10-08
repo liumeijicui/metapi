@@ -789,8 +789,7 @@ export default function ModelMonitor() {
               <div className="model-monitor-card-actions">
                 <button
                   type="button"
-                  className="btn btn-link"
-                  style={{ fontSize: 11.5, padding: 0 }}
+                  className="btn model-monitor-action-btn"
                   title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
                   onClick={() => setChatTarget(model)}
                 >
@@ -798,8 +797,7 @@ export default function ModelMonitor() {
                 </button>
                 <button
                   type="button"
-                  className="btn btn-link"
-                  style={{ fontSize: 11.5, padding: 0 }}
+                  className="btn model-monitor-action-btn"
                   title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
                   onClick={() => void openAttach(model)}
                 >
@@ -807,7 +805,7 @@ export default function ModelMonitor() {
                 </button>
                 <button
                   type="button"
-                  className="btn model-monitor-ccswitch-btn"
+                  className="btn model-monitor-action-btn"
                   title={tr('把原站的地址与 sk- 密钥导入到 CC Switch')}
                   disabled={ccSwitchBusyKey === `${model.siteId}:${model.modelName}`}
                   onClick={() => void openCcSwitch(model)}
@@ -872,8 +870,7 @@ export default function ModelMonitor() {
                     <div className="model-monitor-row-actions">
                       <button
                         type="button"
-                        className="btn btn-link"
-                        style={{ fontSize: 12, padding: 0 }}
+                        className="btn model-monitor-action-btn"
                         title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
                         onClick={() => setChatTarget(model)}
                       >
@@ -881,8 +878,7 @@ export default function ModelMonitor() {
                       </button>
                       <button
                         type="button"
-                        className="btn btn-link"
-                        style={{ fontSize: 12, padding: 0 }}
+                        className="btn model-monitor-action-btn"
                         title={tr('把这个站点的这个模型挂到某个对外模型转发的最后面')}
                         onClick={() => void openAttach(model)}
                       >
@@ -890,7 +886,7 @@ export default function ModelMonitor() {
                       </button>
                       <button
                         type="button"
-                        className="btn model-monitor-ccswitch-btn"
+                        className="btn model-monitor-action-btn"
                         title={tr('把原站的地址与 sk- 密钥导入到 CC Switch')}
                         disabled={ccSwitchBusyKey === `${model.siteId}:${model.modelName}`}
                         onClick={() => void openCcSwitch(model)}

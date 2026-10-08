@@ -6084,15 +6084,17 @@ a.model-monitor-site-name:hover {
 .model-monitor-row-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .model-monitor-card-actions {
   align-self: flex-start;
 }
 
-/* 「导入到 CC Switch」：细边框 + 淡色底，表明它是个按钮而不是文字链接。 */
-.model-monitor-ccswitch-btn {
+/* 模型监控行内操作（对话 / 挂到转发 / 导入到 CC Switch）：细边框 + 淡色底，
+   表明它们是个按钮，而不是一行文字链接。 */
+.model-monitor-action-btn {
   font-size: 11.5px;
   padding: 1px 7px;
   line-height: 1.55;
@@ -6100,14 +6102,15 @@ a.model-monitor-site-name:hover {
   border: 1px solid color-mix(in srgb, var(--color-primary) 32%, transparent);
   color: var(--color-primary);
   border-radius: var(--radius-sm);
+  white-space: nowrap;
 }
 
-.model-monitor-ccswitch-btn:hover:not(:disabled) {
+.model-monitor-action-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-primary) 16%, var(--color-bg-card));
   border-color: color-mix(in srgb, var(--color-primary) 50%, transparent);
 }
 
-.model-monitor-ccswitch-btn:disabled {
+.model-monitor-action-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }

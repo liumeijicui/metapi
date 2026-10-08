@@ -12,6 +12,8 @@ describe('ModelMonitor 对话按钮', () => {
     // 卡片视图与表格视图各有一处
     expect(page.split("onClick={() => setChatTarget(model)}").length - 1).toBe(2);
     expect(page).toContain("tr('对话')");
+    // 入口按钮与「挂到转发 / 导入到 CC Switch」用同一套行内按钮样式。
+    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(6);
     expect(page).toContain('<ModelChatModal');
   });
 
