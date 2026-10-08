@@ -373,6 +373,89 @@ export async function listModelForwardRules(): Promise<ModelForwardRuleRow[]> {
   }));
 }
 
+/**
+ * 边缘实例（本地 exe / Edge Relay）拉取用的只读快照。
+ * 注意：model_forward_rules / model_forward_targets 不在 /api/settings/backup/export 的导出段里，
+ * 边缘端靠这个快照补齐；少了它本地「模型转发」页会是空的
+ * （转发链路本身只用 token_routes + route_channels，不依赖这两张表）。
+ */
+export type ModelForwardSnapshotRule = {
+  id: number;
+  modelName: string;
+  enabled: boolean;
+  routeId: number | null;
+  notes: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+/** 快照里的转发目标行：字段与 model_forward_targets 一一对应。 */
+export type ModelForwardSnapshotTarget = {
+  id: number;
+  ruleId: number;
+  siteId: number;
+  accountId: number;
+  tokenId: number | null;
+  upstreamModel: string;
+  channelId: number | null;
+  weight: number;
+  enabled: boolean;
+  sortOrder: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+/** 快照整体结构。 */
+export type ModelForwardSnapshot = {
+  version: number;
+  generatedAt: string;
+  rules: ModelForwardSnapshotRule[];
+  targets: ModelForwardSnapshotTarget[];
+};
+
+/** 快照结构版本；字段语义变化时递增。 */
+export const MODEL_FORWARD_SNAPSHOT_VERSION = 1;
+
+/** 导出模型转发规则的只读快照，供边缘实例镜像使用；不读凭据，也不写任何表。 */
+export async function exportModelForwardSnapshot(): Promise<ModelForwardSnapshot> {
+  const rules = await db.select().from(schema.modelForwardRules)
+    .orderBy(asc(schema.modelForwardRules.id))
+    .all();
+  const targets = rules.length === 0
+    ? []
+    : await db.select().from(schema.modelForwardTargets)
+      .orderBy(asc(schema.modelForwardTargets.sortOrder), asc(schema.modelForwardTargets.id))
+      .all();
+
+  return {
+    version: MODEL_FORWARD_SNAPSHOT_VERSION,
+    generatedAt: new Date().toISOString(),
+    rules: rules.map((rule) => ({
+      id: rule.id,
+      modelName: rule.modelName,
+      enabled: !!rule.enabled,
+      routeId: rule.routeId ?? null,
+      notes: rule.notes ?? null,
+      createdAt: rule.createdAt ?? null,
+      updatedAt: rule.updatedAt ?? null,
+    })),
+    targets: targets.map((target) => ({
+      id: target.id,
+      ruleId: target.ruleId,
+      siteId: target.siteId,
+      accountId: target.accountId,
+      tokenId: target.tokenId ?? null,
+      upstreamModel: target.upstreamModel,
+      channelId: target.channelId ?? null,
+      weight: target.weight ?? 10,
+      enabled: !!target.enabled,
+      sortOrder: target.sortOrder ?? 0,
+      createdAt: target.createdAt ?? null,
+      updatedAt: target.updatedAt ?? null,
+    })),
+  };
+}
+
 export async function createModelForwardRule(raw: unknown): Promise<ModelForwardRuleRow> {
   const input = normalizeModelForwardRuleInput(raw);
   const existing = await findRuleByModelName(input.modelName);
