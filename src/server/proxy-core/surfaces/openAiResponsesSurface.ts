@@ -5,7 +5,7 @@ import { reportProxyAllFailed } from '../../services/alertService.js';
 import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
 import { resolveResponsesToolState } from '../../transformers/openai/responses/toolCompat.js';
-import { hasUnsupportedResponsesCustomTool } from '../../services/siteProfiles.js';
+import { resolveUnsupportedResponsesCustomToolNames } from '../../services/siteProfiles.js';
 import {
   extractResponsesTerminalResponseId,
   isResponsesPreviousResponseNotFoundError,
@@ -457,9 +457,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
         normalizedResponsesBody,
       );
       // 有些站点自建的 Responses 接口只接受一部分自定义工具（agentrouter 只认
-      // apply_patch），带别的 custom 工具打过去必然 400。这种情况让 chat 端点
-      // 先上：custom 工具会在那边降级成 function 声明再发。
-      const unsupportedResponsesCustomTools = hasUnsupportedResponsesCustomTool(
+      // apply_patch）。带它不认的 custom 工具时，请求体里那些声明会被降级成
+      // function 再发（见 upstreamRequestBuilder），所以回程也要把对应的
+      // function_call 还原成 custom_tool_call，客户端才拿得到它声明的类型。
+      const downgradedCustomToolNames = resolveUnsupportedResponsesCustomToolNames(
         selected.site.url,
         customToolNames,
       );
@@ -492,7 +493,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
           {
             requestKind: 'responses-compact',
             requiresNativeResponsesFileUrl,
-            unsupportedResponsesCustomTools,
           },
         )
         : await resolveUpstreamEndpointCandidates(
@@ -510,7 +510,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
           },
           {
             requiresNativeResponsesFileUrl,
-            unsupportedResponsesCustomTools,
           },
         );
       const endpointRuntimeContext = {
@@ -947,6 +946,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             successfulUpstreamPath,
             customToolNames,
             toolNamespaces,
+            downgradedCustomToolNames,
             getUsage: () => parsedUsage,
             onParsedPayload: (payload) => {
               if (payload && typeof payload === 'object') {
@@ -1339,6 +1339,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           serializationMode: isCompactRequest ? 'compact' : 'response',
           customToolNames,
           toolNamespaces,
+          downgradedCustomToolNames,
         });
         try {
           await recordSurfaceSuccess({

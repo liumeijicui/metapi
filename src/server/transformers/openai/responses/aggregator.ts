@@ -4,6 +4,10 @@ import {
   resolveResponsesToolNamespace,
   unwrapCustomToolCallArguments,
 } from './toolCompat.js';
+import {
+  convertDowngradedFunctionCallItem,
+  isDowngradedCustomToolName,
+} from './customToolDowngrade.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -82,6 +86,11 @@ export type OpenAiResponsesAggregateState = {
   imageGenerationIndexById: Record<string, number>;
   usageExtras: Record<string, unknown>;
   customToolNames: Set<string>;
+  /**
+   * 客户端声明成 custom、但因为我们把声明降级成 function 才发出的工具名。
+   * 上游返回的 function_call 要按这些名字还原成 custom_tool_call。
+   */
+  downgradedCustomToolNames: Set<string>;
   customToolIndexFlags: Record<number, boolean>;
   customToolRawArguments: Record<number, string>;
   customToolInputEmitted: Record<number, boolean>;
@@ -94,6 +103,7 @@ export type OpenAiResponsesAggregateState = {
 export type OpenAiResponsesAggregateOptions = {
   customToolNames?: Iterable<string>;
   toolNamespaces?: Record<string, string> | null;
+  downgradedCustomToolNames?: Iterable<string>;
 };
 
 export function createOpenAiResponsesAggregateState(
@@ -104,6 +114,11 @@ export function createOpenAiResponsesAggregateState(
   for (const name of options?.customToolNames ?? []) {
     const trimmed = asTrimmedString(name);
     if (trimmed) customToolNames.add(trimmed);
+  }
+  const downgradedCustomToolNames = new Set<string>();
+  for (const name of options?.downgradedCustomToolNames ?? []) {
+    const trimmed = asTrimmedString(name);
+    if (trimmed) downgradedCustomToolNames.add(trimmed);
   }
   return {
     modelName,
@@ -118,6 +133,7 @@ export function createOpenAiResponsesAggregateState(
     imageGenerationIndexById: {},
     usageExtras: {},
     customToolNames,
+    downgradedCustomToolNames,
     customToolIndexFlags: {},
     customToolRawArguments: {},
     customToolInputEmitted: {},
@@ -629,16 +645,17 @@ function hydrateStateFromTerminalResponseOutput(
   for (let index = 0; index < responsePayload.output.length; index += 1) {
     const item = responsePayload.output[index];
     if (!isRecord(item)) continue;
-    const itemType = asTrimmedString(item.type).toLowerCase();
+    const resolvedItem = convertDowngradedFunctionCallItem(item, state.downgradedCustomToolNames);
+    const itemType = asTrimmedString(resolvedItem.type).toLowerCase();
     if (!itemType) continue;
     const resolvedIndex = resolveCompatibleOutputIndex(
       state,
       itemType,
       index,
-      item.id,
-      item.call_id,
+      resolvedItem.id,
+      resolvedItem.call_id,
     );
-    setOutputItem(state, resolvedIndex, cloneJson(item));
+    setOutputItem(state, resolvedIndex, cloneJson(resolvedItem));
   }
 }
 
@@ -753,7 +770,12 @@ function applyOriginalResponsesPayload(
     case 'response.output_item.added':
     case 'response.output_item.done': {
       const outputIndex = resolveOutputIndex(state, payload.output_index, (payload.item as Record<string, unknown> | undefined)?.id);
-      const item = cloneRecord(payload.item) || {};
+      // 声明被降级成 function 的自定义工具，回程要还原成 custom_tool_call，
+      // 否则客户端拿到的 items 和它自己声明的工具类型对不上。
+      const item = convertDowngradedFunctionCallItem(
+        cloneRecord(payload.item) || {},
+        state.downgradedCustomToolNames,
+      );
       if (Object.keys(item).length > 0) {
         const itemType = asTrimmedString(item.type).toLowerCase();
         if (itemType === 'reasoning') {
@@ -838,6 +860,32 @@ function applyOriginalResponsesPayload(
     case 'response.content_part.added':
     case 'response.content_part.done': {
       const lines: string[] = [];
+      const contentIndexForOwner = typeof payload.content_index === 'number' && Number.isFinite(payload.content_index)
+        ? Math.max(0, Math.trunc(payload.content_index))
+        : 0;
+      // 有些站点把 content part 挂在 reasoning item 上（reasoning_text）。默认分支
+      // 会当成 message 处理，凭空造出一个空 message 并占用同一个 output_index，
+      // 后面真实的工具调用再落到这个 index 上就串了。这里按 item 类型分流。
+      const ownerIndex = resolveOutputIndex(state, payload.output_index, payload.item_id);
+      const owner = state.outputItems[ownerIndex];
+      if (isRecord(owner) && asTrimmedString(owner.type).toLowerCase() === 'reasoning') {
+        const ownerContent = Array.isArray(owner.content) ? owner.content as AggregateOutputItem[] : [];
+        owner.content = ownerContent;
+        const incomingPart = cloneRecord(payload.part);
+        if (incomingPart) {
+          const existingOwnerPart = isRecord(ownerContent[contentIndexForOwner])
+            ? ownerContent[contentIndexForOwner] as AggregateOutputItem
+            : null;
+          ownerContent[contentIndexForOwner] = existingOwnerPart
+            ? { ...existingOwnerPart, ...incomingPart }
+            : incomingPart;
+        }
+        return serializeOriginalResponsesEvent(eventType, {
+          ...payload,
+          output_index: ownerIndex,
+          item_id: asTrimmedString(owner.id) || payload.item_id,
+        });
+      }
       const requestedOutputIndex = resolveCompatibleOutputIndex(state, 'message', payload.output_index, payload.item_id);
       const contentIndex = typeof payload.content_index === 'number' && Number.isFinite(payload.content_index)
         ? Math.max(0, Math.trunc(payload.content_index))
@@ -905,6 +953,44 @@ function applyOriginalResponsesPayload(
     case 'response.function_call_arguments.delta':
     case 'response.function_call_arguments.done': {
       const lines: string[] = [];
+      // 降级过的自定义工具：上游按 function 回参数，这里还原成 custom 的输入流。
+      const requestedIndex = resolveOutputIndex(
+        state,
+        payload.output_index,
+        payload.item_id,
+        payload.call_id,
+      );
+      const requestedItem = state.outputItems[requestedIndex];
+      const requestedName = isRecord(requestedItem) ? asTrimmedString(requestedItem.name) : '';
+      if (isDowngradedCustomToolName(state.downgradedCustomToolNames, requestedName)) {
+        const entry = ensureCustomToolItem(
+          state,
+          isRecord(requestedItem) ? requestedItem.id : payload.item_id,
+          isRecord(requestedItem) ? requestedItem.call_id : payload.call_id,
+          requestedName,
+          requestedIndex,
+        );
+        if (entry.created) {
+          lines.push(serializeOutputItemAdded(entry.index, entry.item));
+        }
+        if (eventType === 'response.function_call_arguments.done') {
+          entry.item.input = unwrapCustomToolCallArguments(payload.arguments);
+          if (entry.item.input && !state.customToolInputEmitted[entry.index]) {
+            state.customToolInputEmitted[entry.index] = true;
+            lines.push(serializeSse('response.custom_tool_call_input.delta', {
+              type: 'response.custom_tool_call_input.delta',
+              item_id: entry.item.id,
+              call_id: entry.item.call_id,
+              output_index: entry.index,
+              delta: entry.item.input,
+            }));
+          }
+          // 故意不在这里打 done 标记：收尾的 custom_tool_call_input.done 交给
+          // output_item.done / 终态补齐那一套统一发（和 chat 上游那条路一致），
+          // 否则客户端只会收到 delta、收不到收尾事件。
+        }
+        return lines;
+      }
       const entry = ensureFunctionCallItem(
         state,
         payload.call_id ?? payload.item_id,

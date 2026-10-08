@@ -326,4 +326,60 @@ describe('upstreamRequestBuilder', () => {
     expect(request.headers['anthropic-beta']).toContain('header-beta');
     expect(request.headers['anthropic-beta']).toContain('beta-from-body');
   });
+  it('agentrouter 的 Responses 请求会把不认的 custom 工具降级成 function', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'deepseek-v4-flash',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'agentrouter',
+      siteUrl: 'https://agentrouter.org',
+      openaiBody: {
+        model: 'deepseek-v4-flash',
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+        tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }],
+      },
+      downstreamFormat: 'responses',
+      downstreamHeaders: {},
+      responsesOriginalBody: {
+        model: 'deepseek-v4-flash',
+        stream: true,
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+        tools: [
+          { type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } },
+          { type: 'custom', name: 'apply_patch', format: { type: 'grammar', syntax: 'lark', definition: 'start: PATCH' } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    const tools = (request.body as any).tools;
+    // 站点只认 apply_patch，exec 必须变成 function，否则源站回
+    // 400 Unsupported custom tool: 'exec'。
+    expect(tools.find((tool: any) => tool.name === 'exec')).toMatchObject({ type: 'function' });
+    expect(tools.find((tool: any) => tool.name === 'apply_patch')).toMatchObject({ type: 'custom' });
+  });
+
+  it('不限制自定义工具的站点保持 custom 声明不变', () => {
+    const originalBody = {
+      model: 'kimi-k3',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } }],
+    };
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'kimi-k3',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://happycoding.xyz',
+      openaiBody: { model: 'kimi-k3', input: originalBody.input, tools: originalBody.tools },
+      downstreamFormat: 'responses',
+      downstreamHeaders: {},
+      responsesOriginalBody: originalBody,
+    });
+
+    expect((request.body as any).tools[0]).toMatchObject({ type: 'custom', name: 'exec' });
+  });
 });

@@ -4,6 +4,7 @@ import {
 } from '../../shared/normalized.js';
 import { decodeOpenAiEncryptedReasoning } from '../../shared/reasoningTransport.js';
 import { decodeResponsesMcpCompatToolCall } from './mcpCompatibility.js';
+import { convertDowngradedFunctionCallsInResponsesPayload } from './customToolDowngrade.js';
 import {
   resolveResponsesToolNamespace,
   unwrapCustomToolCallArguments,
@@ -344,6 +345,8 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
   serializationMode?: ResponsesFinalSerializationMode;
   customToolNames?: string[];
   toolNamespaces?: Record<string, string> | null;
+  /** 声明被降级成 function 的自定义工具：回程把 function_call 还原成 custom_tool_call。 */
+  downgradedCustomToolNames?: string[];
 }): Record<string, unknown> {
   const {
     upstreamPayload,
@@ -362,7 +365,10 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
       return upstreamPayload;
     }
     if (serializationMode === 'response' && upstreamPayload.object === 'response') {
-      return upstreamPayload;
+      return convertDowngradedFunctionCallsInResponsesPayload(
+        upstreamPayload,
+        input.downgradedCustomToolNames ?? [],
+      );
     }
   }
 

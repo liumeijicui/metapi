@@ -30,6 +30,7 @@ type ResponsesProxyStreamSessionInput = {
   successfulUpstreamPath: string;
   customToolNames?: string[];
   toolNamespaces?: Record<string, string> | null;
+  downgradedCustomToolNames?: string[];
   strictTerminalEvents?: boolean;
   getUsage: () => {
     promptTokens: number;
@@ -94,6 +95,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
   const responsesState = createOpenAiResponsesAggregateState(input.modelName, {
     customToolNames: input.customToolNames,
     toolNamespaces: input.toolNamespaces,
+    downgradedCustomToolNames: input.downgradedCustomToolNames,
   });
   const requiresExplicitTerminalEvent = input.strictTerminalEvents
     || input.successfulUpstreamPath.endsWith('/responses')

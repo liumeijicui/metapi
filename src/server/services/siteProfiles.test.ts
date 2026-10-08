@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   applySiteInferenceUserAgent,
-  hasUnsupportedResponsesCustomTool,
   hasExplicitUserAgent,
   resolveSiteInferenceUserAgent,
+  resolveUnsupportedResponsesCustomToolNames,
   siteRequiresSystemProxy,
 } from './siteProfiles.js';
 
@@ -69,14 +69,18 @@ describe('siteProfiles', () => {
     expect(other['user-agent']).toBe('happy/1.0');
   });
 
-  it('agentrouter 的 Responses 接口只认 apply_patch，别的自定义工具要提前绕开', () => {
-    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', [])).toBe(false);
-    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['apply_patch'])).toBe(false);
-    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['apply_patch', 'exec'])).toBe(true);
-    expect(hasUnsupportedResponsesCustomTool('https://agentrouter.org', ['exec'])).toBe(true);
+  it('agentrouter 的 Responses 接口只认 apply_patch，别的自定义工具要降级', () => {
+    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', [])).toEqual([]);
+    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch'])).toEqual([]);
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch', 'exec']),
+    ).toEqual(['exec']);
+    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['exec'])).toEqual(['exec']);
+    // 重复的名字只报一次。
+    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['exec', 'exec'])).toEqual(['exec']);
 
     // 别的站点不做这个限制判断。
-    expect(hasUnsupportedResponsesCustomTool('https://happycoding.xyz', ['exec'])).toBe(false);
-    expect(hasUnsupportedResponsesCustomTool('not-a-url', ['exec'])).toBe(false);
+    expect(resolveUnsupportedResponsesCustomToolNames('https://happycoding.xyz', ['exec'])).toEqual([]);
+    expect(resolveUnsupportedResponsesCustomToolNames('not-a-url', ['exec'])).toEqual([]);
   });
 });

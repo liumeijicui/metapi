@@ -12,9 +12,12 @@ import {
   sanitizeResponsesBodyForProxy as sanitizeResponsesBodyForProxyViaTransformer,
 } from '../transformers/openai/responses/conversion.js';
 import {
+  collectResponsesCustomToolNames,
   convertResponsesCustomToolToChatTool,
   flattenResponsesToolList,
 } from '../transformers/openai/responses/toolCompat.js';
+import { downgradeResponsesCustomToolDeclarations } from '../transformers/openai/responses/customToolDowngrade.js';
+import { resolveUnsupportedResponsesCustomToolNames } from './siteProfiles.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import {
   convertOpenAiBodyToAnthropicMessagesBody,
@@ -769,6 +772,16 @@ export function buildUpstreamEndpointRequest(input: {
       ),
       sitePlatform,
     );
+    // 站点自建的 Responses 接口只接受一部分自定义工具时（agentrouter 只认
+    // apply_patch），把其余 custom 声明降级成 function 再发，否则源站直接 400
+    // `Unsupported custom tool: ...`。回程那一侧由 customToolDowngrade 还原。
+    const upstreamResponsesBody = downgradeResponsesCustomToolDeclarations(
+      configuredResponsesBody,
+      resolveUnsupportedResponsesCustomToolNames(
+        input.siteUrl,
+        collectResponsesCustomToolNames(configuredResponsesBody),
+      ),
+    );
 
     if (sitePlatform === 'codex') {
       if (providerProfile?.id !== 'codex') {
@@ -790,7 +803,7 @@ export function buildUpstreamEndpointRequest(input: {
         codexSessionCacheKey: input.codexSessionCacheKey,
         codexExplicitSessionId: input.codexExplicitSessionId,
         responsesWebsocketTransport,
-        body: configuredResponsesBody,
+        body: upstreamResponsesBody,
       });
     }
 
@@ -804,7 +817,7 @@ export function buildUpstreamEndpointRequest(input: {
     return {
       path: resolveEndpointPath('responses'),
       headers,
-      body: configuredResponsesBody,
+      body: upstreamResponsesBody,
       runtime,
     };
   }

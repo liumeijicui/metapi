@@ -150,15 +150,26 @@ export function resolveResponsesCustomToolAllowlist(
   return match ? match.allowed : null;
 }
 
-/** True when any of the declared custom tools would be rejected by the site. */
-export function hasUnsupportedResponsesCustomTool(
+/**
+ * The declared custom tools this site's Responses endpoint would reject, in the
+ * order they were declared. Empty when the site has no restriction (or accepts
+ * everything that was declared).
+ */
+export function resolveUnsupportedResponsesCustomToolNames(
   rawUrl: string | null | undefined,
   customToolNames: readonly string[],
-): boolean {
-  if (customToolNames.length === 0) return false;
+): string[] {
+  if (customToolNames.length === 0) return [];
   const allowed = resolveResponsesCustomToolAllowlist(rawUrl);
-  if (!allowed) return false;
-  return customToolNames.some((name) => !allowed.includes(name));
+  if (!allowed) return [];
+
+  const unsupported: string[] = [];
+  for (const rawName of customToolNames) {
+    const name = String(rawName || '').trim();
+    if (!name || allowed.includes(name) || unsupported.includes(name)) continue;
+    unsupported.push(name);
+  }
+  return unsupported;
 }
 
 /**
