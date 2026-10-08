@@ -602,9 +602,15 @@ export function buildAssistedLoginHandlers(rawProviderId: string) {
           }),
         ) : null;
         if (prune && (prune.status === 'pruned' || prune.status === 'skipped')) {
+          // Merge onto the config written just above rather than the snapshot
+          // read at the start of the handler. That snapshot predates the OAuth
+          // binding this refresh just established, so merging from it silently
+          // dropped the marker the next renewal needs: the account kept a live
+          // session but no provider to renew it with, and the following expiry
+          // could only be repaired by hand.
           await db.update(schema.accounts)
             .set({
-              extraConfig: mergeAccountExtraConfig(account.extraConfig, {
+              extraConfig: mergeAccountExtraConfig(nextExtraConfig, {
                 sessionHygiene: {
                   outcome: prune.status === 'skipped' ? prune.reason : prune.status,
                   ...(prune.status === 'pruned' ? { removed: prune.removed, kept: prune.kept } : {}),
