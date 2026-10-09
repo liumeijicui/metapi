@@ -295,10 +295,15 @@ export interface PerfMetricsSummary {
 /**
  * 站点自己的模型监控读数。失败时把「站点没有这个接口」与「这次请求失败」
  * 分开，页面才能区分「站点版本旧」和「凭据/网络挂了」。
+ *
+ * `edgeBlocked` 是第三种失败：站点边缘（ESA / tengine）用 JS 挑战页或按 IP
+ * 限流把 `/api/*` 拦在应用之前。它既不是「接口不存在」，也不是「凭据无效」，
+ * 判定发生在凭据被读到之前，换凭据不会有任何改变——所以调用方应当把它当成
+ * 「站点自己的监控接口此刻读不到」，落到用密钥读模型列表的降级通道上。
  */
 export type PerfMetricsOutcome =
   | { ok: true; data: PerfMetricsSummary }
-  | { ok: false; unsupported: boolean; message: string };
+  | { ok: false; unsupported: boolean; message: string; edgeBlocked?: boolean };
 
 /**
  * Verdict of a credential keep-alive probe.

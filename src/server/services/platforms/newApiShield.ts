@@ -155,7 +155,14 @@ export function solveNewApiAcwScV2(html: string): string | null {
   return out || null;
 }
 
-function isShieldChallenge(contentType: string, text: string): boolean {
+/**
+ * True when the body is the edge's JS challenge instead of the route's own
+ * answer. Callers that have to tell "the site never saw this request" apart
+ * from "this route does not exist" need exactly this distinction: the first is
+ * about the egress IP and is worth retrying, the second is a property of the
+ * site and is not.
+ */
+export function isShieldChallengeResponse(contentType: string, text: string): boolean {
   const normalizedType = (contentType || '').toLowerCase();
   if (normalizedType.includes('text/html') && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)) {
     return true;
@@ -268,7 +275,7 @@ export async function fetchJsonWithShieldCookieRetry<T>(
     const parsed = parseJsonSafe<T>(text);
     if (parsed) return { data: parsed, cookieHeader };
 
-    if (!isShieldChallenge(response.headers.get('content-type') || '', text)) {
+    if (!isShieldChallengeResponse(response.headers.get('content-type') || '', text)) {
       return { data: null, cookieHeader };
     }
     if (!cookieHeader) {

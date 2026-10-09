@@ -429,6 +429,12 @@ type SiteMetricsFetchResult = {
 const MODEL_LIST_ONLY_MESSAGE = '站点没有模型监控接口，仅展示模型列表（指标无法获取）';
 const MODEL_LIST_ONLY_UNAVAILABLE_MESSAGE = '该平台没有模型监控接口';
 
+/**
+ * 监控接口存在、却被站点边缘拦下时的降级说明。页面照常显示模型列表，但原因
+ * 必须写清楚：不是站点没有接口，而是这个出口 IP 过不了盾 / 被限流。
+ */
+const EDGE_BLOCKED_FALLBACK_MESSAGE = '站点边缘拦截了监控接口（过盾失败或按 IP 限流），已改用密钥读取模型列表；成功率、延迟与站内价目读不到';
+
 /** 降级读模型名时最多试几份凭据。 */
 const MODEL_LIST_FALLBACK_LIMIT = 3;
 
@@ -560,6 +566,8 @@ async function fetchSiteMetrics(
     ).catch((error: unknown) => ({
       ok: false as const,
       unsupported: false,
+      // 超时 / 连接失败不是边缘判定：它没有给出任何关于出口 IP 的结论。
+      edgeBlocked: false,
       message: `请求上游失败：${(error as Error)?.message || 'unknown error'}`,
     }));
 
@@ -575,13 +583,23 @@ async function fetchSiteMetrics(
       };
     }
     lastMessage = outcome.message;
-    if (outcome.unsupported) {
-      // 站点版本旧是所有凭据的共性问题，不用再逐个试监控接口；
-      // 但模型列表可能只有某一份 sk- 密钥能读到，所以换几份凭据试降级。
+    if (outcome.unsupported || outcome.edgeBlocked) {
+      // 「站点版本旧」是所有凭据的共性问题，不用再逐个试监控接口；边缘把
+      // /api/* 拦下同理——判定发生在凭据被读到之前，换一份凭据改变不了这个
+      // 出口 IP 的待遇。但模型列表可能只有某一份 sk- 密钥能读到，所以换几份
+      // 凭据试降级。
       const fallback = await collectModelListFallback(site, adapter, credentials);
-      if (fallback.ok) return fallback.result;
+      if (fallback.ok) {
+        // 接口不是「没有」而是「被边缘拦下」时换成实情：页面显示的不是「站点
+        // 没这个接口」，而是本站此刻只能用密钥读模型。
+        return outcome.edgeBlocked
+          ? { ...fallback.result, message: EDGE_BLOCKED_FALLBACK_MESSAGE }
+          : fallback.result;
+      }
       return {
-        status: 'unsupported',
+        // 密钥也读不到模型时，结论只能是失败：边缘拦截不是站点的固有属性，
+        // 把它记成 unsupported 会让下一轮不再重试。
+        status: outcome.unsupported ? 'unsupported' : 'error',
         message: `${outcome.message}；${fallback.reason}`,
         credential: null,
         data: null,

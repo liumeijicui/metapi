@@ -136,6 +136,27 @@ describe('NewApiAdapter', () => {
         return;
       }
 
+      if (req.url?.startsWith('/api/perf-metrics/summary')) {
+        // anyrouter.top 的边缘：没过盾给一张 JS 挑战页，过了盾按出口 IP 限流。
+        // 两次都不是应用给的回答，所以监控接口对这份凭据而言「读不到」。
+        const cookieHeader = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+        if (!cookieHeader.includes(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`)) {
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'x-tengine-error': 'denied by http_custom',
+            'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
+          });
+          res.end(ANYROUTER_CHALLENGE_HTML);
+          return;
+        }
+        res.writeHead(403, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'x-tengine-error': 'denied by http_ratelimit',
+        });
+        res.end('<html><body>403 Forbidden: denied by http_ratelimit</body></html>');
+        return;
+      }
+
       if (req.url === '/api/user/login' && req.method === 'POST') {
         let bodyRaw = '';
         req.on('data', (chunk) => {
@@ -1506,6 +1527,25 @@ describe('NewApiAdapter', () => {
       },
     ]);
   });
+
+  it('把「边缘把监控接口拦下」判成 edgeBlocked，而不是疑似凭据无效', async () => {
+    const adapter = new NewApiAdapter();
+    const outcome = await adapter.getPerfMetricsSummary(baseUrl, 'anyrouter-session-token', 166294);
+
+    expect(outcome).toMatchObject({ ok: false, unsupported: false, edgeBlocked: true });
+    // 归因要落在边缘上：这句会直接写进监控页面的站点状态。
+    expect(outcome.ok === false && outcome.message).toContain('边缘');
+    // 解盾通道也确认过：挑战页先被解开，限流挡下的是第二个请求。
+    expect(
+      requests.some(
+        (r) =>
+          r.url?.startsWith('/api/perf-metrics/summary')
+          && typeof r.headers.cookie === 'string'
+          && r.headers.cookie.includes(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`),
+      ),
+    ).toBe(true);
+  });
+
   it('建密钥时用账号密码过站点的安全验证，并回传明文 key 与新会话', async () => {
     const adapter = new NewApiAdapter();
 

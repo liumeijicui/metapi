@@ -473,6 +473,61 @@ describe('modelMonitorService', () => {
       expect((await db.select().from(schema.siteModelMonitorModels).all())).toHaveLength(0);
     });
 
+    it('监控接口被站点边缘拦下时改用密钥读模型列表，并把原因写成边缘拦截', async () => {
+      const site = await seedSite({ name: 'Any Router', url: 'https://anyrouter.top' });
+      await seedAccount(site.id);
+      // anyrouter.top 的边缘：/api/* 过盾前给挑战页，过盾后按出口 IP 限流。
+      const edgeBlocked = {
+        ok: false as const,
+        unsupported: false,
+        edgeBlocked: true,
+        message: '站点边缘拦截了监控接口（过盾失败或按 IP 限流），本轮按读不到监控指标处理',
+      };
+
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'anyrouter',
+        getPerfMetricsSummary: vi.fn(async () => edgeBlocked),
+        // 被限流的是 /api/*，密钥接口 /v1/models 照常回答。
+        getModels: vi.fn(async () => ['claude-sonnet-4-5-20250929', 'gpt-5.5']),
+      }));
+
+      const summary = await service.runModelMonitorFetch();
+      expect(summary.status).toMatchObject({ modelsOnly: 1, error: 0, unsupported: 0 });
+
+      const row = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(row).toMatchObject({ status: 'models_only', modelsCount: 2 });
+      // 原因必须说成「边缘拦下了」，不能写成站点没有这个接口。
+      expect(row.message).toContain('边缘拦截');
+      expect(row.message).not.toContain('站点没有模型监控接口');
+      const models = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(models.map((m) => m.modelName).sort()).toEqual(['claude-sonnet-4-5-20250929', 'gpt-5.5']);
+      // 指标读不到就留空，不能编造 0。
+      expect(models.every((m) => m.successRate === null && m.avgLatencyMs === null)).toBe(true);
+    });
+
+    it('边缘拦截且密钥也读不回模型时，报 error 并把两个原因都写清楚', async () => {
+      const site = await seedSite({ name: 'Any Router', url: 'https://anyrouter.top' });
+      await seedAccount(site.id);
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'anyrouter',
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: false as const,
+          unsupported: false,
+          edgeBlocked: true,
+          message: '站点边缘拦截了监控接口（过盾失败或按 IP 限流），本轮按读不到监控指标处理',
+        })),
+        getModels: vi.fn(async () => []),
+      }));
+
+      const summary = await service.runModelMonitorFetch();
+      // 这是「这次采集失败」，不是「站点没有这个接口」：下一轮必须重试。
+      expect(summary.status).toMatchObject({ error: 1, unsupported: 0, modelsOnly: 0 });
+      const row = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(row.status).toBe('error');
+      expect(row.message).toContain('边缘拦截');
+      expect(row.message).toContain('没读回任何模型');
+    });
+
     it('「仅模型列表」站点当天刷过就跳过，第二天 7 点后才会再刷', async () => {
       const site = await seedSite({ platform: 'sub2api' });
       await seedAccount(site.id);

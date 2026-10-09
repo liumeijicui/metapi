@@ -2,7 +2,11 @@ import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
-import { fetchJsonWithShieldCookieRetry, isEdgeRateLimitResponse } from './newApiShield.js';
+import {
+  fetchJsonWithShieldCookieRetry,
+  isEdgeRateLimitResponse,
+  isShieldChallengeResponse,
+} from './newApiShield.js';
 import { getAccountCredentialContext, recordRotatedCredential } from '../siteProxy.js';
 import {
   persistRotatedRefreshCookie,
@@ -88,6 +92,9 @@ function describePerfMetricsHttpFailure(status: number): string {
   if (status === 200) return 'HTTP 200：返回内容不是 JSON（可能被盾拦截）';
   return `HTTP ${status}：模型监控接口未返回可用数据`;
 }
+
+/** 边缘把 `/api/*` 拦下（盾或按 IP 限流）时的结论：这不是凭据的问题。 */
+const EDGE_BLOCKED_METRICS_MESSAGE = '站点边缘拦截了监控接口（过盾失败或按 IP 限流），本轮按读不到监控指标处理';
 
 /**
  * 归一化 `GET /api/perf-metrics/summary`。
@@ -239,7 +246,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       // 站点可能挂着一层 shield 挑战：再走通用通道一次，它负责解挑战并刷新
       // Cloudflare 凭证。
-      const retried = await this.fetchJsonRaw<unknown>(url, { method: 'GET', headers });
+      let retried: unknown = null;
+      try {
+        retried = await this.fetchJsonRaw<unknown>(url, { method: 'GET', headers });
+      } catch (error) {
+        // 边缘已经给出判定时，这次重试自己失败（同一个出口 IP 被限流，解盾
+        // 通道也会被拒）不该把结论改成「请求上游失败」：那会把一个可以降级读
+        // 模型列表的状态变成 error。
+        if (!probed.edgeBlocked) throw error;
+      }
       if (retried) {
         const parsed = parsePerfMetricsSummaryPayload(retried);
         if (parsed) return { ok: true, data: parsed };
@@ -247,6 +262,14 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       if (probed.status === 404) {
         return { ok: false, unsupported: true, message: unsupportedMessage };
+      }
+      if (probed.edgeBlocked) {
+        return {
+          ok: false,
+          unsupported: false,
+          edgeBlocked: true,
+          message: EDGE_BLOCKED_METRICS_MESSAGE,
+        };
       }
       return { ok: false, unsupported: false, message: describePerfMetricsHttpFailure(probed.status) };
     } catch (error) {
@@ -257,7 +280,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   private async probePerfMetricsEndpoint(
     url: string,
     headers: Record<string, string>,
-  ): Promise<{ status: number; data: unknown }> {
+  ): Promise<{ status: number; data: unknown; edgeBlocked: boolean }> {
     const { fetch } = await import('undici');
     const merged: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -271,7 +294,14 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
     const res = await fetch(url, await withSiteProxyRequestInit(url, { method: 'GET', headers: merged }));
     const text = await res.text();
-    return { status: res.status, data: this.parseJsonSafe<unknown>(text) };
+    return {
+      status: res.status,
+      data: this.parseJsonSafe<unknown>(text),
+      // 边缘的两张脸：没过盾时给一张 JS 挑战页，过盾后按 IP 限流给 403。两种
+      // 都意味着应用根本没收到这次请求，因此都算「边缘拦截」。
+      edgeBlocked: isEdgeRateLimitResponse(res.status, res.headers.get('x-tengine-error'), text)
+        || isShieldChallengeResponse(res.headers.get('content-type') || '', text),
+    };
   }
 
   private tryDecodeUserId(token: string): number | null {
