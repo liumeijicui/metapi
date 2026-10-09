@@ -177,6 +177,46 @@ export function resolveUnsupportedResponsesCustomToolNames(
 }
 
 /**
+ * Additional `anthropic-beta` flags a site's `/v1/messages` endpoint requires.
+ *
+ * anyrouter 的 claude 模型只挂在 `/v1/messages` 上（`/v1/chat/completions` 一律
+ * 回 404「当前 API 不支持所选模型」）。它把 1M 上下文全量放开之后，**不打这个
+ * opt-in beta 的 claude 请求会被直接拒绝**，回的还是跟真实原因无关的一句
+ * `400 {"error":"1m 上下文已经全量可用，请启用 1m 上下文后重试"}` —— 看着像模型不
+ * 可用，其实只是少了一个头。加了这个头之后，才是上游自己的真实结论（503 / 429）。
+ *
+ * 实测（走系统代理，同一个 key）：
+ *   - 不带 beta，`claude-sonnet-4-5-20250929` -> 400「请启用 1m 上下文后重试」
+ *   - 带 `context-1m-2025-08-07`，同一模型 -> opt-in 那道 400 消失，只剩上游供应
+ *     问题（当天 503）
+ *   - `claude-haiku-4-5-20251001` 带不带都是 200
+ * 所以这是「站点 messages 端点」的属性，不是某个模型的属性，按 host 声明。
+ */
+const SITE_ANTHROPIC_BETA_HEADERS: ReadonlyArray<{ host: string; betas: readonly string[] }> = [
+  { host: 'anyrouter.top', betas: ['context-1m-2025-08-07'] },
+];
+
+/**
+ * 站点 messages 端点额外要求的 `anthropic-beta` 值，没有就返回空数组。
+ *
+ * 调用方应把它**并进**已有的 anthropic-beta，而不是覆盖：站点或下游显式声明的
+ * beta 不能被这个补丁弄丢。
+ */
+export function resolveSiteAnthropicBetaHeaders(rawUrl: string | null | undefined): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(rawUrl || ''));
+  } catch {
+    return [];
+  }
+  const host = normalizeHost(parsed.host);
+  const match = SITE_ANTHROPIC_BETA_HEADERS.find(
+    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+  );
+  return match ? [...match.betas] : [];
+}
+
+/**
  * Force the site's required inference fingerprint onto a header bag.
  *
  * 下游客户端自带的 UA（Codex 的 `codex_cli_rs/...`）不算“人工指定过”：站点要的

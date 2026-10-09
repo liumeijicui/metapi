@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applySiteInferenceUserAgent,
   hasExplicitUserAgent,
+  resolveSiteAnthropicBetaHeaders,
   resolveSiteInferenceUserAgent,
   resolveUnsupportedResponsesCustomToolNames,
   siteRequiresSystemProxy,
@@ -82,5 +83,20 @@ describe('siteProfiles', () => {
     // 别的站点不做这个限制判断。
     expect(resolveUnsupportedResponsesCustomToolNames('https://happycoding.xyz', ['exec'])).toEqual([]);
     expect(resolveUnsupportedResponsesCustomToolNames('not-a-url', ['exec'])).toEqual([]);
+  });
+
+  it('anyrouter 的 messages 端点必须补上 1M 上下文的 opt-in beta', () => {
+    // 不带这个头，站点会对 claude 模型回一句和真实原因无关的
+    // 400「1m 上下文已经全量可用，请启用 1m 上下文后重试」。
+    expect(resolveSiteAnthropicBetaHeaders('https://anyrouter.top')).toEqual(['context-1m-2025-08-07']);
+    expect(resolveSiteAnthropicBetaHeaders('https://anyrouter.top/v1/messages'))
+      .toEqual(['context-1m-2025-08-07']);
+    // 子域同样命中。
+    expect(resolveSiteAnthropicBetaHeaders('https://api.anyrouter.top/v1/messages'))
+      .toEqual(['context-1m-2025-08-07']);
+    // 其它站点不注入，坏 URL 也不能抛。
+    expect(resolveSiteAnthropicBetaHeaders('https://happycoding.xyz/v1/messages')).toEqual([]);
+    expect(resolveSiteAnthropicBetaHeaders('not-a-url')).toEqual([]);
+    expect(resolveSiteAnthropicBetaHeaders(null)).toEqual([]);
   });
 });

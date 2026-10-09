@@ -12,6 +12,8 @@ import {
 } from './upstreamEndpointRuntime.js';
 import { executeEndpointFlow } from '../proxy-core/orchestration/endpointFlow.js';
 import { getObservedResponseMeta } from '../proxy-core/firstByteTimeout.js';
+import { getRuntimeResponseReader } from '../proxy-core/executors/types.js';
+import { openAiChatTransformer } from '../transformers/openai/chat/index.js';
 
 /**
  * 模型监控的「对话」：用站点自己的账号 / 密钥直连上游，完全不经过网关路由。
@@ -227,6 +229,11 @@ export type SiteDirectChatOutcome =
      * 响应对象上没带观测信息时（测试桩、非流式空 body 等）退回 null，不编造数字。
      */
     firstByteLatencyMs: number | null;
+    /**
+     * 真正命中的上游端点路径（`/v1/chat/completions`、`/v1/messages`、…）。
+     * 上游给的流不一定是 OpenAI 协议，回给页面之前要先按这个路径判断要不要转译。
+     */
+    upstreamPath: string;
     /** 每读到一块流数据就调用一次，用来把「空闲计时」往后推。 */
     touch: () => void;
     /** 我方主动掐断时（空闲 / 总时长超限）的真实原因；没掐断时返回 null。 */
@@ -254,6 +261,94 @@ export function toClientFacingDirectChatFailure(input: {
     message: upstreamAuthRejected
       ? `上游站点拒绝了这次调用（HTTP ${input.status}）：${input.message}`
       : input.message,
+  };
+}
+
+/**
+ * 上游端点是不是 Anthropic 原生的 messages 接口。
+ *
+ * 直连不保证落在 OpenAI 协议上：anyrouter 的 claude 模型只有 `/v1/messages` 能用，
+ * 拿回来的流是 Anthropic 原生 SSE（`event: content_block_delta` / `data:
+ * {"type":"content_block_delta",…}`）。页面只认 OpenAI 的
+ * `data: {"choices":[{"delta":{"content":…}}]}`，原样透传的结果就是「一个字都不显示」。
+ */
+export function isAnthropicNativeDirectChatPath(path: string | null | undefined): boolean {
+  const normalizedPath = String(path || '').trim().split('?')[0];
+  if (!normalizedPath) return false;
+  return normalizedPath === '/v1/messages' || normalizedPath.endsWith('/messages');
+}
+
+export type SiteDirectChatRelayResult = {
+  /** 已经写到下游的字节数（转译过的算转译后的），0 表示上游一个字都没给。 */
+  bytes: number;
+  /** 是否做了 Anthropic → OpenAI 的实时转译。 */
+  converted: boolean;
+  status: 'completed' | 'failed';
+  errorMessage: string | null;
+};
+
+/**
+ * 把直连拿到的上游响应体写到下游，必要时做协议转译。
+ *
+ * 转译复用网关那套 `openAiChatTransformer.proxyStream`：它就是「OpenAI 下游 +
+ * Anthropic 上游」这条组合的现成实现（chatSurface 用的同一个），没必要在这里再
+ * 手写一份 SSE 解析。非 messages 端点直接透传，保持原有行为。
+ */
+export async function relaySiteDirectChatStream(input: {
+  outcome: Extract<SiteDirectChatOutcome, { ok: true }>;
+  model: string;
+  write: (chunk: string | Uint8Array) => void;
+}): Promise<SiteDirectChatRelayResult> {
+  const { outcome } = input;
+  const upstream = outcome.response;
+  let bytes = 0;
+  const writeChunk = (chunk: string | Uint8Array) => {
+    if (!chunk) return;
+    const size = typeof chunk === 'string' ? Buffer.byteLength(chunk, 'utf8') : chunk.byteLength;
+    if (!size) return;
+    bytes += size;
+    input.write(chunk);
+  };
+
+  if (!isAnthropicNativeDirectChatPath(outcome.upstreamPath)) {
+    if (upstream.body) {
+      for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
+        // 每收到一块就把「空闲超时」往后推，推理模型憋半天也不该被判卡死。
+        outcome.touch();
+        writeChunk(chunk);
+      }
+    }
+    return { bytes, converted: false, status: 'completed', errorMessage: null };
+  }
+
+  const session = openAiChatTransformer.proxyStream.createSession({
+    downstreamFormat: 'openai',
+    modelName: input.model,
+    successfulUpstreamPath: outcome.upstreamPath,
+    writeLines: (lines) => {
+      for (const line of lines) writeChunk(line);
+    },
+    writeRaw: (chunk) => writeChunk(chunk),
+  });
+  const sourceReader = getRuntimeResponseReader(upstream as never);
+  // 转译过程自己读流，所以在读这一层把空闲计时续上，而不是在写这一层。
+  const reader = sourceReader
+    ? {
+      async read() {
+        const next = await sourceReader.read();
+        if (!next.done) outcome.touch();
+        return next;
+      },
+      cancel: (reason?: unknown) => sourceReader.cancel(reason),
+      releaseLock: () => sourceReader.releaseLock(),
+    }
+    : undefined;
+  const result = await session.run(reader, { end() {} });
+  return {
+    bytes,
+    converted: true,
+    status: result.status,
+    errorMessage: result.errorMessage,
   };
 }
 
@@ -395,12 +490,15 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
       return {
         ok: false,
         status: result.status || 502,
-        message: String(result.rawErrText || result.errText || '上游请求失败').trim(),
+        // 优先用 errText：它带「Upstream returned HTTP 400: <站点原话>」，
+        // 而不是把上游的 JSON 原样甩给页面。rawErrText 只作为兜底。
+        message: String(result.errText || result.rawErrText || '上游请求失败').trim(),
       };
     }
     return {
       ok: true,
       response: result.upstream as never,
+      upstreamPath: result.upstreamPath,
       latencyMs: Date.now() - startedAt,
       firstByteLatencyMs: getObservedResponseMeta(result.upstream as never)?.firstByteLatencyMs ?? null,
       touch: armIdleTimer,

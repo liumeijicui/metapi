@@ -5,6 +5,7 @@ import { applyPayloadRules } from './payloadRules.js';
 import {
   applySiteInferenceUserAgent,
   hasExplicitUserAgent,
+  resolveSiteAnthropicBetaHeaders,
 } from './siteProfiles.js';
 import type { DownstreamFormat } from '../transformers/shared/normalized.js';
 import {
@@ -728,6 +729,8 @@ export function buildUpstreamEndpointRequest(input: {
       stream: input.stream,
       isClaudeOauthUpstream,
       tokenValue: input.tokenValue,
+      // 站点自己要求的 opt-in beta（anyrouter 不打就拒 claude 请求，见 siteProfiles）。
+      extraBetas: resolveSiteAnthropicBetaHeaders(input.siteUrl),
     });
 
     return {

@@ -268,6 +268,7 @@ function hasCredentialValue(value: string | null | undefined): boolean {
 
 export function supportsDirectAccountRoutingConnection(account: DirectAccountRoutingInput): boolean {
   const credentialMode = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (hasLoginCapturedSessionCredential(account)) return false;
   if (hasOauthProvider(account)) {
     return hasCredentialValue(account.accessToken) || hasCredentialValue(account.apiToken);
   }
@@ -283,11 +284,39 @@ export function supportsDirectAccountRoutingConnection(account: DirectAccountRou
 
 export function requiresManagedAccountTokens(account: DirectAccountRoutingInput): boolean {
   const credentialMode = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (hasLoginCapturedSessionCredential(account)) return true;
   if (hasOauthProvider(account)) return false;
   if (credentialMode === 'apikey') return false;
   if (credentialMode === 'session') return true;
   if (hasCredentialValue(account.apiToken) && !hasCredentialValue(account.accessToken)) return false;
   return true;
+}
+
+/**
+ * True for accounts whose `accessToken` is a *management session* captured during
+ * 托管登录 (a browser sign-in on linuxdo / github) and whose `apiToken` is the site
+ * session token that actually authenticates inference.
+ *
+ * 这类站点登录时抓到的是整份管理会话（网页 cookie / 站点 session），它 **不是**
+ * 推理用的 bearer。实测同一账号打 `GET /v1/models`：
+ *   澎湃AI网关 / l0veyou / JustDoWork / 冰山 / 胖猫 / Any Router
+ *   apiToken -> 200，accessToken -> 401（`Invalid token` / `无效的令牌`）
+ * 6 个站点 6/6 都是这个结论，所以这不是某一站的怪癖，而是「托管登录」这条链路的
+ * 性质：抓到的会话归管理用（签到、余额、模型列表），推理必须用站点签发的 session
+ * token。
+ *
+ * 判据是「登录 provider 标记 + 站点 session token 同时存在」：真正的推理 OAuth
+ * （claude / codex）只把 bearer 放在 `accessToken` 上，`apiToken` 恒为空，因此不会
+ * 被这条规则命中。命中时必须走托管令牌，否则每次重建路由都会把令牌解绑
+ * （`token_id=null`），转发就会拿管理会话去撞 401 —— 表现是「账号看着登录着，但它
+ * 服务的每个模型都失败」。
+ */
+export function hasLoginCapturedSessionCredential(account: DirectAccountRoutingInput): boolean {
+  if (!hasCredentialValue(account.apiToken)) return false;
+  // API Key 模式已经声明「存的就是推理凭据」，托管登录只用来做签到/余额，
+  // 这里的判据不适用于它。
+  if (getCredentialModeFromExtraConfig(account.extraConfig) === 'apikey') return false;
+  return hasOauthProvider(account);
 }
 
 export type ManagedSub2ApiAuth = {

@@ -12,6 +12,13 @@ function extractJsonErrorMessage(rawText: string): string {
   try {
     const parsed = JSON.parse(rawText) as unknown;
     const root = isRecord(parsed) ? parsed : null;
+    // 有些站点把 error 直接写成字符串（anyrouter：`{"error":"由于 claude 模型供应难以
+    // 保证…","type":"error"}`）。这时 root 不是「错误对象」，下面按 message/type 取会
+    // 退化成一句没信息量的 `error`，把站点真正想说的话丢掉。
+    if (root && typeof root.error === 'string') {
+      const direct = collapseWhitespace(root.error);
+      if (direct) return direct;
+    }
     const error = (root && isRecord(root.error)) ? root.error : root;
     if (!error) return '';
 

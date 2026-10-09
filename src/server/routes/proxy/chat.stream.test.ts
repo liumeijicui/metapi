@@ -753,6 +753,54 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).toContain('data: [DONE]');
   });
 
+  it('forwards anyrouter claude models to /v1/messages with the 1m-context beta', async () => {
+    const encoder = new TextEncoder();
+    // anyrouter：claude 模型只挂在 /v1/messages 上，而且不打 1m 上下文的 opt-in beta
+    // 就会被拒。这条走真实转发链路（/v1/chat/completions 进、messages 出），不是
+    // 模型监控的直连对话 —— 两边共用同一套端点推导和请求构造，特例只声明一次。
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'Any Router', url: 'https://anyrouter.top', platform: 'anyrouter' },
+      account: { id: 33, username: 'linuxdo_166294' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'claude-haiku-4-5-20251001',
+    });
+    const anthropicStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_any","model":"claude-haiku-4-5-20251001"}}\n\n'));
+        controller.enqueue(encoder.encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anyrouter"}}\n\n'));
+        controller.enqueue(encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(anthropicStream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const forwardResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(forwardResponse.statusCode, forwardResponse.body).toBe(200);
+    const [forwardUrl, forwardInit] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(String(forwardUrl)).toBe('https://anyrouter.top/v1/messages');
+    const forwardHeaders = (forwardInit.headers || {}) as Record<string, string>;
+    const betaKey = Object.keys(forwardHeaders).find((key) => key.toLowerCase() === 'anthropic-beta');
+    expect(betaKey ? String(forwardHeaders[betaKey]) : '').toContain('context-1m-2025-08-07');
+    // 上游是 Anthropic 原生流，回给下游的是 OpenAI SSE：这段转换转发链路本来就有，
+    // 所以「转发」这边只缺 beta，不缺协议转换。
+    expect(forwardResponse.body).toContain('"delta":{"content":"anyrouter"}');
+    expect(forwardResponse.body).toContain('data: [DONE]');
+  });
+
   it('converts OpenAI non-stream responses into Claude message format on /v1/messages', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'chatcmpl-upstream',

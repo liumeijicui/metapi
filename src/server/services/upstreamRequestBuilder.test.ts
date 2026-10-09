@@ -326,6 +326,52 @@ describe('upstreamRequestBuilder', () => {
     expect(request.headers['anthropic-beta']).toContain('header-beta');
     expect(request.headers['anthropic-beta']).toContain('beta-from-body');
   });
+
+  it('anyrouter 的 /v1/messages 会自动带上站点要求的 1M 上下文 beta', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-haiku-4-5-20251001',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'anyrouter',
+      siteUrl: 'https://anyrouter.top',
+      openaiBody: {
+        model: 'claude-haiku-4-5-20251001',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {},
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    // 少了这个值，站点会回 400「请启用 1m 上下文后重试」，而不是真实原因。
+    expect(request.headers['anthropic-beta']).toContain('context-1m-2025-08-07');
+    // 站点/下游原有的 beta 不能被这个补丁顶掉。
+    expect(request.headers['anthropic-beta']).toContain('claude-code-20250219');
+  });
+
+  it('别的站点的 /v1/messages 不会被塞进 anyrouter 专属 beta', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://happycoding.xyz',
+      openaiBody: {
+        model: 'claude-opus-4-6',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {},
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.headers['anthropic-beta'] || '').not.toContain('context-1m-2025-08-07');
+  });
+
   it('agentrouter 的 Responses 请求会把不认的 custom 工具降级成 function', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',

@@ -36,14 +36,16 @@ describe('siteDirectChatService', () => {
     withToken?: boolean;
     tokenReady?: boolean;
     accountStatus?: string;
+    platform?: string;
+    url?: string;
   } = {}) {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     const site = await db.insert(schema.sites).values({
       name: 'Direct Site',
-      url: 'https://direct.example.com',
-      platform: 'new-api',
+      url: input.url ?? 'https://direct.example.com',
+      platform: input.platform ?? 'new-api',
     }).returning().get();
     const account = await db.insert(schema.accounts).values({
       siteId: site.id,
@@ -275,5 +277,111 @@ describe('siteDirectChatService', () => {
 
     expect(await service.listSiteDirectChatTargets(other.id)).toEqual([]);
     expect(await service.listSiteDirectChatTargets(site.id)).toHaveLength(1);
+  });
+
+  it('anyrouter 的对话走 /v1/messages，并带上站点要求的 1m 上下文 beta', async () => {
+    // beta 是按站点 host 声明的，所以这里必须是真实域名，不能拿占位域名糊弄。
+    const { site, account, tokenId } = await seed({ platform: 'anyrouter', url: 'https://anyrouter.top' });
+    const { chatCalls } = mockUpstreamFetch();
+    const outcome = await service.requestSiteDirectChat({
+      siteId: site.id,
+      accountId: account.id,
+      tokenId,
+      model: 'claude-haiku-4-5-20251001',
+      messages: [{ role: 'user', content: 'hi' }],
+      timeoutMs: 30_000,
+    });
+
+    if (!outcome.ok) throw new Error(`直连失败：${outcome.message}`);
+    expect(chatCalls()).toHaveLength(1);
+    // claude 模型在 /v1/chat/completions 上一律 404，只能走 messages。
+    expect(chatCalls()[0].url).toBe('https://anyrouter.top/v1/messages');
+    expect(outcome.upstreamPath).toBe('/v1/messages');
+    const headers = (chatCalls()[0].init.headers || {}) as Record<string, string>;
+    const betaKey = Object.keys(headers).find((key) => key.toLowerCase() === 'anthropic-beta');
+    // 少了这个值，站点回的是「请启用 1m 上下文后重试」，而不是真正的原因。
+    expect(betaKey ? String(headers[betaKey]) : '').toContain('context-1m-2025-08-07');
+    const body = JSON.parse(String(chatCalls()[0].init.body));
+    expect(body.model).toBe('claude-haiku-4-5-20251001');
+    // 请求体被转成 Anthropic 格式（content 是 block 数组）。
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0].role).toBe('user');
+    expect(JSON.stringify(body.messages[0].content)).toContain('hi');
+    // Anthropic 协议要求 max_tokens，不能再按 OpenAI 的写法原样发出去。
+    expect(typeof body.max_tokens).toBe('number');
+  });
+
+  it('Anthropic 原生上游的流会被转成页面认的 OpenAI SSE', async () => {
+    const anthropicSse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+      '',
+      'event: content_block_stop',
+      'data: {"type":"content_block_stop","index":0}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+    const written: string[] = [];
+    const relay = await service.relaySiteDirectChatStream({
+      outcome: {
+        ok: true,
+        response: new Response(anthropicSse, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+        upstreamPath: '/v1/messages',
+        latencyMs: 12,
+        firstByteLatencyMs: 8,
+        touch: () => undefined,
+        timeoutReason: () => null,
+      } as never,
+      model: 'claude-haiku-4-5-20251001',
+      write: (chunk) => written.push(String(chunk)),
+    });
+
+    const body = written.join('');
+    expect(relay.converted).toBe(true);
+    expect(relay.status).toBe('completed');
+    // 页面只解析 OpenAI 的 choices[].delta：原样透传 Anthropic 事件等于一屏空白。
+    expect(body).toContain('"choices"');
+    expect(body).toContain('Hi');
+    expect(body).not.toContain('event: message_start');
+    expect(body.trim().endsWith('data: [DONE]')).toBe(true);
+  });
+
+  it('非 messages 端点依旧原样透传，不改写上游字节', async () => {
+    const raw = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+    const written: string[] = [];
+    const decoder = new TextDecoder('utf-8');
+    const relay = await service.relaySiteDirectChatStream({
+      outcome: {
+        ok: true,
+        response: new Response(raw, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        upstreamPath: '/v1/chat/completions',
+        latencyMs: 5,
+        firstByteLatencyMs: 3,
+        touch: () => undefined,
+        timeoutReason: () => null,
+      } as never,
+      model: 'kimi-k3',
+      write: (chunk) => written.push(
+        typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true }),
+      ),
+    });
+
+    expect(relay.converted).toBe(false);
+    expect(relay.status).toBe('completed');
+    expect(written.join('') + decoder.decode()).toBe(raw);
   });
 });

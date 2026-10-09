@@ -3,7 +3,9 @@ import { config } from '../../config.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import {
+  isAnthropicNativeDirectChatPath,
   listSiteDirectChatTargets,
+  relaySiteDirectChatStream,
   requestSiteDirectChat,
   toClientFacingDirectChatFailure,
 } from '../../services/siteDirectChatService.js';
@@ -185,7 +187,11 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     }
 
     const upstream = outcome.response;
-    const contentType = String(upstream.headers?.get?.('content-type') || 'text/event-stream');
+    // Anthropic 原生上游（anyrouter 的 claude 模型只有 /v1/messages 能用）会在中继里
+    // 被转成 OpenAI SSE 再写出，所以这里必须是 SSE 的 content-type，不能抄上游的。
+    const contentType = isAnthropicNativeDirectChatPath(outcome.upstreamPath)
+      ? 'text/event-stream; charset=utf-8'
+      : String(upstream.headers?.get?.('content-type') || 'text/event-stream');
     reply.raw.writeHead(200, {
       'Content-Type': contentType,
       'Cache-Control': 'no-cache, no-transform',
@@ -195,13 +201,36 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
 
     let bytes = 0;
     try {
-      if (upstream.body) {
-        for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
-          // 每收到一块数据就把「空闲超时」往后推，避免推理模型憋半天被判超时。
-          outcome.touch();
-          bytes += chunk?.length || 0;
+      const relay = await relaySiteDirectChatStream({
+        outcome,
+        model,
+        // 字节数在这里数：中途被掐断时也要能在日志里写清「已经输出了多少」。
+        write: (chunk) => {
+          bytes += typeof chunk === 'string' ? Buffer.byteLength(chunk, 'utf8') : chunk.byteLength;
           reply.raw.write(chunk);
+        },
+      });
+      if (relay.status === 'failed') {
+        // 上游流中途报错（转译层识别出的 error 事件）：把原因补发给页面，别留个哑巴连接。
+        const failureMessage = relay.errorMessage || '上游流式返回失败';
+        try {
+          reply.raw.write(`data: ${JSON.stringify({ error: { message: failureMessage } })}\n\n`);
+        } catch {
+          // 连接已经没了就算了，日志里仍然记录真实原因。
         }
+        await recordDirectChatLog({
+          accountId,
+          model,
+          startedAt,
+          status: 'failed',
+          httpStatus: 0,
+          firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
+          errorMessage: bytes > 0
+            ? `${failureMessage}（已输出 ${bytes} 字节后中断）`
+            : failureMessage,
+        }).catch(() => undefined);
+        reply.raw.end();
+        return reply;
       }
     } catch (error) {
       // 已经吐了一部分才被掐断（空闲 / 总时长超限）：把真实原因用 SSE error 事件

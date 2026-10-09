@@ -19,6 +19,7 @@ import {
   resolvePlatformUserIdFromLogin,
   requiresManagedAccountTokens,
   supportsDirectAccountRoutingConnection,
+  hasLoginCapturedSessionCredential,
 } from './accountExtraConfig.js';
 import { config } from '../config.js';
 
@@ -249,6 +250,44 @@ describe('accountExtraConfig', () => {
     expect(hasOauthProvider(structuredOauthAccount)).toBe(true);
     expect(supportsDirectAccountRoutingConnection(structuredOauthAccount)).toBe(true);
     expect(requiresManagedAccountTokens(structuredOauthAccount)).toBe(false);
+  });
+
+  it('routes login-captured session accounts through their managed token, not the captured session', () => {
+    // 托管登录（linuxdo / github）抓到的 accessToken 是管理会话，不是推理 bearer：
+    // 实测 6 个这类站点用它打 /v1/models 一律 401，站点签发的 session token 才是
+    // 能用的那把。以前这类账号被当成「oauth = 凭据即上游凭据」，重建路由时令牌被
+    // 解绑，转发拿管理会话去撞 401（账号看着登录着，模型却全失败）。
+    const loginCaptured = {
+      oauthProvider: 'linuxdo',
+      accessToken: 'acw_tc=...; session=...',
+      apiToken: 'session-token-48',
+      extraConfig: JSON.stringify({ credentialMode: 'session', oauth: { provider: 'linuxdo' } }),
+    };
+
+    expect(hasLoginCapturedSessionCredential(loginCaptured)).toBe(true);
+    expect(requiresManagedAccountTokens(loginCaptured)).toBe(true);
+    expect(supportsDirectAccountRoutingConnection(loginCaptured)).toBe(false);
+
+    // 真正的推理 OAuth（codex / claude）apiToken 恒为空，不受这条规则影响。
+    expect(hasLoginCapturedSessionCredential({
+      oauthProvider: 'codex',
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      extraConfig: null,
+    })).toBe(false);
+    // 没有登录标记的普通 session 账号本来就一直走托管令牌。
+    expect(hasLoginCapturedSessionCredential({
+      accessToken: 'session=dead',
+      apiToken: 'sk-managed',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    })).toBe(false);
+    // API Key 模式的账号也一样不适用。
+    expect(hasLoginCapturedSessionCredential({
+      oauthProvider: 'linuxdo',
+      accessToken: '',
+      apiToken: 'sk-live',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    })).toBe(false);
   });
 
   it('parses stored sub2api subscription summary from extra config', () => {
