@@ -1,3 +1,24 @@
+### 87. Responses 回放历史时清洗 reasoning 项与重复工具项：gpt-6-astra 不再报 `input[n].content array too long`
+
+- **类型**：缺陷修复（Responses 入参兼容）
+- **需求来源**：本会话需求（“Duplicate tool output for call_id: call_00_B7YJiaq7Zih0t9J1qgf82509”；“Invalid 'input[27].content': array too long. Expected an array with maximum length 0”；“上次调用 deepseek-v4-flash 又可以了，是不是不同模型的问题？”）
+- **背景**：同一个对外模型 `gpt-6-astra`，短会话一切正常，会话一长（transcript 里开始出现上一轮的 `reasoning` 项）就在 Codex 里报两种 400：先是 `Duplicate tool output for call_id`，再是 `Invalid 'input[27].content': array too long`。切到 `deepseek-v4-flash` 有时又好了，看起来像「某个模型有问题」，其实是**路由落到了不同后端**，两个后端的校验严格程度不一样。
+- **根因**（两处独立的入参形态问题，均已在 agentrouter 上直连复现）：
+  1. **重复工具项**：下游（Codex 侧 transcript）会把同一个 `call_id` 的工具调用/输出各发两遍（`function_call` 与 `custom_tool_call` 混用、或两条同类型 output 都见过）。上游对这种请求回 `400 Duplicate tool output for call_id` / `400 Duplicate 'call_id'`。实测：同一 `call_id` 一条输出 → 200，两条 → 400。
+  2. **reasoning 项形态**：我们的聚合器会把上游的 `reasoning_text` 事件落到 reasoning 项的 `content` 数组（`[{type:'reasoning_text',…}]`），Codex 下一轮原样回传。严格实现（agentrouter 的 `gpt-6-astra`）要求 reasoning 项 `content` 最大长度为 0，于是报 `array too long`；宽松实现（同站的 `deepseek-v4-flash`）不校验，所以同一份代码「时好时坏」。另外带 `id` 的 reasoning 项在 `store:false` 下也无法解析（`Item with id 'rs_…' not found` / 加密内容校验失败）。实测四种形态：`content` 非空 → 400；带 `id` → 400；只去 `id` → 200；只清 `content` → 200；两者都处理 → 200。
+- **改动**（把回放形态统一成「无状态中转也能被严格实现接受」）：
+  1. `src/server/transformers/openai/responses/normalization.ts`：`sanitizeResponsesInputToolLifecycle()` 末尾新增 `dedupeResponsesToolLifecycleItems()`，按 `call:<call_id>` / `output:<call_id>` 去重，同一 `call_id` 的重复项只保留**最后一条**，被丢弃的项打一条 `[responses] dropped N duplicate tool lifecycle item(s): …` 便于排查。
+  2. `src/server/transformers/openai/responses/conversion.ts`：`sanitizeResponsesBodyForProxy()` 新增 `normalizeReplayedReasoningItems()`，回放的历史 reasoning 项**删掉 `content`**；当请求是 `store:false` 且没有 `previous_response_id` 时**再删掉 `id`**（只删 `content` 不够，`id` 在无状态请求里解析不了），`summary` / `encrypted_content` 原样保留。带 `store:true` 或链式 `previous_response_id` 时保留 `id`，那里的 id 才有意义。
+- **验证**：
+  - 单测：`conversion.test.ts` 新增 4 例（reasoning 清洗保留 summary/encrypted_content、链式 `previous_response_id` 时保留 id、重复 output 保留最后一条、跨 `function_call`/`custom_tool_call` 混用去重），并更新 1 例既有预期（reasoning 项的 `id` 现在会被去掉）。`src/server/transformers/openai/responses` 11 文件 160 例全通过。
+  - 全量回归：`src/server` 363 文件 2765 通过、3 失败（`siteProxy` / `factoryResetService` / `db.index.default-path`，均为既有环境性失败，与本次改动无关）。
+  - 门禁：`npx tsc -p tsconfig.server.json --noEmit` 通过；`npm run repo:drift-check` 0 违规（登记债务仍 5 条）；`npm run build:server` 通过。
+  - 实机（`systemctl restart metapi` 后）：
+    - 老失败形态（`reasoning` 带 `id` + 非空 `content`）经网关 → **200 / 9.5s**。
+    - 你实发的重复工具输出请求在日志里留下 `[responses] dropped 1 duplicate tool lifecycle item(s): output:call_00_B7YJiaq7Zih0t9J1qgf82509`，同轮 `gpt-6-astra` → 200 / 2.2s。
+    - 直连对照（同账号 SK + 代理）：`reasoning.content` 非空 / 带 `id` → 400，按上述清洗后 → 200。
+- **副作用**：回放历史里的 reasoning `id` 在无状态转发下不再透传，上游看不到客户端那侧的 reasoning 复用（本来就解析不了，不影响结果）；`content` 一并丢弃，reasoning 的可见内容仍由 `summary` 承载。
+
 ### 86. 模型转发不再静默回落到老路由：规则声明过的模型只走新路由，且只认 SK
 
 - **类型**：缺陷修复（路由派发口径）

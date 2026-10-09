@@ -127,6 +127,47 @@ describe('responses conversion single source of truth', () => {
   });
 });
 
+describe('normalizeResponsesInputForCompatibility tool lifecycle dedupe', () => {
+  it('keeps only the last output for a duplicated call_id', () => {
+    const normalized = normalizeResponsesInputForCompatibility([
+      { type: 'custom_tool_call', call_id: 'call_dup', name: 'exec', input: 'ls' },
+      { type: 'custom_tool_call_output', call_id: 'call_dup', output: 'first' },
+      { type: 'custom_tool_call_output', call_id: 'call_dup', output: 'second' },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized).toHaveLength(2);
+    expect(normalized[1]).toMatchObject({
+      type: 'custom_tool_call_output',
+      call_id: 'call_dup',
+      output: 'second',
+    });
+  });
+
+  it('dedupes a call and its output across mixed Responses item types', () => {
+    const normalized = normalizeResponsesInputForCompatibility([
+      { type: 'function_call', call_id: 'call_mixed', name: 'exec', arguments: '{"input":"ls"}' },
+      { type: 'custom_tool_call', call_id: 'call_mixed', name: 'exec', input: 'ls' },
+      { type: 'function_call_output', call_id: 'call_mixed', output: 'first' },
+      { type: 'custom_tool_call_output', call_id: 'call_mixed', output: 'second' },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized).toHaveLength(2);
+    expect(normalized[0]).toMatchObject({ type: 'custom_tool_call', call_id: 'call_mixed' });
+    expect(normalized[1]).toMatchObject({ type: 'custom_tool_call_output', call_id: 'call_mixed', output: 'second' });
+  });
+
+  it('leaves a normal call/output pair untouched', () => {
+    const normalized = normalizeResponsesInputForCompatibility([
+      { type: 'custom_tool_call', call_id: 'call_ok', name: 'exec', input: 'ls' },
+      { type: 'custom_tool_call_output', call_id: 'call_ok', output: 'a.txt' },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized).toHaveLength(2);
+    expect(normalized[0]).toMatchObject({ type: 'custom_tool_call', call_id: 'call_ok' });
+    expect(normalized[1]).toMatchObject({ type: 'custom_tool_call_output', call_id: 'call_ok' });
+  });
+});
+
 describe('sanitizeResponsesBodyForProxy', () => {
   it('preserves newer Responses request fields needed by the proxy', () => {
     const result = sanitizeResponsesBodyForProxy(
@@ -440,8 +481,61 @@ describe('sanitizeResponsesBodyForProxy', () => {
       },
       {
         type: 'reasoning',
-        id: 'rs_1',
         summary: [],
+      },
+    ]);
+  });
+
+  it('rewrites replayed reasoning items so stateless upstreams accept them', () => {
+    const result = sanitizeResponsesBodyForProxy(
+      {
+        model: 'gpt-5',
+        input: [
+          {
+            type: 'reasoning',
+            id: 'rs_replay',
+            summary: [{ type: 'summary_text', text: 'think' }],
+            content: [{ type: 'reasoning_text', text: 'think' }],
+            encrypted_content: 'enc-blob',
+          },
+        ],
+        include: ['reasoning.encrypted_content'],
+      },
+      'gpt-5',
+      true,
+    );
+
+    expect(result.input).toEqual([
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'think' }],
+        encrypted_content: 'enc-blob',
+      },
+    ]);
+  });
+
+  it('keeps reasoning item ids when the request chains a previous response', () => {
+    const result = sanitizeResponsesBodyForProxy(
+      {
+        model: 'gpt-5',
+        previous_response_id: 'resp_prev_1',
+        input: [
+          {
+            type: 'reasoning',
+            id: 'rs_replay',
+            summary: [{ type: 'summary_text', text: 'think' }],
+          },
+        ],
+      },
+      'gpt-5',
+      true,
+    );
+
+    expect(result.input).toEqual([
+      {
+        type: 'reasoning',
+        id: 'rs_replay',
+        summary: [{ type: 'summary_text', text: 'think' }],
       },
     ]);
   });

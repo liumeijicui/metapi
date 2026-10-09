@@ -234,7 +234,52 @@ function sanitizeResponsesInputToolLifecycle(items: unknown[]): unknown[] {
     sanitized.push(item);
   }
 
-  return sanitized;
+  return dedupeResponsesToolLifecycleItems(sanitized);
+}
+
+function responsesToolLifecycleItemKey(item: unknown): string | null {
+  if (!isRecord(item)) return null;
+  const type = asTrimmedString(item.type).toLowerCase();
+  const isCall = RESPONSES_TOOL_CALL_ITEM_TYPES.has(type);
+  const isOutput = RESPONSES_TOOL_OUTPUT_ITEM_TYPES.has(type);
+  if (!isCall && !isOutput) return null;
+  const callId = asTrimmedString(item.call_id ?? item.id);
+  if (!callId) return null;
+  return `${isCall ? 'call' : 'output'}:${callId}`;
+}
+
+/**
+ * A Responses request may only carry one call and one output per `call_id`.
+ * Replaying clients (and some Codex transcripts) can ship the same pair twice,
+ * which upstreams reject with `400 Duplicate tool output for call_id` /
+ * `Duplicate 'call_id'`. Keep the last occurrence and drop the earlier ones so
+ * the retried turn survives instead of failing the whole request.
+ */
+function dedupeResponsesToolLifecycleItems(items: unknown[]): unknown[] {
+  const lastIndexByKey = new Map<string, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const key = responsesToolLifecycleItemKey(items[index]);
+    if (key) lastIndexByKey.set(key, index);
+  }
+
+  const kept: unknown[] = [];
+  const duplicates: string[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const key = responsesToolLifecycleItemKey(items[index]);
+    if (key && lastIndexByKey.get(key) !== index) {
+      duplicates.push(key);
+      continue;
+    }
+    kept.push(items[index]);
+  }
+
+  if (duplicates.length > 0) {
+    console.warn(
+      `[responses] dropped ${duplicates.length} duplicate tool lifecycle item(s): ${duplicates.join(', ')}`,
+    );
+  }
+
+  return kept;
 }
 
 export function normalizeResponsesMessageItem(item: Record<string, unknown>): Record<string, unknown> {

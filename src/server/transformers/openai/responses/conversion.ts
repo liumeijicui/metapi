@@ -522,6 +522,51 @@ function stripOrphanedResponsesToolOutputs(input: unknown): unknown {
   return sanitized;
 }
 
+function isResponsesReasoningItem(item: unknown): item is Record<string, unknown> {
+  return isRecord(item) && asTrimmedString(item.type).toLowerCase() === 'reasoning';
+}
+
+/**
+ * Reasoning items replayed from an earlier turn only mean something to the
+ * upstream that produced them, so a stateless relay has to rewrite them:
+ *
+ * - `content` is capped at zero items by the strict Responses schema. Sites
+ *   running a real Responses backend (agentrouter's `gpt-6-astra`) reject a
+ *   replayed `content: [{type:'reasoning_text', …}]` with
+ *   `Invalid 'input[n].content': array too long. Expected an array with maximum
+ *   length 0`. The same site's `deepseek-v4-flash` backend is lax, which is why
+ *   the failure looked model-specific.
+ * - `id` only resolves against a store the request never populated; with
+ *   `store: false` the upstream answers `Item with id 'rs_…' not found` or
+ *   fails encrypted-content verification. Dropping it keeps summary and
+ *   encrypted_content usable.
+ *
+ * Both are skipped when the request chains `previous_response_id` or opts into
+ * `store`, where the ids are meaningful.
+ */
+function normalizeReplayedReasoningItems(
+  input: unknown,
+  options: { keepItemIds: boolean },
+): unknown {
+  if (!Array.isArray(input)) return input;
+
+  let changed = false;
+  const next = input.map((item) => {
+    if (!isResponsesReasoningItem(item)) return item;
+    const hasContent = Object.prototype.hasOwnProperty.call(item, 'content');
+    const hasId = !options.keepItemIds && asTrimmedString(item.id).length > 0;
+    if (!hasContent && !hasId) return item;
+
+    const sanitized = { ...item };
+    delete sanitized.content;
+    if (hasId) delete sanitized.id;
+    changed = true;
+    return sanitized;
+  });
+
+  return changed ? next : input;
+}
+
 export function normalizeResponsesMessageContent(role: string, content: unknown): Array<Record<string, unknown>> {
   return normalizeResponsesMessageContentBlocks(role, content);
 }
@@ -571,6 +616,14 @@ export function sanitizeResponsesBodyForProxy(
       defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
     },
   );
+
+  normalized = {
+    ...normalized,
+    input: normalizeReplayedReasoningItems(normalized.input, {
+      keepItemIds: normalized.store === true
+        || asTrimmedString(normalized.previous_response_id).length > 0,
+    }),
+  };
 
   const sanitized: Record<string, unknown> = { ...normalized };
   for (const key of RESPONSES_COMPATIBILITY_FILTER_FIELDS) {
