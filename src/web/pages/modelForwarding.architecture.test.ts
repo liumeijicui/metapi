@@ -32,9 +32,12 @@ describe('ModelForwarding 模型转发页', () => {
     expect(editor).toContain("tr('+ 添加目标')");
   });
 
-  it('规则生成的路由带 forward: 前缀并隐藏于路由页面', () => {
+  it('规则生成的路由带 forward: 前缀，派发只认规则、不回落到老路由', () => {
     expect(tokenRouter).toContain('isForwardRoutePattern');
-    expect(tokenRouter).toContain('hasDispatchableChannel');
+    // 「模型转发」声明过的模型名一旦命中，就只走这条规则：规则没有可派发通道时
+    // 如实失败，不再回落到按 model_pattern 命中的老路由。
+    expect(tokenRouter).toContain('loadDeclaredForwardModelNames');
+    expect(tokenRouter).not.toContain('hasDispatchableChannel');
     expect(tokensRoute).toContain('.filter((route) => !isForwardRoutePattern(route.modelPattern))');
   });
 

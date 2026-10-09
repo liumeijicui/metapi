@@ -1,3 +1,27 @@
+### 86. 模型转发不再静默回落到老路由：规则声明过的模型只走新路由，且只认 SK
+
+- **类型**：缺陷修复（路由派发口径）
+- **需求来源**：本会话需求（“有个很严重的 bug，他一直往老路由发：请求模型 gpt-6-astra … 路由: 老路由。但是我只开启了新路由”；“模型转发只需要有模型名、站点 URL、SK 密钥就能调用，其他的就算 token 掉了都不影响路由转发，这种站点也不要帮我剔除掉”）
+- **背景**：`gpt-6-astra` 在「模型转发」里只有一条规则（`forward:gpt-6-astra`，路由 #572），可用通道是 agentrouter 的账号 #20。可线上日志里这个模型一直落在路由 #1155 —— 一条 `model_pattern='gpt-6-astra'` 的**老路由**，上面挂着 10 个自动生成的通道，指向一堆从没在规则里配置过的站点。调用方看到的是「模型对了但站点变了、结果变差」。
+- **根因**：`TokenRouter.findRoute()` 的转发优先分支带了一个 `hasDispatchableChannel()` 前置判断：命中转发路由后先看它有没有「通道启用 + 账号 active + 站点 active + 不在冷却」的通道，取不到就**继续往下匹配老路由**。账号 #20 的登录态是 `expired`（会话过期，SK 仍然有效），于是判断为「转发路由不可派发」→ 静默改道到老路由 #1155。
+  - 这条回落被当成容错，实际是**静默改道**：转发规则里的通道一旦不可用，请求不会被判失败，而是被交给同名的老路由，打到规则之外的站点上。
+  - 顺带把「能不能派发」和「登录态是否有效」绑在了一起。模型转发只需要「模型名 + 站点 URL + SK」，登录态掉了不该影响转发。
+- **改动**（`src/server/services/tokenRouter.ts`，单文件）：
+  1. **转发优先且不回落**：只要对外模型名命中启用中的转发路由，就直接返回该路由，不再检查通道可用性、也不再继续匹配老路由；没有可派发通道时如实失败（上层会说明是哪条规则、什么原因），由 operator 决定修凭据还是改规则。删掉只为这条回落服务的 `hasDispatchableChannel()`。
+  2. **规则声明过的模型不允许回落**：新增 `loadDeclaredForwardModelNames()`（读 `model_forward_rules.model_name`，小写归一化，与路由快照共用 TTL 与 `invalidateTokenRouterCache()` 失效入口）。规则**被停用**时它的路由不在启用列表里，此时同样返回「无可用通道」，而不是回落到老路由。
+  3. **转发通道只认凭据**：`RouteMatch` 的通道条目新增 `isForwardChannel`（由 `isForwardRoutePattern(route.modelPattern)` 判定）。转发通道的可用性判断不再要求 `account.status === 'active'`，只有显式 `disabled` 才排除 —— 会话过期（`expired`）照常派发。
+  4. **令牌行不可用时退回账号 SK**：`resolveChannelTokenValue()` 在转发通道上，若 `account_tokens` 行不可用（`masked_pending` / 停用），退回账号自己的 `apiToken`。这样「会话刷新失败」不会再让整条转发通道判死。
+  5. **未声明模型保持原样**：没有转发规则的模型（绝大多数）走老路由匹配逻辑，一行未改，新老并存只发生在「没被规则声明」的模型上。
+- **验证**：
+  - 单测：`tokenRouter.modelForward.test.ts` 由 3 例重写为 5 例（规则声明后只走新通道 / 停用规则后如实失败不回落到老路由 / 转发通道冷却时报无可用通道 / **账号 `expired` 时转发通道仍按 SK 派发** / **令牌行 `masked_pending` 时退回账号 SK**）。
+  - 全量回归：`src/server` 363 文件 2756 通过、5 失败（其中 2 例是本次按新语义重写的目标，另 3 例 `siteProxy` / `factoryResetService` / `db.index.default-path` 是既有环境性失败）；`src/web` 156 文件 555 通过、1 失败（既有 `accounts.rebind-panel-focus` 环境性失败）。
+  - 门禁：`npx tsc -p tsconfig.server.json --noEmit`、`tsconfig.web.json`、`tsconfig.web.test.json` 全通过；`npm run repo:drift-check` 0 违规（登记债务仍 5 条）；`npm run build:server` 通过。
+  - 实机（`systemctl restart metapi` 后）：`GET /v1/models` 仍列出 `gpt-6-astra`（707 个模型）；用网关 SK 调 `POST /v1/chat/completions {model:'gpt-6-astra'}` → HTTP 200，945ms，上游落 `deepseek-v4-flash`（= 规则里唯一启用目标的 `upstream_model`）；`proxy_logs` 最新一条 `route_id=572`（新转发路由），此前同一模型的历史记录清一色是 `route_id=1155`（老路由）。账号 #20 的 `status` 是 `expired`，SK 有效，转发照常。
+- **副作用**：模型转发规则不再有兜底回落。规则里的通道全不可用时，调用方会**明确失败**并看到「该模型在「模型转发」里没有可派发的通道」，而不是静默改道。老路由及其页面/接口一行未动，仍服务于未被规则声明的模型。
+- **主要文件**：`src/server/services/tokenRouter.ts`、`src/server/services/tokenRouter.modelForward.test.ts`、`src/web/pages/modelForwarding.architecture.test.ts`
+- **状态**：已完成（已构建并重启上线，实机验证通过）
+
+
 ### 85. anyrouter 不再每小时重放一次「退出重登」：新增每日一次的浏览器重登闸门
 
 - **类型**：缺陷修复（签到节流 + 每日发放口径）

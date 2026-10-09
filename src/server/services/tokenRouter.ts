@@ -51,6 +51,11 @@ interface RouteMatch {
       site: typeof schema.sites.$inferSelect;
       token: null;
     }>;
+    /**
+     * 该通道属于「模型转发」规则生成的路由。这类通道只认凭据本身：
+     * 账号会话过期（status=expired）不影响派发，只要还能取到 SK 就照常转发。
+     */
+    isForwardChannel: boolean;
   }>;
 }
 
@@ -1094,6 +1099,15 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
   routes: [],
 };
 
+/**
+ * 被「模型转发」规则声明过的对外模型名（含已停用的规则），小写归一化。
+ * 派发时用它判断模型是否归新路由管辖：在名单里就绝不允许回落到老路由。
+ */
+let declaredForwardModelsSnapshot: { loadedAt: number; modelNames: Set<string> } = {
+  loadedAt: 0,
+  modelNames: new Set(),
+};
+
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
 
 function resolveTokenRouterCacheTtlMs(): number {
@@ -1187,7 +1201,9 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
     listOauthRouteUnitMembersByUnitIds(oauthRouteUnitIds),
   ]);
 
+  const isForwardChannel = isForwardRoutePattern(route.modelPattern);
   const mapped = channels.map((row) => ({
+    isForwardChannel,
     channel: {
       ...row.route_channels,
       sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)
@@ -1256,6 +1272,10 @@ export function invalidateTokenRouterCache(): void {
   routeCacheSnapshot = {
     loadedAt: 0,
     routes: [],
+  };
+  declaredForwardModelsSnapshot = {
+    loadedAt: 0,
+    modelNames: new Set(),
   };
   routeMatchCache.clear();
   stableFirstLastSelectedSiteByKey.clear();
@@ -1364,19 +1384,28 @@ function isRouteDisplayNameMatch(model: string, displayName: string | null | und
 }
 
 /**
- * 转发路由是否存在可派发的通道：通道启用、账号与站点处于 active、且不在冷却中。
- * 用于决定「新转发规则」是否接管该模型，取不到可用通道时回落到普通路由。
+ * 读取所有被「模型转发」规则声明过的对外模型名。
+ *
+ * 这是「新路由唯一派发」判定的依据：模型名一旦被规则声明（哪怕规则当下停用），
+ * 派发就只认这条规则。规则没通道可用时如实失败，而不是回落到按 model_pattern
+ * 命中的老路由 —— 那条回落会静默把请求打到没在规则里配置过的站点上。
+ *
+ * 与路由快照共用 TTL 和失效入口（invalidateTokenRouterCache）。
  */
-function hasDispatchableChannel(match: RouteMatch, nowMs = Date.now()): boolean {
-  return match.channels.some((candidate) => {
-    if (!candidate.channel.enabled) return false;
-    if (candidate.account.status !== 'active') return false;
-    if (candidate.site.status !== 'active') return false;
-    const cooldownUntil = candidate.channel.cooldownUntil;
-    if (!cooldownUntil) return true;
-    const parsed = Date.parse(cooldownUntil);
-    return Number.isNaN(parsed) || parsed <= nowMs;
-  });
+async function loadDeclaredForwardModelNames(nowMs = Date.now()): Promise<Set<string>> {
+  if (isCacheFresh(declaredForwardModelsSnapshot.loadedAt, nowMs)) {
+    return declaredForwardModelsSnapshot.modelNames;
+  }
+  const rows = await db.select({ modelName: schema.modelForwardRules.modelName })
+    .from(schema.modelForwardRules)
+    .all();
+  const modelNames = new Set<string>();
+  for (const row of rows) {
+    const normalized = (row.modelName || '').trim().toLowerCase();
+    if (normalized) modelNames.add(normalized);
+  }
+  declaredForwardModelsSnapshot = { loadedAt: nowMs, modelNames };
+  return modelNames;
 }
 
 function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
@@ -3118,18 +3147,29 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    // 「模型转发」规则优先：对外模型名命中启用中的转发路由时直接走它，
-    // 该规则没有可用通道（未启用/全部账号停用/全部冷却中）时再回落到普通路由。
+    // 「模型转发」优先，且不回落。
+    //
+    // 曾经的「转发规则没有可派发通道就回落到同名老路由」看着像容错，实际是会
+    // 静默改道的陷阱：规则里的通道一旦不可用（账号会话过期、站点停用、通道被禁用
+    // 或冷却中），请求不会被判失败，而是被交给按 model_pattern 命中的老路由，
+    // 打到完全没在规则里配置过的站点上，调用方只看得到结果莫名变差。
+    //
+    // 现在：规则里没有可派发的通道就如实失败（上层会说明是哪条规则、什么原因），
+    // 由 operator 决定是修凭据还是改规则。
     const forwardRoute = routes.find((route) => (
       !isExplicitGroupRoute(route)
       && isForwardRoutePattern(route.modelPattern)
       && isRouteDisplayNameMatch(model, route.displayName)
     ));
     if (forwardRoute) {
-      const forwardMatch = await this.loadRouteMatch(forwardRoute);
-      if (hasDispatchableChannel(forwardMatch)) {
-        return forwardMatch;
-      }
+      return await this.loadRouteMatch(forwardRoute);
+    }
+
+    // 规则已声明该模型、但路由不在启用列表里（规则被停用）→ 只走新路由，
+    // 命中不了就当作没有可用通道，同样不回落到老路由。
+    const declaredForwardModelNames = await loadDeclaredForwardModelNames();
+    if (declaredForwardModelNames.has(model.trim().toLowerCase())) {
+      return null;
     }
 
     const legacyRoutes = routes.filter((route) => !isForwardRoutePattern(route.modelPattern));
@@ -3344,12 +3384,20 @@ export class TokenRouter {
     account: typeof schema.accounts.$inferSelect;
     site?: typeof schema.sites.$inferSelect | null;
     token: typeof schema.accountTokens.$inferSelect | null;
+    isForwardChannel?: boolean;
   }): string | null {
     if (candidate.channel.tokenId) {
-      if (!candidate.token) return null;
-      if (!isUsableAccountToken(candidate.token)) return null;
-      const token = candidate.token.token?.trim();
-      return token ? token : null;
+      if (candidate.token && isUsableAccountToken(candidate.token)) {
+        const token = candidate.token.token?.trim();
+        if (token) return token;
+      }
+      // 转发通道只要求「拿得到一个能用的 SK」：令牌行被标记为待补全/停用时，
+      // 退回到账号自己的 API Key，避免因为会话刷新失败而整个通道不可用。
+      if (candidate.isForwardChannel) {
+        const accountApiToken = candidate.account.apiToken?.trim();
+        if (accountApiToken) return accountApiToken;
+      }
+      return null;
     }
 
     if (getOauthInfoFromAccount(candidate.account)) {
@@ -3440,7 +3488,13 @@ export class TokenRouter {
       return reasonParts;
     }
 
-    if (isExplicitTokenChannel(candidate)) {
+    if (candidate.isForwardChannel) {
+      // 转发通道只认凭据：账号会话过期（登录态掉了）不影响派发，只要还能取到
+      // SK 就照常转发；只有被显式停用的账号才排除。
+      if (candidate.account.status === 'disabled') {
+        reasonParts.push(`账号状态=${candidate.account.status}`);
+      }
+    } else if (isExplicitTokenChannel(candidate)) {
       if (candidate.account.status === 'disabled') {
         reasonParts.push(`账号状态=${candidate.account.status}`);
       }

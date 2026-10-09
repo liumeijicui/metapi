@@ -124,8 +124,9 @@ describe('模型转发路由优先级', () => {
     expect(selected?.channel.id).toBe(channelId);
   });
 
-  it('启用转发规则时优先走新转发通道，停用后回落老路由', async () => {
+  it('转发规则一旦声明该模型，就只走新转发通道；停用后不再回落老路由', async () => {
     const router = new TokenRouter();
+    // 规则还没建之前，模型仍按老路由派发（新老并存只发生在「没被规则声明」的模型上）。
     const before = await router.selectChannel('gpt-6-astra');
     expect(before?.channel.id).toBe(oldChannelId);
 
@@ -142,20 +143,20 @@ describe('模型转发路由优先级', () => {
     expect(selected?.channel.id).toBe(forwardChannelId);
     expect(selected?.actualModel).toBe('deepseek-v4.1-flash');
 
-    // 停用规则 → 通道不可用 → 回落老路由
+    // 停用规则 → 该模型没有可派发通道 → 如实报不可用，不回落到老路由。
     await forwardService.setModelForwardRuleEnabled(rule.id, false);
     invalidateTokenRouterCache();
-    const fallback = await router.selectChannel('gpt-6-astra');
-    expect(fallback?.channel.id).toBe(oldChannelId);
+    const disabled = await router.selectChannel('gpt-6-astra');
+    expect(disabled).toBeNull();
 
-    // 重新启用 → 再次优先新转发通道
+    // 重新启用 → 又回到新转发通道
     await forwardService.setModelForwardRuleEnabled(rule.id, true);
     invalidateTokenRouterCache();
     const again = await router.selectChannel('gpt-6-astra');
     expect(again?.channel.id).toBe(forwardChannelId);
   });
 
-  it('转发通道全部冷却时回落老路由', async () => {
+  it('转发通道冷却中时报无可用通道，不回落到老路由', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
@@ -171,7 +172,44 @@ describe('模型转发路由优先级', () => {
 
     const router = new TokenRouter();
     const selected = await router.selectChannel('gpt-6-astra');
-    expect(selected?.channel.id).toBe(oldChannelId);
+    expect(selected).toBeNull();
+  });
+
+  it('账号会话过期时转发通道仍按 SK 正常派发', async () => {
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
+    });
+    invalidateTokenRouterCache();
+    const forwardChannelId = rule.targets[0].channelId as number;
+
+    // 登录态掉了（expired），但账号上的 SK 还能用 → 转发必须照常工作。
+    await db.update(schema.accounts).set({ status: 'expired' })
+      .where(eq(schema.accounts.id, accountId)).run();
+    invalidateTokenRouterCache();
+
+    const selected = await new TokenRouter().selectChannel('gpt-6-astra');
+    expect(selected?.channel.id).toBe(forwardChannelId);
+    expect(selected?.tokenValue).toBe('token-forward');
+  });
+
+  it('令牌行不可用时转发通道退回账号 SK', async () => {
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
+    });
+    invalidateTokenRouterCache();
+    const forwardChannelId = rule.targets[0].channelId as number;
+
+    // 令牌行被标记为待补全 / 停用（会话刷新失败是常见原因），只要账号还有 SK
+    // 就仍然可以派发，不该整条通道判死。
+    await db.update(schema.accountTokens).set({ valueStatus: 'masked_pending', enabled: false })
+      .where(eq(schema.accountTokens.id, tokenId)).run();
+    invalidateTokenRouterCache();
+
+    const selected = await new TokenRouter().selectChannel('gpt-6-astra');
+    expect(selected?.channel.id).toBe(forwardChannelId);
+    expect(selected?.tokenValue).toBe('sk-forward');
   });
 });
 
