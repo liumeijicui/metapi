@@ -20,6 +20,51 @@ describe('accountHealthService', () => {
     expect(health.state).toBe('unhealthy');
   });
 
+  it('reports the recorded reason for an expired account instead of a generic credential line', () => {
+    const health = buildRuntimeHealthForAccount({
+      accountStatus: 'expired',
+      siteStatus: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        runtimeHealth: {
+          state: 'unhealthy',
+          reason: '站点无法访问（网站可能挂了）：check-in status failed: fetch failed',
+          source: 'balance',
+          checkedAt: '2026-10-09T12:13:25.000Z',
+        },
+      }),
+    });
+
+    expect(health).toMatchObject({
+      state: 'unhealthy',
+      source: 'balance',
+      reason: '站点无法访问（网站可能挂了）：check-in status failed: fetch failed',
+    });
+    expect(health.reason).not.toContain('访问令牌已过期');
+  });
+
+  it('keeps the credential line for an expired account when the last run recorded no failure', () => {
+    const health = buildRuntimeHealthForAccount({
+      accountStatus: 'expired',
+      siteStatus: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        runtimeHealth: {
+          state: 'healthy',
+          reason: '余额刷新成功',
+          source: 'balance',
+          checkedAt: '2026-10-09T12:13:25.000Z',
+        },
+      }),
+    });
+
+    expect(health).toMatchObject({
+      state: 'unhealthy',
+      source: 'auth',
+      reason: '访问令牌已过期',
+    });
+  });
+
   it('does not reuse expired session-token health for proxy-only accounts', () => {
     const health = buildRuntimeHealthForAccount({
       accountStatus: 'expired',

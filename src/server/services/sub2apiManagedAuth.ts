@@ -6,6 +6,7 @@ import {
   resolveProxyUrlFromExtraConfig,
 } from './accountExtraConfig.js';
 import { withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { isHtmlErrorPage } from './failureReasonService.js';
 
 export const SUB2API_MANAGED_REFRESH_LEAD_MS = 120 * 1000;
 
@@ -75,6 +76,16 @@ function buildSub2ApiRefreshFailureMessage(input: {
   const prefix = typeof input.status === 'number' && Number.isFinite(input.status) && input.status > 0
     ? `sub2api token refresh failed: HTTP ${Math.trunc(input.status)}`
     : 'sub2api token refresh failed';
+
+  // A gateway in front of the site answers a refused refresh with a full HTML
+  // page rather than the API's JSON. The page carries no message worth keeping —
+  // it is markup, an `<hr>` and a server banner — and the status in `prefix`
+  // already says everything it does. Pasted in whole it turns the account's
+  // reason field into a wall of tags that reads like a credential problem when
+  // the request never reached the application at all.
+  if (!isRecord(input.payload) && isHtmlErrorPage(input.rawText)) {
+    return `${prefix}: 站点返回 HTML 错误页，请求未到达接口`;
+  }
 
   if (isRecord(input.payload)) {
     const message = normalizeNonEmptyString(

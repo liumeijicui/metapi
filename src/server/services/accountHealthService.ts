@@ -122,6 +122,20 @@ export function buildRuntimeHealthForAccount(input: {
   if (accountStatus === 'expired') {
     const credentialMode = getCredentialModeFromExtraConfig(input.extraConfig);
     const usesOauthCredential = hasOauthProvider({ extraConfig: input.extraConfig });
+    // `expired` names the state, not the reason. A run that failed because the
+    // site was unreachable, or because the site refused the stored password,
+    // records that reason on the account; reporting the generic credential line
+    // instead is what makes a downed site look like a token to go and rotate, and
+    // it hides the one that says the site itself is the problem. Prefer the
+    // recorded reason whenever the last run actually produced one.
+    const storedFailure = extractRuntimeHealth(input.extraConfig);
+    if (
+      storedFailure
+      && storedFailure.state === 'unhealthy'
+      && (storedFailure.reason || '').trim()
+    ) {
+      return storedFailure;
+    }
     return {
       state: 'unhealthy',
       reason: usesOauthCredential

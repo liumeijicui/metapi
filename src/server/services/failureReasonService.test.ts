@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFailureReason } from './failureReasonService.js';
+import {
+  classifyFailureReason,
+  isHtmlErrorPage,
+  stripHtmlErrorPage,
+} from './failureReasonService.js';
 
 describe('failureReasonService', () => {
   it('classifies turnstile requirement as manual verification', () => {
@@ -148,5 +152,75 @@ describe('failureReasonService', () => {
     });
     expect(result.code).toBe('checkin_not_supported');
     expect(result.category).toBe('site');
+  });
+
+  it('names an HTML error page as the site side instead of pasting its markup', () => {
+    const nginxPage = '<html>\n<head><title>403 Forbidden</title></head>\n'
+      + '<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n'
+      + '</body>\n</html>\n';
+    const result = classifyFailureReason({
+      message: `sub2api token refresh failed: HTTP 403: ${nginxPage}`,
+    });
+
+    expect(result).toMatchObject({
+      code: 'upstream_error',
+      category: 'site',
+    });
+    expect(result.title).toContain('站点服务异常');
+  });
+
+  it('reads the same verdict from the collapsed marker alone', () => {
+    // Once the page has been replaced by `stripHtmlErrorPage`, this phrase is
+    // all that is left for the classifier to go on — and it has to keep working,
+    // because the message the site's own layer produced is re-classified later.
+    const result = classifyFailureReason({
+      message: 'sub2api token refresh failed: HTTP 403: 站点返回 HTML 错误页，请求未到达接口',
+    });
+
+    expect(result).toMatchObject({ code: 'upstream_error', category: 'site' });
+    expect(result.actionHint).toContain('无需改动凭据');
+  });
+
+  it('collapses an HTML error page to one line and keeps the status reported before it', () => {
+    const nginxPage = '<html><head><title>403 Forbidden</title></head>'
+      + '<body><center><h1>403 Forbidden</h1></center></body></html>';
+
+    expect(stripHtmlErrorPage(`sub2api token refresh failed: HTTP 403: ${nginxPage}`))
+      .toBe('sub2api token refresh failed: HTTP 403（站点返回 HTML 错误页）');
+    // A bare page has no prefix to keep, so the status is read off the page.
+    expect(stripHtmlErrorPage(`HTTP 502: ${nginxPage}`))
+      .toBe('HTTP 502（站点返回 HTML 错误页）');
+    // A bare page has no prefix, so its own heading is what identifies it.
+    expect(stripHtmlErrorPage(nginxPage)).toBe('403 Forbidden（站点返回 HTML 错误页）');
+  });
+
+  it('names a challenge page for what it is instead of quoting its heading', () => {
+    const challenge = '<html><head><title>Just a moment...</title></head>'
+      + '<body><div id="cf-challenge-running">Checking your browser before accessing '
+      + 'cloudflare</div></body></html>';
+
+    expect(stripHtmlErrorPage(challenge)).toBe('站点返回 HTML 错误页（验证/防护页）');
+    expect(stripHtmlErrorPage(`HTTP 403: ${challenge}`))
+      .toBe('HTTP 403（验证/防护页）');
+  });
+
+  it('leaves ordinary API errors untouched', () => {
+    expect(stripHtmlErrorPage('HTTP 401: invalid refresh token (REFRESH_TOKEN_INVALID)'))
+      .toBe('HTTP 401: invalid refresh token (REFRESH_TOKEN_INVALID)');
+    expect(isHtmlErrorPage('HTTP 401: invalid refresh token')).toBe(false);
+    expect(isHtmlErrorPage('')).toBe(false);
+    expect(isHtmlErrorPage(null)).toBe(false);
+  });
+
+  it('still reports a challenge page as a challenge, not as a dead site', () => {
+    // The interstitial names itself inside the body, which the HTML strip
+    // removes; the verdict has to be taken from the original text.
+    const challenge = '<html><head><title>Just a moment...</title></head>'
+      + '<body><div id="cf-challenge-running">Checking your browser before accessing '
+      + 'cloudflare</div></body></html>';
+    const result = classifyFailureReason({ message: challenge });
+
+    expect(result.code).toBe('cloudflare_challenge');
+    expect(result.category).toBe('verification');
   });
 });

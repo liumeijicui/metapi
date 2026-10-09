@@ -131,4 +131,30 @@ describe('sub2apiManagedAuth', () => {
     expect(row?.status).toBe('expired');
     expect(row?.accessToken).toBe('stale-access-token');
   });
+
+  it('summarises a gateway HTML page instead of pasting it into the error', async () => {
+    // The sandboxed relays sit behind nginx, which answers a refused refresh
+    // with a full HTML page. Kept verbatim it turns the account's reason field
+    // into a wall of markup that reads like a credential problem.
+    const { site, account } = await seedAccount({ status: 'active' });
+
+    undiciFetchMock.mockResolvedValue({
+      status: 403,
+      text: async () => '<html>\n<head><title>403 Forbidden</title></head>\n'
+        + '<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n'
+        + '</body>\n</html>\n',
+    });
+
+    const failure = await refreshSub2ApiManagedSession({
+      account,
+      site,
+      currentAccessToken: account.accessToken || '',
+      currentExtraConfig: account.extraConfig,
+    }).then(() => null, (error: Error) => error.message);
+
+    expect(failure).toContain('HTTP 403');
+    expect(failure).toContain('站点返回 HTML 错误页');
+    expect(failure).not.toContain('<');
+    expect(failure).not.toContain('nginx');
+  });
 });

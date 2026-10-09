@@ -24,7 +24,7 @@ import { applyRotatedCredentialIfCarried } from './accountCredentialRotation.js'
 import { pruneOtherSessions } from './sessionHygiene.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
-import { classifyFailureReason } from './failureReasonService.js';
+import { classifyFailureReason, stripHtmlErrorPage } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import {
   getAccountCredentialContext,
@@ -347,15 +347,18 @@ function describeFailureForLog(
   message: string,
   reason: ReturnType<typeof classifyFailureReason>,
 ): string {
+  // A gateway's HTML page is not a message: keep the verdict and the status,
+  // drop the markup, so the check-in log stays readable.
+  const readableMessage = stripHtmlErrorPage(message);
   switch (reason.code) {
     case 'site_unreachable':
-      return `站点无法访问（网站可能挂了）：${message}`;
+      return `站点无法访问（网站可能挂了）：${readableMessage}`;
     case 'upstream_error':
-      return `站点服务异常（网站可能挂了）：${message}`;
+      return `站点服务异常（网站可能挂了）：${readableMessage}`;
     case 'cloudflare_tunnel_unavailable':
-      return `站点隧道不可用（网站侧问题）：${message}`;
+      return `站点隧道不可用（网站侧问题）：${readableMessage}`;
     default:
-      return message;
+      return readableMessage;
   }
 }
 

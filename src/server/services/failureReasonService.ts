@@ -36,10 +36,74 @@ function includesAny(text: string, keywords: string[]): boolean {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
+/**
+ * True when a body is an HTML page rather than an API answer.
+ *
+ * A gateway in front of a site answers a refused request with a full page —
+ * nginx's `403 Forbidden`, a WAF interstitial, a 502 from a reverse proxy —
+ * and that page then travels back inside the error message. Kept verbatim it
+ * turns a one-line reason into a wall of markup, and it reads as if the
+ * credential were at fault when the request never reached the application.
+ *
+ * Matches both a whole document (leading `<!doctype html>` / `<html>`) and the
+ * page pasted after a status line (`HTTP 403: <html> <head>…`), which is how
+ * these bodies actually arrive here.
+ */
+export function isHtmlErrorPage(value?: string | null): boolean {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (/^<(?:!doctype\s+html|html)\b/i.test(text)) return true;
+  return text.length > 40 && /<\/(?:html|head|body|center|title|h1)>/i.test(text);
+}
+
+/**
+ * Collapses an HTML error page to one readable line, keeping whatever the
+ * caller had already said in front of it.
+ *
+ * The status code is worth keeping — `403` and `502` mean different things to
+ * the operator — but the markup, the `<hr>` and the server banner are not. The
+ * page's own `<title>` is deliberately dropped too: it is almost always just
+ * the status again.
+ */
+export function stripHtmlErrorPage(value?: string | null): string {
+  const text = String(value || '').trim();
+  if (!isHtmlErrorPage(text)) return text;
+  const firstTag = text.search(/<[a-z!/]/i);
+  const head = (firstTag > 0 ? text.slice(0, firstTag) : '')
+    .replace(/[\s:：-]+$/, '')
+    .trim();
+
+  // A challenge page's heading is deliberately meaningless ("Just a moment..."),
+  // so it is named for what it is instead of quoted. Any other page's heading is
+  // the one part worth keeping: nginx says `403 Forbidden`, a proxy `502 Bad
+  // Gateway`.
+  const isChallenge = /cloudflare|turnstile|challenge|just a moment/i.test(text);
+  const heading = (
+    text.match(/<title[^>]*>([^<]{1,80})<\/title>/i)?.[1]
+    ?? text.match(/<h1[^>]*>([^<]{1,80})<\/h1>/i)?.[1]
+    ?? ''
+  ).replace(/\s+/g, ' ').trim();
+
+  if (head) {
+    // A status already in the prefix is the whole story; the page's own copy of
+    // it would only repeat what the caller just said.
+    const label = isChallenge ? '验证/防护页' : (/\b\d{3}\b/.test(head) ? null : (heading || null));
+    return label ? `${head}（${label}）` : `${head}（站点返回 HTML 错误页）`;
+  }
+  if (isChallenge) return '站点返回 HTML 错误页（验证/防护页）';
+  return heading ? `${heading}（站点返回 HTML 错误页）` : '站点返回 HTML 错误页';
+}
+
 export function classifyFailureReason(
   input: { message?: string | null; status?: string | null; httpStatus?: number | null },
 ): FailureReason {
-  const rawMessage = String(input.message || '').trim();
+  const originalMessage = String(input.message || '').trim();
+  // Classified on the readable form, never on the markup: the page's `<html>`
+  // scaffolding must not decide which keyword matches.
+  const rawMessage = stripHtmlErrorPage(originalMessage);
+  // ...but the challenge verdicts are the exception: an interstitial names
+  // itself inside the page body, which the strip above has just removed.
+  const htmlErrorPage = isHtmlErrorPage(originalMessage);
   const text = rawMessage.toLowerCase();
   const status = (input.status || '').toLowerCase();
   const httpStatus = typeof input.httpStatus === 'number' ? input.httpStatus : 0;
@@ -92,13 +156,31 @@ export function classifyFailureReason(
     };
   }
 
-  if (isCloudflareChallenge(rawMessage)) {
+  if (isCloudflareChallenge(originalMessage)) {
     return {
       code: 'cloudflare_challenge',
       category: 'verification',
       title: '触发 Cloudflare 验证',
       actionHint: '降低频率并稍后重试',
       detailHint: '请求触发了防护挑战，建议稍后再试或更换稳定站点。',
+    };
+  }
+
+  // A page came back where an API answer was expected. The request reached
+  // something, but not the application: a gateway, a WAF or a dead upstream
+  // answered instead. That is the site's side of the call, and saying so keeps
+  // the operator from rotating a credential that was never examined.
+  // Also matched by the marker `stripHtmlErrorPage` leaves behind: once the page
+  // is gone, that phrase is the only trace left of what came back, and the
+  // verdict it earns is the same one.
+  if (htmlErrorPage || text.includes('html 错误页')) {
+    return {
+      code: 'upstream_error',
+      category: 'site',
+      title: '站点服务异常（网站可能挂了）',
+      actionHint: '无需改动凭据，等站点恢复后会自动重试',
+      detailHint: '站点（或其前面的网关）返回了 HTML 错误页而不是接口响应，'
+        + '说明请求没有到达应用本身，与账号令牌无关，站点恢复后会自动恢复。',
     };
   }
 

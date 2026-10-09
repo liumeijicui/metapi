@@ -15,7 +15,7 @@ import { tryAutoRelogin } from './autoRelogin.js';
 import { keepAliveCredential } from './credentialKeepalive.js';
 import { createSerialQueue } from '../shared/serialQueue.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
-import { classifyFailureReason } from './failureReasonService.js';
+import { classifyFailureReason, stripHtmlErrorPage } from './failureReasonService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
 import { withAccountCredentialContext, withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
@@ -316,9 +316,12 @@ export async function refreshBalance(accountId: number) {
     // is named as such, so a plain `fetch failed` on the account does not read
     // like a credential that needs rotating.
     const reason = classifyFailureReason({ message: raw });
+    // An HTML body is markup, not a message: keep the verdict and the status,
+    // drop the page, so the account's reason field stays readable.
+    const readableRaw = stripHtmlErrorPage(raw);
     const message = reason.code === 'site_unreachable' || reason.code === 'upstream_error'
-      ? `${reason.title}：${raw}`
-      : raw;
+      ? `${reason.title}：${readableRaw}`
+      : readableRaw;
     // Awaited: this handler is called from paths that record a more specific
     // verdict right after it, and an un-awaited write here would land last and
     // silently overwrite that verdict with the generic one.
