@@ -166,6 +166,21 @@ export const linuxDoProvider: AssistedLoginProvider = {
   },
   entryNamePattern: /linux\s*\.?\s*do|linuxdo/i,
   entrySelectors: ['[href*="linuxdo"]', '[href*="linux.do"]', 'button:has-text("LinuxDO")', 'button:has-text("LINUX DO")', 'button:has-text("linuxdo")'],
+  /**
+   * Landing pages commonly carry links back to the community itself (`/t/topic`,
+   * `/u/<name>`, `/c/<slug>`, `/tag/<slug>`, `/g/<group>`), printed with the URL
+   * as the anchor text. Those match both the name pattern and the href selectors
+   * above, so without this filter the capture clicks a forum page instead of the
+   * OAuth handoff. The real entry — a `Continue with LinuxDO` button, or a link
+   * to `connect.linux.do/oauth2/authorize` — never points at a content path.
+   */
+  entryAnchorDenyHrefSubstrings: [
+    'linux.do/t/',
+    'linux.do/u/',
+    'linux.do/c/',
+    'linux.do/tag/',
+    'linux.do/g/',
+  ],
   entryTextSelectors: [
     'a:has-text("Linux.do")',
     'button:has-text("Linux.do")',

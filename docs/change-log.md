@@ -1,3 +1,33 @@
+### 92. 登记「简直了」（jianzhile.vip）+ 修掉「站点首页的 Linux.do 社区链接被当成登录入口」
+
+- **类型**：缺陷修复（托管登录入口匹配）+ 站点登记
+- **需求来源**：本会话需求（“https://jianzhile.vip/pricing 帮我登记这个要站，linuxdo快捷登录”）
+- **站点事实（实测）**：
+  - `GET /api/status` → `system_name = 简直了`、`version = local-0.0.29`（自建 new-api 分支）；`linuxdo_oauth: true`（`linuxdo_client_id = Kdj5AG4NctsGzSzjm4ygOLax1O7a5Shj`，最低信任等级 1）、`github_oauth: true`、`turnstile_check: false`；**直连可用**（无 CF 盾），站点未开系统代理。
+  - 真正的登录页是 `/login`（`/sign-in` 是 404，页面直接写「Page not found」），页面上是 `Continue with GitHub` / `Continue with LinuxDO` 两个 `<button>`，说明是 **local-0.0.29 的简体定制构建**。
+  - **签到在本站已不存在**：`/api/user/checkin` 回 `daily check-in has moved to the play club`；站点新增了 `/budele/`（不得了游乐中心），`GET /api/budele/status` 里 `club.enabled: false`，`activities.checkin / lottery / poker / ddz / zjh` 全是 `state: club_disabled, available: false`。即签到与转盘一起搬进了游乐中心，而游乐中心目前**被站方关停**，所以账号的 `checkinEnabled` 置为 `false`（不是我们登不上去，是站点侧没有可签到的入口）。
+- **登记过程的真问题（本次修复的对象）**：站点首页把社区帖子的**裸链接**直接印在页面上，锚点文本就是 URL 本身 —— `https://linux.do/t/topic/2527847/2117`、`https://linux.do/t/topic/2527847/3353`。于是托管登录在首页找入口时，`provider.entryNamePattern`（`/linux\s*\.?\s*do|linuxdo/i`）和 `entrySelectors`（`[href*="linux.do"]`）**同时命中这两个社区链接**，点击后跳到 Linux.do 话题页；`finishCapture` 看到落点是 provider 域但不是 authorize 页，就报成 `provider.messages.needsLogin`（“请在弹出的浏览器窗口中完成 Linux.do 登录”）——而浏览器里的 Linux.do 会话其实一直是好的（实测 `linux.do/session/current.json` 返回 `id 367936 / 3145215575`）。这是**入口点错**，不是会话过期。
+- **改动（新增 1 个模块 + 3 处接线）**：
+  1. 新增 `src/server/services/assistedLogin/entryMatch.ts`：把入口定位从 `sessionService` 里抽出来（`buildEntryLocator` + `buildEntryAnchorDenySelector`）。provider 可声明 `entryAnchorDenyHrefSubstrings`，命中这些 href 的锚点会被过滤掉；过滤用 `*:not([href*="…"])` 与每个候选做 `Locator.and()` 相交，所以 `button` 这类没有 href 的候选完全不受影响。没声明该字段的 provider 直接跳过相交，行为与改动前逐字节一致。
+  2. `src/server/services/assistedLogin/types.ts`：新增可选字段 `entryAnchorDenyHrefSubstrings`（含“为什么不能靠名字/`[href*="…"]` 区分”的说明）。
+  3. `src/server/services/assistedLogin/providers/linuxdo.ts`：声明 `linux.do/t/`、`linux.do/u/`、`linux.do/c/`、`linux.do/tag/`、`linux.do/g/` —— 真实入口（`Continue with LinuxDO` 按钮、或指向 `connect.linux.do/oauth2/authorize` 的链接）永远不会落在这几条内容路径上。
+  4. `src/server/services/assistedLogin/sessionService.ts`：`entryLocator()` 改为委托 `buildEntryLocator(page, provider)`。
+- **验证**：
+  - 单测：新增 `entryMatch.test.ts` 5 例（空声明返回 null；选择器拼接正确；引号/反斜杠转义；声明了前缀时每个候选都被相交；没声明时保持原 union）。`providers.test.ts` 加 1 例，钉住「首页那条 `https://linux.do/t/topic/…` 确实会被名字模式匹配到、且必须被 content 前缀挡掉；而 `Continue with LinuxDO` 与 `connect.linux.do/oauth2/authorize` 不会被挡」。`src/server/services/assistedLogin` + `autoRelogin` + `dailyBrowserReloginGate` 共 14 文件 151 例全过。
+  - 实机（真实受管 Chromium，改动前后对照）：
+    - 改前：`POST /api/assisted-login/linuxdo/capture {siteId:62,bindAccount:true}` → `{"success":false,"status":"needs_provider_login","url":"https://linux.do/t/topic/2527847/2117"}`。
+    - 改后同一接口 → `{"success":true,"status":"bound","accountId":48,"username":"3145215575","tokenType":"session"}`。
+    - 用 Playwright 直接量过定位器：首页候选数 `2 → 0`（被挡掉），`/login` 页候选数 `1`（`Continue with LinuxDO`），单次解析 46–51ms，没有慢下来。
+- **登记结果（本机）**：
+  - 站点 `#62 简直了`（`new-api`，未开系统代理）+ 账号 `#48`（`3145215575`、`platformUserId 319`、`credentialMode: session`、`extra_config.oauth.provider = linuxdo` → 走 Linux.do 自动重登；`checkinEnabled: false`，理由见上）。
+  - 会话清理：绑定时 `sessionHygiene: {"outcome":"no-other-session"}`（站点会话列表只有当前这一条，没有多余会话要退）。
+  - 站点侧已有密钥 `li`（`account_tokens` id 114，默认），路由 3 条：`gpt-5.6-sol` / `gpt-6-astra` / `gpt-6-sol`。
+  - 余额：`POST /api/accounts/48/balance` → `{"balance":212.302678,"used":363.838872}`。
+  - 直连对话：`POST /api/model-monitor/chat/stream`（`gpt-6-sol`）流式返回「好的」，`finish_reason: stop`。
+- **副作用**：该过滤只在 provider 声明了内容前缀时生效（当前仅 Linux.do），GitHub 那条链路完全没变；`entryNamePattern` 仍然照旧匹配，所以别的 new-api 站（首页不放社区裸链的）行为不变。
+- **主要文件**：`src/server/services/assistedLogin/entryMatch.ts`（新增）、`entryMatch.test.ts`（新增）、`providers/linuxdo.ts`、`providers/providers.test.ts`、`sessionService.ts`、`types.ts`
+- **状态**：已完成（代码已构建并重启上线，实机登记通过；未提交，等确认）
+
 ### 91. 模型转发「改完顺序老会话不换源」：粘滞会话语义被人工顺序覆盖
 
 - **类型**：缺陷修复（模型转发派发口径）

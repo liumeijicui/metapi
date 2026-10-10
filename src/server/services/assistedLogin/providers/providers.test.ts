@@ -25,6 +25,26 @@ describe('assisted login provider registry', () => {
     expect(github.isHandoffHost('linux.do')).toBe(false);
   });
 
+  it('keeps Linux.do community links from being mistaken for the login entry', () => {
+    const linuxdo = getAssistedLoginProvider('linuxdo')!;
+    const github = getAssistedLoginProvider('github')!;
+
+    // A landing page announcing a topic with the URL as its anchor text satisfies
+    // both the name pattern and the href selector, so the content paths must be denied.
+    const entryLike = 'https://linux.do/t/topic/2527847/2117';
+    expect(linuxdo.entryNamePattern.test(entryLike)).toBe(true);
+    expect(linuxdo.entrySelectors.some((selector) => selector.includes('linux.do'))).toBe(true);
+    expect(linuxdo.entryAnchorDenyHrefSubstrings).toContain('linux.do/t/');
+
+    // The real OAuth entry is not on a content path, so it survives the filter.
+    for (const entry of ['Continue with LinuxDO', 'https://connect.linux.do/oauth2/authorize?client_id=x']) {
+      expect(linuxdo.entryAnchorDenyHrefSubstrings!.some((prefix) => entry.includes(prefix))).toBe(false);
+    }
+
+    // GitHub's own content links (repos, users) are its entry targets, so it declares none.
+    expect(github.entryAnchorDenyHrefSubstrings ?? []).toEqual([]);
+  });
+
   it('uses separate browser profiles per provider', () => {
     const linuxdo = getAssistedLoginProvider('linuxdo')!;
     const github = getAssistedLoginProvider('github')!;

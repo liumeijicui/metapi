@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { createManagedBrowser } from './browserManager.js';
 import { passCloudflareChallenge } from './cloudflareChallenge.js';
+import { buildEntryLocator } from './entryMatch.js';
 import { captureHyperGithubCredentials, supportsHyperGithubLogin } from './sites/hyper.js';
 import type { AssistedLoginProvider, CaptureResult, CapturedCredentials, LoginState } from './types.js';
 
@@ -457,22 +458,9 @@ export function createAssistedLoginSession(input: {
     return false;
   }
 
-  /**
-   * Builds one union locator covering every entry shape.
-   *
-   * Waiting on the candidates *sequentially* spent the full timeout on each one,
-   * so a site whose entry lives behind its own login dialog burned ~180s before
-   * the fallback ran and the caller had already given up. A single union waits
-   * once and resolves as soon as any shape appears.
-   */
+  /** Entry locator; the shape matching and the content-link filter live in `entryMatch`. */
   function entryLocator(page: import('playwright-core').Page): import('playwright-core').Locator {
-    const candidates = [
-      page.getByRole('button', { name: provider.entryNamePattern }),
-      page.getByRole('link', { name: provider.entryNamePattern }),
-      ...provider.entryTextSelectors.map((selector) => page.locator(selector)),
-      ...provider.entrySelectors.map((selector) => page.locator(selector)),
-    ];
-    return candidates.reduce((combined, candidate) => combined.or(candidate));
+    return buildEntryLocator(page, provider);
   }
 
   /**

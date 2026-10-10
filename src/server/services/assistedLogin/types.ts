@@ -89,6 +89,19 @@ export type AssistedLoginProvider = {
   entryNamePattern: RegExp;
   entrySelectors: string[];
   entryTextSelectors: string[];
+  /**
+   * Href substrings that mark an anchor as a community *content* link rather
+   * than a login entry.
+   *
+   * Panels routinely print their community links on the landing page with the
+   * URL as the anchor text, so those anchors match both the name pattern and
+   * the `[href*="…"]` selectors. Clicking one navigates to a forum topic and the
+   * capture reports a missing provider session even though the session is fine.
+   * A real entry points at the provider's authorize URL or at the site's own
+   * callback route, never at a content path, so declaring the content prefixes
+   * removes the false match without hiding a genuine entry.
+   */
+  entryAnchorDenyHrefSubstrings?: string[];
   /** Matchers for the OAuth authorize/consent button on the handoff page. */
   consentButtonNames: RegExp;
   consentSelectors: string[];
