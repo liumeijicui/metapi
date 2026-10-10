@@ -7,6 +7,14 @@ import { isReadyAccountToken } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog, type ModelPricingCatalogInput } from './modelPricingService.js';
 import type { PerfMetricsSummary, PlatformAdapter } from './platforms/base.js';
+import { countModelMonitorHealthySlots } from '../../shared/modelMonitorBars.js';
+import {
+  isModelFamilyId,
+  MODEL_FAMILY_IDS,
+  modelFamilyLabel,
+  resolveModelFamily,
+  type ModelFamilyId,
+} from '../../shared/modelFamilies.js';
 
 /**
  * 'models_only' 表示站点没有模型监控接口（sub2api、老版本 new-api 等），
@@ -46,6 +54,15 @@ export type ModelMonitorFilter = {
   model?: string | null;
   minSuccessRate?: number | null;
   sort?: string | null;
+  family?: string | null;
+};
+
+/** 模型监控筛选下拉里的一个「模型家族」。 */
+export type ModelMonitorFamilyOption = {
+  value: ModelFamilyId;
+  label: string;
+  /** 当前站点 / 成功率范围内，这个家族有多少条模型记录。 */
+  count: number;
 };
 
 /**
@@ -94,6 +111,13 @@ export type ModelMonitorOverview = {
    * 筛，但不跟着模型名本身筛，否则选中之后就没法在下拉里换其它模型。
    */
   modelOptions: Array<{ modelName: string; siteCount: number }>;
+  /**
+   * 「家族」筛选下拉的候选（OpenAI / Claude / DeepSeek …）。
+   *
+   * 跟着站点与最低成功率筛（和 `modelOptions` 同一个范围），但不跟着家族自己
+   * 筛，否则选完某一类之后下拉里就只剩这一类，没法再换。
+   */
+  families: ModelMonitorFamilyOption[];
   sites: Array<{
     siteId: number;
     siteName: string;
@@ -227,6 +251,100 @@ async function loadSiteModelPricing(
     return pricing;
   }
   return pricing;
+}
+
+/**
+ * 站点「当下真的在服务」的模型名（小写归一）。
+ *
+ * 站点自己的 `/v1/models` 才是真清单：`/api/perf-metrics` 里会留着已经下线的
+ * 老模型，而它又只挂在价目表上、带着一个过期的 ratio 价（happycoding 的
+ * `deepseek-v4-1-flash` 就是这种：价目表按 ratio 折算成 $75/1M，真实在卖的
+ * `deepseek-v4.1-flash` 是 $0.3/1M），照抄进库就会把页面上的价格带偏。
+ *
+ * 读清单优先用 sk- 密钥：账号 JWT 走的是 `/api/user/models`，那份清单一样会带上
+ * 已经下线的模型（happycoding 用 JWT 读回 6 个，用密钥读回 5 个），拿它当依据
+ * 等于没裁。
+ *
+ * 读不到（没有可用密钥、被盾拦、超时）时返回 null，调用方按原样保留上游清单 ——
+ * 「拿不到真清单」不该被当成「这个站点的模型全下线了」。
+ */
+async function fetchServedModelNames(
+  site: SiteRow,
+  adapter: PlatformAdapter,
+  credentials: MonitorCredential[],
+): Promise<Set<string> | null> {
+  const listModels = adapter.getModels?.bind(adapter);
+  if (typeof listModels !== 'function') return null;
+  const ordered = [
+    ...credentials.filter((credential) => credential.kind === 'api_token'),
+    ...credentials.filter((credential) => credential.kind !== 'api_token'),
+  ].slice(0, MODEL_LIST_FALLBACK_LIMIT);
+  for (const credential of ordered) {
+    try {
+      const models = await withTimeout(
+        listModels(site.url, credential.value, credential.platformUserId),
+        config.modelMonitorTimeoutMs,
+        `读取 ${site.name} 的服务中模型列表`,
+      );
+      const served = new Set(
+        (models || []).map((name) => normalizePricingKey(String(name || ''))).filter(Boolean),
+      );
+      if (served.size) return served;
+    } catch {
+      // 这一份读不到就换下一份，全都读不到才算「拿不到真清单」。
+    }
+  }
+  return null;
+}
+
+/**
+ * 把名字里的 `-` / `.` / `_` 抹掉，用来判断两条记录是不是同一个模型的两种写法。
+ *
+ * `/` 保留：`nvidia/glm-5.3` 和 `glm-5.3` 是不同的记录，不该混为一谈。
+ */
+function relaxModelName(modelName: string): string {
+  return normalizePricingKey(modelName).replace(/[-_.]/g, '');
+}
+
+/**
+ * 裁掉 perf-metrics 里的「下线写法」。
+ *
+ * 只裁一种情况：某条记录的名字，去掉 `-` / `.` / `_` 之后能在站点真清单里找到
+ * 同名的兄弟，但它自己那个写法已经不在真清单里了。happycoding 就是典型 ——
+ * 横线版 `deepseek-v4-1-flash`（价目表按 ratio 折算成 $75/1M）已经下线，点号版
+ * `deepseek-v4.1-flash`（$0.3/1M）才是真在卖的，两条都还留在 perf-metrics 里。
+ *
+ * 不按「不在真清单里就裁」来：站点的 sk- 密钥常常是限模型的（胖猫的密钥读回来
+ * 的清单里连 deepseek / kimi 都没有），那种真清单只是「这把钥匙能用哪些」，
+ * 拿它当全集会把站点明明在卖的模型一起裁掉。
+ *
+ * 真清单读不到、或者一条都没裁到时原样返回。
+ */
+async function dropRetiredModels(
+  site: SiteRow,
+  adapter: PlatformAdapter,
+  credentials: MonitorCredential[],
+  data: PerfMetricsSummary,
+): Promise<PerfMetricsSummary> {
+  const served = await fetchServedModelNames(site, adapter, credentials);
+  if (!served) return data;
+  const servedRelaxed = new Set([...served].map((name) => relaxModelName(name)));
+  const kept = data.models.filter((model) => {
+    const normalized = normalizePricingKey(model.modelName);
+    if (served.has(normalized)) return true;
+    return !servedRelaxed.has(relaxModelName(normalized));
+  });
+  if (!kept.length || kept.length === data.models.length) return data;
+  // 裁掉的是上游仍然会回报、但站点已经不再提供的模型：留着它们只会让页面
+  // 显示一个点不动的模型，还常常带一个过期的价目表价格。名字打出来方便对账。
+  const dropped = data.models
+    .filter((model) => !kept.includes(model))
+    .map((model) => model.modelName);
+  console.log(
+    `[ModelMonitor] ${site.name}: ${dropped.length} 个模型只剩旧写法（站点在卖的是同名另一种写法），已跳过`
+    + `（${dropped.slice(0, 5).join(', ')}${dropped.length > 5 ? ' …' : ''}）`,
+  );
+  return { ...data, models: kept };
 }
 
 type MonitorCredential = {
@@ -574,11 +692,14 @@ async function fetchSiteMetrics(
     if (outcome.ok) {
       // 价目表是可选的附带信息：拿不到就只显示成功率/延迟，不影响这一轮采集。
       const pricing = await loadSiteModelPricing(site, credential);
+      // 上游监控数据里可能留着已经下线的模型，按站点真清单裁一次再落库，
+      // 免得这些只挂在价目表上的老模型带着过期价格出现在页面上。
+      const data = await dropRetiredModels(site, adapter, credentials, outcome.data);
       return {
-        status: outcome.data.models.length ? 'ok' : 'empty',
+        status: data.models.length ? 'ok' : 'empty',
         message: null,
         credential,
-        data: outcome.data,
+        data,
         pricing,
       };
     }
@@ -1128,10 +1249,24 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
       .groupBy(schema.siteModelMonitorModels.modelName)
       .orderBy(asc(schema.siteModelMonitorModels.modelName))
       .all();
-  const modelOptions = modelOptionRows.map((row) => ({
-    modelName: row.modelName,
-    siteCount: Math.trunc(Number(row.siteCount) || 0),
-  }));
+  // 家族是「按模型名猜出来的」，库里没有这一列，所以取回候选后按同一份规则
+  // 筛，保证下拉里的分类和列表里显示的完全一致。
+  const familyFilter = isModelFamilyId(filter.family) ? filter.family : null;
+  const familyCounts = new Map<ModelFamilyId, number>();
+  for (const row of modelOptionRows) {
+    const family = resolveModelFamily(row.modelName);
+    familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
+  }
+  // 只列出当前范围里真有模型的家族，免得下拉里一半选项点进去是空的。
+  const families: ModelMonitorFamilyOption[] = MODEL_FAMILY_IDS
+    .filter((id) => (familyCounts.get(id) ?? 0) > 0)
+    .map((id) => ({ value: id, label: modelFamilyLabel(id), count: familyCounts.get(id) ?? 0 }));
+  const modelOptions = modelOptionRows
+    .filter((row) => !familyFilter || resolveModelFamily(row.modelName) === familyFilter)
+    .map((row) => ({
+      modelName: row.modelName,
+      siteCount: Math.trunc(Number(row.siteCount) || 0),
+    }));
 
   const siteNameById = new Map<number, { name: string; url: string; platform: string }>();
   const allSites: Array<{ id: number; name: string; url: string; platform: string }> = await db.select({
@@ -1160,7 +1295,11 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     ? await modelQuery.where(and(...conditions)).all()
     : await modelQuery.all();
 
-  const models: ModelMonitorModelView[] = modelRows.map((row) => ({
+  const visibleRows = familyFilter
+    ? modelRows.filter((row) => resolveModelFamily(row.modelName) === familyFilter)
+    : modelRows;
+
+  const models: ModelMonitorModelView[] = visibleRows.map((row) => ({
     siteId: row.siteId,
     siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
     siteUrl: siteNameById.get(row.siteId)?.url || '',
@@ -1181,6 +1320,15 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
   }));
 
   const sortKey = String(filter.sort || 'success').trim();
+  // 默认排序是「绿格多的在前，其次成功率高的在前」：卡片上那排格子是眼睛看到
+  // 的第一印象，只按平均成功率排会出现「一格红、平均 90%」压着「满格绿」的
+  // 情况。绿格口径与页面共用 shared/modelMonitorBars，避免两边漂。
+  const healthySlotCounts = new Map<ModelMonitorModelView, number>();
+  if (sortKey === 'success' || sortKey === '') {
+    for (const model of models) {
+      healthySlotCounts.set(model, countModelMonitorHealthySlots(model.recentSuccess, model.windowStart));
+    }
+  }
   models.sort((left, right) => {
     if (sortKey === 'latency') {
       return (left.avgLatencyMs ?? Number.MAX_SAFE_INTEGER) - (right.avgLatencyMs ?? Number.MAX_SAFE_INTEGER);
@@ -1191,6 +1339,16 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     if (sortKey === 'site') {
       return left.siteName.localeCompare(right.siteName) || left.modelName.localeCompare(right.modelName);
     }
+    if (sortKey === 'price') {
+      // 没标价的排最后：它既不是「免费」也不是「最便宜」，不该混在便宜的那一头。
+      const byInput = (left.inputPrice ?? Number.POSITIVE_INFINITY) - (right.inputPrice ?? Number.POSITIVE_INFINITY);
+      if (byInput !== 0) return byInput;
+      const byOutput = (left.outputPrice ?? Number.POSITIVE_INFINITY) - (right.outputPrice ?? Number.POSITIVE_INFINITY);
+      if (byOutput !== 0) return byOutput;
+      return left.modelName.localeCompare(right.modelName);
+    }
+    const bySlots = (healthySlotCounts.get(right) ?? 0) - (healthySlotCounts.get(left) ?? 0);
+    if (bySlots !== 0) return bySlots;
     return (right.successRate ?? -1) - (left.successRate ?? -1) || left.modelName.localeCompare(right.modelName);
   });
 
@@ -1209,6 +1367,7 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     modelListRefreshHour: config.modelMonitorModelListRefreshHour,
     scheduler: getModelMonitorSchedulerState(),
     modelOptions,
+    families,
     sites: siteRows
       .map((row) => ({
         siteId: row.siteId,

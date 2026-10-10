@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const requestSiteDirectChatMock = vi.hoisted(() => vi.fn());
@@ -97,6 +98,88 @@ describe('model monitor routes', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().models[0].modelName).toBe('gpt-5.5');
+  });
+
+  it('默认排序先看绿格数，再看平均成功率', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    await db.insert(schema.siteModelMonitorModels).values([
+      {
+        siteId: site.id,
+        modelName: 'steady',
+        successRate: 80,
+        avgLatencyMs: 100,
+        avgTps: 10,
+        recentSuccess: JSON.stringify([{ ts: null, rate: 95 }, { ts: null, rate: 96 }]),
+        fetchedAt: '2026-10-04T03:00:00.000Z',
+      },
+      {
+        siteId: site.id,
+        modelName: 'spiky',
+        successRate: 99.9,
+        avgLatencyMs: 100,
+        avgTps: 10,
+        recentSuccess: JSON.stringify([{ ts: null, rate: 100 }]),
+        fetchedAt: '2026-10-04T03:00:00.000Z',
+      },
+    ]).run();
+
+    const body = (await app.inject({ method: 'GET', url: '/api/model-monitor/overview' })).json();
+    // steady 的平均成功率更低，但两颗绿格比 spiky 的一颗多，所以排在前面；
+    // 后面两个一格采样都没有，回到按成功率排（99 > 40）。
+    expect(body.models.map((row: any) => row.modelName)).toEqual(['steady', 'spiky', 'gpt-5.5', 'grok-4.5']);
+  });
+
+  it('支持按输入价从低到高排序，没标价的排最后', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    await db.update(schema.siteModelMonitorModels)
+      .set({ pricingUnit: 'token', inputPrice: 75, outputPrice: 150 })
+      .where(eq(schema.siteModelMonitorModels.modelName, 'gpt-5.5'))
+      .run();
+    await db.insert(schema.siteModelMonitorModels).values({
+      siteId: site.id,
+      modelName: 'cheap-model',
+      successRate: 90,
+      avgLatencyMs: 100,
+      avgTps: 10,
+      pricingUnit: 'token',
+      inputPrice: 0.3,
+      outputPrice: 1.2,
+      fetchedAt: '2026-10-04T03:00:00.000Z',
+    }).run();
+
+    const body = (await app.inject({ method: 'GET', url: '/api/model-monitor/overview?sort=price' })).json();
+    // grok-4.5 没有标价：既不算免费也不算最便宜，压到最后。
+    expect(body.models.map((row: any) => row.modelName)).toEqual(['cheap-model', 'gpt-5.5', 'grok-4.5']);
+    expect(body.models[0]).toMatchObject({ inputPrice: 0.3, outputPrice: 1.2 });
+  });
+
+  it('支持按模型家族筛选：模型候选跟着收窄，家族候选不受自己影响', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    await db.insert(schema.siteModelMonitorModels).values({
+      siteId: site.id,
+      modelName: 'deepseek-v4.1-flash',
+      successRate: 98,
+      avgLatencyMs: 100,
+      avgTps: 10,
+      fetchedAt: '2026-10-04T03:00:00.000Z',
+    }).run();
+
+    const all = (await app.inject({ method: 'GET', url: '/api/model-monitor/overview' })).json();
+    const byValue = new Map(all.families.map((family: any) => [family.value, family]));
+    expect(byValue.get('deepseek')).toMatchObject({ label: 'DeepSeek', count: 1 });
+    expect(byValue.get('openai')).toMatchObject({ label: 'OpenAI', count: 1 });
+    expect(byValue.get('grok')).toMatchObject({ label: 'Grok', count: 1 });
+    expect(byValue.has('mistral')).toBe(false);
+
+    const filtered = (await app.inject({ method: 'GET', url: '/api/model-monitor/overview?family=deepseek' })).json();
+    expect(filtered.models.map((row: any) => row.modelName)).toEqual(['deepseek-v4.1-flash']);
+    expect(filtered.modelOptions.map((row: any) => row.modelName)).toEqual(['deepseek-v4.1-flash']);
+    // 家族下拉要留着别的类别：不然选完就换不回去了。
+    expect(filtered.families).toEqual(all.families);
+
+    // 非法家族名当「不筛」，不用 400 打断页面。
+    const bogus = (await app.inject({ method: 'GET', url: '/api/model-monitor/overview?family=bogus' })).json();
+    expect(bogus.models).toHaveLength(3);
   });
 
   it('returns chat channels for a site+model, validating params', async () => {

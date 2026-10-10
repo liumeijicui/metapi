@@ -7,6 +7,11 @@ import DownstreamKeyCcSwitchModal, { type CcSwitchKeyTarget } from './downstream
 import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
+import {
+  buildModelMonitorSlots,
+  resolveModelRateLevel,
+} from '../../shared/modelMonitorBars.js';
+import type { ModelFamilyId } from '../../shared/modelFamilies.js';
 
 type Sample = { ts: number | null; rate: number };
 
@@ -65,15 +70,16 @@ type Overview = {
     nextRunAt: string | null;
   };
   modelOptions: Array<{ modelName: string; siteCount: number }>;
+  families: Array<{ value: ModelFamilyId; label: string; count: number }>;
   sites: SiteRow[];
   models: ModelRow[];
 };
 
-const SLOT_COUNT = 24;
 const REFRESH_POLL_MS = 30_000;
 
 const SORT_OPTIONS = [
-  { value: 'success', label: '按成功率' },
+  { value: 'success', label: '按稳定度（绿格→成功率）' },
+  { value: 'price', label: '按输入价（低→高）' },
   { value: 'latency', label: '按延迟' },
   { value: 'tps', label: '按吞吐' },
   { value: 'site', label: '按站点' },
@@ -133,33 +139,6 @@ function formatModelPrice(model: ModelRow): string {
   return `${model.pricingUnit === 'call' ? tr('按次计费') : tr('按量计费')} ${parts.join(' ')}`;
 }
 
-function resolveRateLevel(rate: number | null): 'excellent' | 'good' | 'warning' | 'critical' | 'unknown' {
-  if (rate == null || !Number.isFinite(rate)) return 'unknown';
-  if (rate >= 100) return 'excellent';
-  if (rate >= 90) return 'good';
-  if (rate >= 70) return 'warning';
-  return 'critical';
-}
-
-/** 把上游的采样点铺进 24 个整点槽位；上游没给时间轴时按尾部右对齐。 */
-function buildSlots(samples: Sample[], windowStart: number | null): Array<number | null> {
-  const slots: Array<number | null> = Array.from({ length: SLOT_COUNT }, () => null);
-  if (!samples.length) return slots;
-  const allHaveTs = samples.every((sample) => sample.ts != null);
-  if (windowStart != null && allHaveTs) {
-    for (const sample of samples) {
-      const index = Math.floor(((sample.ts as number) - windowStart) / 3600);
-      if (index >= 0 && index < SLOT_COUNT) slots[index] = sample.rate;
-    }
-    return slots;
-  }
-  const tail = samples.slice(-SLOT_COUNT);
-  for (let index = 0; index < tail.length; index += 1) {
-    slots[SLOT_COUNT - tail.length + index] = tail[index].rate;
-  }
-  return slots;
-}
-
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return '—';
   const parsed = new Date(value);
@@ -200,13 +179,13 @@ function siteStatusClass(status: string): string {
 }
 
 function SuccessBars({ samples, windowStart }: { samples: Sample[]; windowStart: number | null }) {
-  const slots = useMemo(() => buildSlots(samples, windowStart), [samples, windowStart]);
+  const slots = useMemo(() => buildModelMonitorSlots(samples, windowStart), [samples, windowStart]);
   return (
     <div className="model-monitor-bars" aria-hidden>
       {slots.map((rate, index) => (
         <span
           key={index}
-          className={`model-monitor-bar is-${resolveRateLevel(rate)}`}
+          className={`model-monitor-bar is-${resolveModelRateLevel(rate)}`}
         />
       ))}
     </div>
@@ -222,6 +201,7 @@ export default function ModelMonitor() {
   const [view, setView] = useState<'cards' | 'table'>('cards');
   const [modelFilter, setModelFilter] = useState('');
   const [siteFilter, setSiteFilter] = useState('');
+  const [familyFilter, setFamilyFilter] = useState('');
   const [minSuccessRate, setMinSuccessRate] = useState('');
   const [sortKey, setSortKey] = useState('success');
   const [showFailures, setShowFailures] = useState(false);
@@ -335,6 +315,7 @@ export default function ModelMonitor() {
       const data = await api.getModelMonitorOverview({
         model: modelFilter || null,
         siteId: siteFilter ? Number(siteFilter) : null,
+        family: familyFilter || null,
         minSuccessRate: minSuccessRate ? Number(minSuccessRate) : null,
         sort: sortKey,
       });
@@ -345,7 +326,7 @@ export default function ModelMonitor() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [modelFilter, siteFilter, minSuccessRate, sortKey, toast]);
+  }, [modelFilter, siteFilter, familyFilter, minSuccessRate, sortKey, toast]);
 
   useEffect(() => {
     void load();
@@ -384,10 +365,11 @@ export default function ModelMonitor() {
 
   // 「重置」按钮只在真的改过筛选时可点，避免一个永远没效果的按钮。
   const monitorFiltersActive =
-    siteFilter !== '' || modelFilter !== '' || minSuccessRate !== '';
+    siteFilter !== '' || modelFilter !== '' || familyFilter !== '' || minSuccessRate !== '';
   const resetMonitorFilters = () => {
     setSiteFilter('');
     setModelFilter('');
+    setFamilyFilter('');
     setMinSuccessRate('');
   };
 
@@ -420,6 +402,8 @@ export default function ModelMonitor() {
   // 成功率，不吃模型），所以选了站点之后这一份就是该站点的模型。用 useMemo
   // 保持引用稳定：下面的「清掉失效选项」要看它。
   const modelOptions = useMemo(() => overview?.modelOptions ?? [], [overview]);
+  // 家族候选也由后端算好（同一份归类规则），这里只负责渲染。
+  const families = useMemo(() => overview?.families ?? [], [overview]);
   // 站点自己就没有这个接口，属于「已知无法采集」，和真正需要关注的失败
   // 分开：默认不占版面，只在需要时展开看一眼。
   const isKnownLimited = (status: string) => status === 'unsupported' || status === 'models_only';
@@ -586,6 +570,29 @@ export default function ModelMonitor() {
             data-testid="model-monitor-model-select"
           />
         </div>
+        {/* 家族排在模型前：类别是把模型候选收窄的一层，先选类别再从更短的
+            清单里挑模型才顺。选项与计数都来自后端，跟站点/成功率保持同一范围。 */}
+        <div className="model-monitor-filter">
+          <ModernSelect
+            value={familyFilter}
+            onChange={setFamilyFilter}
+            options={[
+              { value: '', label: tr('全部模型类型') },
+              ...families.map((family) => ({
+                value: family.value,
+                label: tr(family.label),
+                description: `${family.count} ${tr('个模型')}`,
+              })),
+            ]}
+            size="sm"
+            searchable
+            placeholder={tr('全部模型类型')}
+            searchPlaceholder={tr('搜索模型类型')}
+            emptyLabel={tr('没有匹配的模型类型')}
+            menuMaxHeight={320}
+            data-testid="model-monitor-family-select"
+          />
+        </div>
         <select value={minSuccessRate} onChange={(event) => setMinSuccessRate(event.target.value)}>
           {SUCCESS_FILTERS.map((option) => (
             <option key={option.value} value={option.value}>{tr(option.label)}</option>
@@ -740,7 +747,7 @@ export default function ModelMonitor() {
                   </span>
                 </button>
                 {metricsAvailable ? (
-                  <span className={`model-monitor-rate is-${resolveRateLevel(model.successRate)}`}>
+                  <span className={`model-monitor-rate is-${resolveModelRateLevel(model.successRate)}`}>
                     {formatPercent(model.successRate)}
                   </span>
                 ) : (
@@ -857,7 +864,7 @@ export default function ModelMonitor() {
                       </a>
                     ) : model.siteName}
                   </td>
-                  <td className={metricsAvailable ? `model-monitor-rate is-${resolveRateLevel(model.successRate)}` : ''}>
+                  <td className={metricsAvailable ? `model-monitor-rate is-${resolveModelRateLevel(model.successRate)}` : ''}>
                     {metricsAvailable ? formatPercent(model.successRate) : (
                       <span className="badge badge-info" title={tr('站点没有监控接口，只有模型名')}>{tr('仅模型')}</span>
                     )}

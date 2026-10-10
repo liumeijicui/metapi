@@ -1508,6 +1508,7 @@ export const api = {
     model?: string | null;
     minSuccessRate?: number | null;
     sort?: string | null;
+    family?: string | null;
   }) => {
     const query = new URLSearchParams();
     if (params?.siteId) query.set("siteId", String(params.siteId));
@@ -1516,6 +1517,7 @@ export const api = {
       query.set("minSuccessRate", String(params.minSuccessRate));
     }
     if (params?.sort) query.set("sort", params.sort);
+    if (params?.family) query.set("family", params.family);
     const suffix = query.toString();
     return request(`/api/model-monitor/overview${suffix ? `?${suffix}` : ""}`, {
       timeoutMs: 60_000,

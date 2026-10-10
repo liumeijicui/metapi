@@ -58,7 +58,8 @@ async function recordDirectChatLog(input: {
 
 export function parseModelMonitorSort(value: unknown): string {
   const normalized = String(value || '').trim();
-  return ['success', 'latency', 'tps', 'site'].includes(normalized) ? normalized : 'success';
+  // success = 默认的「绿格 → 成功率」，price = 输入价从低到高。
+  return ['success', 'latency', 'tps', 'site', 'price'].includes(normalized) ? normalized : 'success';
 }
 
 export async function modelMonitorRoutes(app: FastifyInstance) {
@@ -68,6 +69,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model?: string;
       minSuccessRate?: string;
       sort?: string;
+      family?: string;
     };
   }>('/api/model-monitor/overview', async (request) => {
     const siteId = parseOptionalNumber(request.query.siteId);
@@ -76,6 +78,8 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model: String(request.query.model || '').trim() || null,
       minSuccessRate: parseOptionalNumber(request.query.minSuccessRate),
       sort: parseModelMonitorSort(request.query.sort),
+      // 非法家族名一律当「不筛」，不用 400 打断页面。
+      family: String(request.query.family || '').trim() || null,
     });
   });
 

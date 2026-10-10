@@ -234,6 +234,161 @@ describe('modelMonitorService', () => {
       expect(rows.map((row) => row.modelName)).toEqual(['b']);
     });
 
+    it('只落站点真清单里的模型：价目表里的过期同名项不会带着假价格入库', async () => {
+      const site = await seedSite();
+      await seedAccount(site.id);
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        // perf-metrics 里留着已经下线的横线版（0 次调用），价目表上也只有它
+        // 带一个按 ratio 折算的 $75/1M；真正在卖的是点号版 $0.3/1M。
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: true,
+          data: {
+            summary: null,
+            windowStart: null,
+            windowEnd: null,
+            showThroughput: null,
+            models: [
+              model('deepseek-v4.1-flash', { successRate: 98.89 }),
+              model('deepseek-v4-1-flash', { successRate: 0, avgLatencyMs: 2 }),
+            ],
+          },
+        })),
+        getModels: vi.fn(async () => ['deepseek-v4.1-flash']),
+      }));
+      service.__setModelMonitorPricingLoaderForTests(async () => ({
+        models: [
+          {
+            modelName: 'deepseek-v4.1-flash',
+            quotaType: 0,
+            modelDescription: null,
+            tags: [],
+            supportedEndpointTypes: [],
+            ownerBy: null,
+            enableGroups: ['default'],
+            groupPricing: { default: { quotaType: 0, inputPerMillion: 0.3, outputPerMillion: 1.2 } },
+          },
+          {
+            modelName: 'deepseek-v4-1-flash',
+            quotaType: 0,
+            modelDescription: null,
+            tags: [],
+            supportedEndpointTypes: [],
+            ownerBy: null,
+            enableGroups: ['default'],
+            groupPricing: { default: { quotaType: 0, inputPerMillion: 75, outputPerMillion: 75 } },
+          },
+        ],
+        groupRatio: { default: 1 },
+      }));
+
+      await service.runModelMonitorFetch();
+
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(rows.map((row) => row.modelName)).toEqual(['deepseek-v4.1-flash']);
+      expect(rows[0]).toMatchObject({ pricingUnit: 'token', inputPrice: 0.3, outputPrice: 1.2 });
+    });
+
+    it('读真清单优先用 sk- 密钥：账号 JWT 那份会带上已下线的旧写法，拿它当依据等于没裁', async () => {
+      const site = await seedSite();
+      const account = await seedAccount(site.id);
+      await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'default',
+        token: 'sk-live-only',
+        valueStatus: 'ready',
+        enabled: true,
+      }).run();
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: true,
+          data: {
+            summary: null,
+            windowStart: null,
+            windowEnd: null,
+            showThroughput: null,
+            models: [model('deepseek-v4.1-flash'), model('deepseek-v4-1-flash')],
+          },
+        })),
+        // 密钥读回在售清单（只有点号版）；账号 JWT 会把下线的横线版也列出来。
+        getModels: vi.fn(async (_url: string, token: string) => (
+          token === 'sk-live-only'
+            ? ['deepseek-v4.1-flash']
+            : ['deepseek-v4.1-flash', 'deepseek-v4-1-flash']
+        )),
+      }));
+
+      await service.runModelMonitorFetch();
+
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(rows.map((row) => row.modelName)).toEqual(['deepseek-v4.1-flash']);
+    });
+
+    it('真清单里没有对应在售写法时保留原样：密钥限模型不等于站点下架了', async () => {
+      const site = await seedSite();
+      const account = await seedAccount(site.id);
+      await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'default',
+        token: 'sk-limited',
+        valueStatus: 'ready',
+        enabled: true,
+      }).run();
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'new-api',
+        getPerfMetricsSummary: vi.fn(async () => ({
+          ok: true,
+          data: {
+            summary: null,
+            windowStart: null,
+            windowEnd: null,
+            showThroughput: null,
+            models: [model('deepseek-v4.1-flash'), model('kimi-k3'), model('glm-5.3')],
+          },
+        })),
+        // 这把钥匙只被授权了 claude 系，读回来的清单里压根没有 deepseek / kimi。
+        getModels: vi.fn(async () => ['claude-sonnet-5', 'claude-opus-5']),
+      }));
+
+      await service.runModelMonitorFetch();
+
+      const rows = await db.select().from(schema.siteModelMonitorModels).all();
+      expect(rows.map((row) => row.modelName).sort())
+        .toEqual(['deepseek-v4.1-flash', 'glm-5.3', 'kimi-k3']);
+    });
+
+    it('读不到站点真清单时原样保留上游模型，不误删', async () => {
+      const site = await seedSite();
+      await seedAccount(site.id);
+      const summary = () => ({
+        ok: true as const,
+        data: {
+          summary: null,
+          windowStart: null,
+          windowEnd: null,
+          showThroughput: null,
+          models: [model('a'), model('b')],
+        },
+      });
+      // 第一种：读真清单直接失败（被盾拦 / 超时）；第二种：读回来的名字一个都
+      // 对不上（多半是命名口径不同）。两种都不该把已采到的模型清空。
+      for (const getModels of [
+        vi.fn(async () => { throw new Error('过盾失败'); }),
+        vi.fn(async () => ['完全不相干的模型']),
+      ]) {
+        await db.delete(schema.siteModelMonitorModels).run();
+        getAdapterMock.mockImplementation(() => ({
+          platformName: 'new-api',
+          getPerfMetricsSummary: vi.fn(async () => summary()),
+          getModels,
+        }));
+        await service.runModelMonitorFetch();
+        const rows = await db.select().from(schema.siteModelMonitorModels).all();
+        expect(rows.map((row) => row.modelName).sort()).toEqual(['a', 'b']);
+      }
+    });
+
     it('把站点价目表里的输入 / 输出单价一起写进模型行', async () => {
       const site = await seedSite();
       await seedAccount(site.id);
