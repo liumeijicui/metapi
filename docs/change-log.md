@@ -18,11 +18,13 @@
   - 实机最终版（`systemctl restart metapi`，同一个 `session_id` 全程不变）：顺序 1=Lanln 时首次 → ch 2628(Lanln)；把 agentrouter 置顶 → 同一会话下一次请求 **1.0s** → ch 2286(agentrouter)；再发一次仍 ch 2286；把 Lanln 置顶恢复 → 同一会话下一次请求 → ch 2628(Lanln)。即"改完顺序后最晚下一次请求就换过来"，远快于"1 分钟内"的验收口径。
   - 实机（`systemctl restart metapi` 后，同一套受控实验）：同一 `session_id` 首次 → ch 2628(Lanln)；把 agentrouter 置顶 → **同一会话立刻** → ch 2286(agentrouter)；新会话 → ch 2286；把 Lanln 置顶恢复 → 同一会话立刻回到 ch 2628。规则顺序已复原为 `#0 Lanln(启用) → #1 agentrouter(启用)`。
   - 连带问题实测：把粘滞钉住的顺序 1（Lanln 目标 26）停用后，**同一个粘滞会话** 1.4s 就落到顺序 2（ch 2286）并正常返回（修复前同一场景：curl 90s 超时、下游一个字节都没收到、`proxy_logs` 一条记录都没有）；重新启用顺序 1 后同一会话立刻回到 Lanln。
+  - exe 侧复验（Linux 上跑 `dist/server/edge/main.js`，`METAPI_EDGE_MODE=1`、端口 30099、配置源 `http://127.0.0.1:4000`）：为不打扰线上规则，临时建了一条转发规则 `gpt-edge-selftest`（顺序 1=Lanln / 顺序 2=happycoding，两个目标都真实可用），测完即删。同一个 `session_id` 全程不变：按服务器顺序首次 → Lanln；在 exe 本机把顺序 2 置顶 → **同一会话下一次请求** → happycoding；「恢复服务器顺序」→ 同一会话再下一次 → 回到 Lanln。三条结论都取 exe 自己的 `edge-logs.db`（`routeKind` 全为 `forward:`，用日志 id 边界圈定本次请求），证明 exe 与主服务共用同一份派发代码、本机顺序 / 启停同样下一次请求即生效。→ **exe 无需改代码，在 Windows 上重新执行 `npm run dist:desktop:edge` 重新打包即可。**
+  - 勘误：上一轮一度以为「exe 本机置顶后仍走 Lanln」，事后确认是**观测读错了库** —— 脚本读的是主服务 `data/hub.db` 的 `proxy_logs`，而 exe 的日志镜像在数据目录的 `edge-logs.db`（`src/server/edge/logArchive.ts`），读到的是当时线上 Codex 的并发日志。改用 exe 自己的日志库 + id 边界后，上述三条全部符合预期。
 - **主要文件**：`src/server/services/tokenRouter.ts`、`src/server/proxy-core/channelSelection.ts`、`src/server/proxy-core/channelSelection.forwardSticky.test.ts`、`src/server/services/tokenRouter.modelForward.test.ts`、`src/server/proxy-core/surfaces/sharedSurface.test.ts`
 - **副作用**：
   - 转发路由不再享受会话粘滞：顺序一变，**包括老会话在内的所有请求**都立即跟着变（这正是本次需求要的行为）。代价是同一会话可能在换顺序后换到另一条上游通道；对 Codex 这类会在每轮带上完整上下文的客户端实测无影响，但如果某个站点的多轮续写强依赖「同一个上游连接 / `previous_response_id`」，换顺序时那一轮可能重新起上下文。
   - 站点运行时熔断对转发路由**没有影响**（层内单候选，过滤函数直接早退，已实测），所以顺序类操作不需要额外处理熔断：置顶 / 上移 / 下移 / 启停改完，下一次请求就换过来（实机 0s，远快于“1 分钟内”的要求）。
-- **状态**：已完成（未提交，等确认）
+- **状态**：已完成（已提交 `914f805`；主服务与 exe 双侧实机复验通过，exe 无需改代码、重新打包即可）
 
 ### 90. exe 本机的转发顺序 / 启停（以服务器为准）+ 使用日志的「老路由」其实是已删除路由
 
