@@ -21,6 +21,7 @@ import { normalizeCheckinReward, quotaToUsd } from './quota.js';
 import { runMintWheelCheckin } from './mintWheelCheckin.js';
 import { isCloudflareChallengeResponse, refreshCloudflareClearance } from '../cloudflareClearance.js';
 import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
+import { solveImageCaptcha } from './imageCaptcha.js';
 
 /**
  * A refresh cookie yields a short-lived access token. Exchanging it on every
@@ -1310,6 +1311,120 @@ export class NewApiAdapter extends BasePlatformAdapter {
     );
   }
 
+  /**
+   * Whether a check-in verdict means the deployment wants a locally rendered
+   * captcha answered before it will pay out.
+   *
+   * These forks wrap the whole check-in call behind an image the *frontend*
+   * solves, so the first request always comes back refused with wording about a
+   * missing captcha rather than about the account. The refusal is the signal to
+   * drive the two-step captcha flow.
+   */
+  private isCaptchaRequiredCheckinMessage(message: string | null | undefined): boolean {
+    return /验证码|captcha/i.test((message || '').trim());
+  }
+
+  /** Whether a verdict means the captcha answer was rejected, i.e. re-read a fresh one. */
+  private isCaptchaRejectionMessage(message: string | null | undefined): boolean {
+    return /验证码(错误|不正确|已失效|失效|过期)|captcha\s*(is\s*)?(invalid|incorrect|expired|mismatch)/i.test(
+      (message || '').trim(),
+    );
+  }
+
+  /**
+   * Reads the `{ captcha_id, captcha_image }` pair these forks hand out.
+   *
+   * The image arrives as a `data:` URL, so the payload is decoded here rather
+   * than passed around as a string. Returns `null` when the shape is not the one
+   * this flow knows how to drive, which makes the caller report a real reason
+   * instead of posting a garbage answer.
+   */
+  private readCheckinCaptcha(payload: any): { id: string; png: Buffer } | null {
+    const data = payload?.data ?? payload;
+    const id = typeof data?.captcha_id === 'string' ? data.captcha_id.trim() : '';
+    const image = typeof data?.captcha_image === 'string' ? data.captcha_image.trim() : '';
+    if (!id || !image) return null;
+    const base64 = image.startsWith('data:') ? image.slice(image.indexOf(',') + 1) : image;
+    const png = Buffer.from(base64, 'base64');
+    return png.length ? { id, png } : null;
+  }
+
+  /**
+   * Answers the daily check-in captcha.
+   *
+   * Each attempt pulls a *new* captcha, because a rejected answer invalidates the
+   * one it was computed from. A single read is right about three quarters of the
+   * time, so three attempts put the flow above 98%; when every attempt is spent
+   * the caller keeps the site's own wording rather than a generic failure.
+   */
+  private async tryCaptchaCheckin(
+    baseUrl: string,
+    cookie: string,
+    cookieUserId?: number | null,
+    maxAttempts = 3,
+  ): Promise<CheckinResult> {
+    let lastMessage: string | undefined;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const captchaHeaders: Record<string, string> = {
+        Cookie: cookie,
+        'X-Requested-With': 'XMLHttpRequest',
+      };
+      this.appendUserIdCompatibilityHeaders(captchaHeaders, cookieUserId);
+
+      let captcha: { id: string; png: Buffer } | null = null;
+      try {
+        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin/captcha`, {
+          method: 'POST',
+          body: '{}',
+          headers: captchaHeaders,
+        });
+        captcha = this.readCheckinCaptcha(res);
+        if (!captcha) {
+          lastMessage = this.extractResponseMessage(res)
+            || '签到失败：站点未返回签到验证码（该站可能已改版）';
+        }
+      } catch (err) {
+        lastMessage = this.formatRequestErrorMessage(err) ?? undefined;
+      }
+      if (!captcha) break;
+
+      const solved = solveImageCaptcha(captcha.png);
+      if (!solved.answer) {
+        lastMessage = '签到验证码识别失败：未能从图片中分离出完整的 5 个字符';
+        continue;
+      }
+
+      try {
+        const headers: Record<string, string> = {
+          Cookie: cookie,
+          'X-Requested-With': 'XMLHttpRequest',
+        };
+        this.appendUserIdCompatibilityHeaders(headers, cookieUserId);
+        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin`, {
+          method: 'POST',
+          body: JSON.stringify({ captcha_id: captcha.id, captcha_answer: solved.answer }),
+          headers,
+        });
+        if (res?.success) {
+          return {
+            success: true,
+            message: res.message || 'checkin success',
+            reward: this.extractCheckinReward(res),
+          };
+        }
+        const message = this.extractResponseMessage(res);
+        if (message) lastMessage = message;
+        // Any other verdict (already checked in, feature off, ...) is the site's
+        // real answer and will not change by solving another captcha.
+        if (!this.isCaptchaRejectionMessage(message)) break;
+      } catch (err) {
+        lastMessage = this.formatRequestErrorMessage(err) ?? undefined;
+        break;
+      }
+    }
+    return { success: false, message: lastMessage || '签到验证码校验失败' };
+  }
+
   private shouldPreferCheckinFailureMessage(
     currentMessage: string | undefined,
     nextMessage: string | null | undefined,
@@ -2069,6 +2184,21 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     const tryCookieCheckin = async (cookieUserId?: number | null): Promise<CheckinResult | null> => {
+      // A captcha-gated fork refuses the plain call with wording about a missing
+      // captcha rather than about the account. That refusal is the signal to run
+      // the two-step captcha flow against the same session. Returns the successful
+      // result, or `null` so the caller keeps walking its own fallbacks.
+      const tryCaptchaIfDemanded = async (
+        message: string | null | undefined,
+        cookie: string,
+      ): Promise<CheckinResult | null> => {
+        if (!this.isCaptchaRequiredCheckinMessage(message)) return null;
+        const captchaResult = await this.tryCaptchaCheckin(baseUrl, cookie, cookieUserId);
+        if (captchaResult.success) return captchaResult;
+        rememberFailure(captchaResult.message);
+        return null;
+      };
+
       for (const cookie of this.buildCookieCandidates(accessToken)) {
         try {
           const headers: Record<string, string> = {
@@ -2144,9 +2274,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
             }
             const cookieMessage = this.extractResponseMessage(res);
             rememberFailure(cookieMessage);
+            const captchaResult = await tryCaptchaIfDemanded(cookieMessage, cookie);
+            if (captchaResult) return captchaResult;
           } catch (err) {
             const parsed = this.formatRequestErrorMessage(err);
             rememberFailure(parsed);
+            const captchaResult = await tryCaptchaIfDemanded(parsed, cookie);
+            if (captchaResult) return captchaResult;
           }
         }
       }

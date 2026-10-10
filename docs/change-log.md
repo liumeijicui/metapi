@@ -1,3 +1,36 @@
+### 93. 「简直了」签到图片验证码：自研识别 + 接入 `checkin()`（并修正 #92 的“签到已不存在”结论）
+
+- **类型**：缺陷修复（签到能力）+ 站点能力回收
+- **需求来源**：本会话需求（“这个站有签到，是简单的图片验证码，看github或者网上有没有其他方式能读取验证码” → “不要自己解析图片啊，来看有没有免费的接口，你截图发他，然后获取验证码” → 调研后授权“你只要能实现就好，你自行决定用什么方案吧”）
+- **先纠一条旧结论**：#92 记的「签到已搬到游乐中心 / `.budele` 关停，本站没有可签到入口」是**错的**。带上会话 Cookie 与 `new-api-user` 头实测，`POST /api/user/checkin` 正常返回 `{"success":true,"message":"签到成功","data":{"quota_awarded":5000000}}`（当日 500 万 quota）。#92 当时应该是缺 `new-api-user`（站点回 401 而不是 403，看起来像“没这个功能”）。`/budele/` 与签到无关。
+- **签到协议（从前端 JS 逆向 + 实测确认）**：
+  1. `POST /api/user/checkin/captcha`，头需 `cookie: session=<…>` + `new-api-user: <platformUserId>` + 同源 `origin`/`referer`，body `{}` → `{ data: { captcha_id, captcha_image(data:image/png;base64,…) } }`。缺 `new-api-user` 回 401；GET 回 404；`captcha_id` 不可反解（32 位随机）。
+  2. `POST /api/user/checkin`，body `{ captcha_id, captcha_answer }`。答错回 `验证码错误，请重试`；复用旧 id 回 `验证码已失效`；不带字段回 `请输入验证码`。**答错时即使今天已签到也照样回“验证码错误”**（已实测），所以“今日已签到”可以反证验证码被接受。
+- **免费第三方打码/OCR 实测（结论：都不可用，因此最终自研）**：
+  - `ocr.space`（`apikey=helloworld`）：Engine3 能用，但免费档 **5 次/小时/整机**，第 5 张就被 `E553: Rate limit exceeded` 挡住；前 4 张 3 对 1 错，样本无意义。Engine1/2 对这套点阵字体基本读不出。
+  - `bhshare.cn`：需关注微信公众号领 token，无法自动化。
+  - `apihz.cn`：公共测试 id/key 已被禁用（要求换成自己的 id/key）。
+  - `NopeCHA`：无 key 直连返回 `{"error":12,"message":"Banned IP"}`（机房 IP 被禁）。
+  - `vitphp.cn` / `lolimi.cn` / `oioweb.cn` / `pearktrue.cn`：域名已解析不到（DNS 空），服务下线。
+  - 结论：免费档要么按整机小时限流（我们的定时任务一次就要多张）、要么拒绝机房 IP、要么已停服。加上站点凭据要外发给第三方，最终**决定自研**。
+- **自研方案（已落地）**：
+  - **关键观察**：这批验证码是 160×58 RGBA PNG，但**只有 8 种颜色**——背景 `#F8FAFC`、两种半透明噪色（`8ea4c5b4` / `aac5ed96`，像素数远大于字符），以及 5 个**不透明**字符色 **`#111827` 黑 / `#1D4ED8` 蓝 / `#047857` 绿 / `#B45309` 橙 / `#BE123C` 红**。字符色与噪色（含 alpha）互不重叠，所以按颜色取精确相等即可**无阈值、无去噪地把 5 个字形切出来**；且**颜色=位置**（黑=第 1 位 … 红=第 5 位），不存在切分歧义。
+  - 字形是点阵字体，跨色带位图一致，仅有 1–2px 抖动、少量掉点。识别用**1-最近邻（同字符取最小距离）**，每个字形在 ±2px 横向、±1px 纵向共 15 个偏移上比较，距离为 XOR 位计数。
+  - 新增 `src/server/services/platforms/imageCaptcha.ts`：内置 PNG 解码（自己实现 `inflate` 之后的 Sub/Up/Average/Paeth 反滤波，**不依赖 `sharp`**——本机 `sharp`/`onnxruntime-node` 因 `GLIBCXX_3.4.20` 缺失加载不了）、字形提取、求解器，以及 105 条内置标注字形表。求解器不联系任何第三方，账号会话不出本机。
+  - **精度（21 张人工标注样本，留一法）**：单字 **95.2%**、整串 **76.2%**。按每次重取新验证码算，3 次尝试的整串成功率约 **98.6%**。
+- **接入 `checkin()`**：`src/server/services/platforms/newApi.ts` 的 Cookie 分支里，当 `/api/user/checkin`（或该次请求抛错）的判词命中「验证码 / captcha」时，转入新增的 `tryCaptchaCheckin()`：取新验证码 → 识别 → 提交，**每次重试都重取新验证码**（被拒的答案会让原验证码失效）；最多 3 次；非验证码类判词（今日已签到 / 功能未启用 / 404）立即停下并保留站点原文，不刷无意义的重试。站点未提供验证码接口时报「站点未返回签到验证码（该站可能已改版）」而不是笼统失败。
+  - 只挂在 Cookie（session）分支：验证码接口要求 `session` 会话，Bearer 凭据打不通这条链路。
+- **验证**：
+  - 单测：新增 `imageCaptcha.test.ts` 6 例（语料自检、每张图必须切出 5 个字形、**留一法**单字 ≥90% 且整串 ≥70%、内置表整串 ≥95%、非 PNG 必须回 `null` 而不是瞎猜、每字要给出距离/裕度）。新增 `newApi.captchaCheckin.test.ts` 4 例（用真实语料起假站点：①站点索要验证码时求解并拿到奖励，且带上了 `new-api-user`；②答案被拒后**确实重取了一张新验证码**并换新 `captcha_id`；③验证码接口缺失时报站点原文；④普通签到成功时**完全不碰**验证码接口）。
+  - 真实端到端（真站真会话）：直连两次会话外的裸脚本先跑通「识别 → 提交 → `quota_awarded: 5000000`」；再把 `tryCaptchaCheckin` 通过真实 `NewApiAdapter` 连打 3 轮，3/3 拿到「今日已签到」——由于答错时站点仍回“验证码错误”，这 3 次“今日已签到”**反证 3 次识别都被接受**。
+  - 门禁：`npx tsc --noEmit -p tsconfig.server.json` 通过；`npm run repo:drift-check` 违规 0（沿用既有 5 条跟踪债务）；`src/server/services/platforms` 全量 21 文件 258 例通过。
+- **主要文件**：`src/server/services/platforms/imageCaptcha.ts`、`src/server/services/platforms/imageCaptcha.test.ts`、`src/server/services/platforms/newApi.captchaCheckin.test.ts`、`src/server/services/platforms/__fixtures__/captcha-jianzhile/`（21 张标注图 + `answers.json`）、`src/server/services/platforms/newApi.ts`
+- **副作用 / 注意**：
+  - 内置字形表是**站点字体快照**。站点换字体后识别会退化——但不会误签到，只会多耗几次重试并最终如实报「验证码校验失败」，此时按 `imageCaptcha.ts` 顶部说明重新采标即可。
+  - 账号 `#48`（简直了，站点 `#62`）的 `checkinEnabled` 已置回 `true`。
+  - 站点 `#62` 本次未开系统代理（直连可达）。
+- **状态**：已完成
+
 ### 92. 登记「简直了」（jianzhile.vip）+ 修掉「站点首页的 Linux.do 社区链接被当成登录入口」
 
 - **类型**：缺陷修复（托管登录入口匹配）+ 站点登记
@@ -5,7 +38,8 @@
 - **站点事实（实测）**：
   - `GET /api/status` → `system_name = 简直了`、`version = local-0.0.29`（自建 new-api 分支）；`linuxdo_oauth: true`（`linuxdo_client_id = Kdj5AG4NctsGzSzjm4ygOLax1O7a5Shj`，最低信任等级 1）、`github_oauth: true`、`turnstile_check: false`；**直连可用**（无 CF 盾），站点未开系统代理。
   - 真正的登录页是 `/login`（`/sign-in` 是 404，页面直接写「Page not found」），页面上是 `Continue with GitHub` / `Continue with LinuxDO` 两个 `<button>`，说明是 **local-0.0.29 的简体定制构建**。
-  - **签到在本站已不存在**：`/api/user/checkin` 回 `daily check-in has moved to the play club`；站点新增了 `/budele/`（不得了游乐中心），`GET /api/budele/status` 里 `club.enabled: false`，`activities.checkin / lottery / poker / ddz / zjh` 全是 `state: club_disabled, available: false`。即签到与转盘一起搬进了游乐中心，而游乐中心目前**被站方关停**，所以账号的 `checkinEnabled` 置为 `false`（不是我们登不上去，是站点侧没有可签到的入口）。
+  - ⚠️ **本节这条结论已被 #93 推翻，请看 #93**：之前判定「签到在本站已不存在」，实际是探测时漏了 `new-api-user` 头导致 401。签到存在，且后面挂着一层图片验证码。以下原文保留作记录。
+  - ~~**签到在本站已不存在**~~：`/api/user/checkin` 回 `daily check-in has moved to the play club`；站点新增了 `/budele/`（不得了游乐中心），`GET /api/budele/status` 里 `club.enabled: false`，`activities.checkin / lottery / poker / ddz / zjh` 全是 `state: club_disabled, available: false`。即签到与转盘一起搬进了游乐中心，而游乐中心目前**被站方关停**，所以账号的 `checkinEnabled` 置为 `false`（不是我们登不上去，是站点侧没有可签到的入口）。
 - **登记过程的真问题（本次修复的对象）**：站点首页把社区帖子的**裸链接**直接印在页面上，锚点文本就是 URL 本身 —— `https://linux.do/t/topic/2527847/2117`、`https://linux.do/t/topic/2527847/3353`。于是托管登录在首页找入口时，`provider.entryNamePattern`（`/linux\s*\.?\s*do|linuxdo/i`）和 `entrySelectors`（`[href*="linux.do"]`）**同时命中这两个社区链接**，点击后跳到 Linux.do 话题页；`finishCapture` 看到落点是 provider 域但不是 authorize 页，就报成 `provider.messages.needsLogin`（“请在弹出的浏览器窗口中完成 Linux.do 登录”）——而浏览器里的 Linux.do 会话其实一直是好的（实测 `linux.do/session/current.json` 返回 `id 367936 / 3145215575`）。这是**入口点错**，不是会话过期。
 - **改动（新增 1 个模块 + 3 处接线）**：
   1. 新增 `src/server/services/assistedLogin/entryMatch.ts`：把入口定位从 `sessionService` 里抽出来（`buildEntryLocator` + `buildEntryAnchorDenySelector`）。provider 可声明 `entryAnchorDenyHrefSubstrings`，命中这些 href 的锚点会被过滤掉；过滤用 `*:not([href*="…"])` 与每个候选做 `Locator.and()` 相交，所以 `button` 这类没有 href 的候选完全不受影响。没声明该字段的 provider 直接跳过相交，行为与改动前逐字节一致。
