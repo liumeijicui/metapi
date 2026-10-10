@@ -3,6 +3,11 @@ import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { matchesModelPattern } from './tokenRouter.js';
 import { getAdapter } from './platforms/index.js';
+import {
+  fetchLanlnModelStatus,
+  isLanlnModelStatusSite,
+  mergeModelStatusMetrics,
+} from './platforms/lanlnModelStatus.js';
 import { isReadyAccountToken } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog, type ModelPricingCatalogInput } from './modelPricingService.js';
@@ -645,6 +650,52 @@ async function fetchModelListOnly(
 }
 
 async function fetchSiteMetrics(
+  site: SiteRow,
+  preferredKind: string | null,
+  preferredId: number | null,
+): Promise<SiteMetricsFetchResult> {
+  const result = await fetchSiteMetricsFromAdapter(site, preferredKind, preferredId);
+  return applySiteModelStatusOverride(site, result);
+}
+
+/**
+ * 站点专用分支：new-api 通用通道读 `/api/perf-metrics`，有些站点（Lanln）的版本
+ * 里没有这个接口，只能降级成「仅模型列表」，但同一个站点自己把动态数据做成了公开
+ * 的模型状态页。这里在通用通道之后补一次，把指标按模型名叠加到模型列表上。
+ *
+ * 下一个同类站点加在这里：`isXxxSite(site.url)` 认地址、再叠加自己的读数。
+ */
+async function applySiteModelStatusOverride(
+  site: SiteRow,
+  result: SiteMetricsFetchResult,
+): Promise<SiteMetricsFetchResult> {
+  if (!isLanlnModelStatusSite(site.url)) return result;
+  // 通用通道这一轮已经读到指标、或者压根没拿到模型列表（没有可叠加的对象）时
+  // 不再多打一次上游。
+  if (result.status === 'ok' || !result.data) return result;
+
+  const metrics = await fetchLanlnModelStatus(site.url);
+  if (metrics.ok) {
+    const merged = mergeModelStatusMetrics(result.data, metrics.data);
+    if (merged) {
+      return {
+        ...result,
+        status: result.status === 'models_only' ? 'ok' : result.status,
+        // 指标到手了，页面上就不再写「站点没有模型监控接口」。
+        message: result.status === 'models_only' ? null : result.message,
+        data: merged,
+      };
+    }
+    return result;
+  }
+
+  // 状态页也读不到时把真实原因带上：原来的文案说的是「站点没有这个接口」，而
+  // 实情是「接口在，这一次没读到」，两者对排查的意义完全不同。
+  const reason = `模型状态页读取失败：${metrics.message}`;
+  return { ...result, message: result.message ? `${result.message}；${reason}` : reason };
+}
+
+async function fetchSiteMetricsFromAdapter(
   site: SiteRow,
   preferredKind: string | null,
   preferredId: number | null,

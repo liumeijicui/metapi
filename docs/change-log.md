@@ -1,3 +1,32 @@
+### 88. Lanln 站的模型动态指标：单独一条「模型状态页」采集分支（顺带修掉采样点时间单位）
+
+- **类型**：功能新增（模型监控采集）+ 缺陷修复（采样点单位）
+- **需求来源**：本会话需求（“lanln 站的模型动态数据，可以通过这个页面填充，帮我写个分支代码，后续通过这个填充吧：https://ai.venlacy.com/model-status、https://ai.venlacy.com/pricing”）
+- **背景**：`Lanln`（站点 #45，`https://ai.venlacy.com`）在模型监控里一直是 `models_only`：28 个模型名和价格（`/api/pricing` 的 ratio × group_ratio 2.8，已核对 `claude-opus-4-6` = $14/$70 等）都在，但成功率 / 延迟 / 吞吐一律是「—」，页面提示「站点没有模型监控接口」。站点自己的 `/model-status` 页面其实把动态数据全展示了，`/pricing` 那份价格我们也已经拿到。
+- **根因**：
+  1. 这个站点是 new-api 但是版本里没有 `/api/perf-metrics`（实测 `GET /api/perf-metrics/summary?hours=24` → **404**），通用分支的判定没错，只是**没有第二次尝试**：站点的动态数据挂在自己加的模型状态页上（前端 bundle 里是 `/console/enhancements?tab=model-status`），它把数据做成了公开嵌入接口。
+  2. 顺带发现采样点的**时间单位对不上页面口径**：`PerfMetricsSample.ts` / `windowStart` / `windowEnd` 的契约是**秒**（`shared/modelMonitorBars` 用 `floor((ts - windowStart) / 3600)` 定位格子，其它站点（new-api 的 perf-metrics）也全是秒），而 agentrouter 那条分支从上线起一直写的是**毫秒**。毫秒不会报错，只会让 `24` 个格子只剩第 `1` 格对得上（实测线上 `deepseek-v4-flash` 的 72 粒心跳全是 `warn`，本该满格，页面上只有 1 格）。
+- **改动**：
+  1. 新增 `src/server/services/platforms/lanlnModelStatus.ts`（单站分支，和 `mintWheelCheckin.ts` 一样按站点独立成文件）：
+     - `isLanlnModelStatusSite(url)` 按主机名 `ai.venlacy.com`（含子域）认站点 —— 它在其它所有方面都还是标准 new-api，不动平台识别链路；
+     - `fetchLanlnModelStatus(baseUrl)` 读 `GET /api/enhancements/model-status/embed/status/all`。这个接口**不需要凭据**（`embed/config` 里 `public_embed_enabled: true`），所以这条采集不占账号、也不受令牌过期影响；失败时把「站点没这个接口（404）」和「这次没读到（HTTP 5xx / 超时 / 解析失败）」分开；
+     - `parseLanlnModelStatusPayload()` 归一化：`recent_avg_first_response_time`（站点文案「近期平均首字延迟」，毫秒）→ 延迟列、`recent_avg_output_token_speed` → 吞吐列，所以 `showThroughput: true`（这一列有真数，不拿 0 占位）。`avg_use_time`（整段耗时，秒）**不入表**：页面「延迟」列的口径是首字延迟，混两种口径会让同一个格子前后不可比；
+     - `buildModelStatusSlotSamples()` 把 48 个 30 分钟格子折成 24 个整点格子：**跳过没有请求的格子**（站点对空格子照报 `success_rate: 100`，直接采信等于给页面刷满假绿格），同一整点内按请求数加权平均（站点给了分子分母），时间戳按**秒**；
+     - 同一模型的多个分组只取请求数最多的那一行（分组之间的格子时间轴重叠，相加会把请求数算成双份）；
+     - `mergeModelStatusMetrics()` 按模型名（先精确、再「抹掉 `-` `.` `_`」宽松匹配）把指标叠加到模型列表上：**只覆盖、不新增** —— `/v1/models` 才是在卖什么的依据，状态页只报最近 24 小时有过流量的模型，没被报到的保留原样（页面显示「—」）。
+  2. `src/server/services/modelMonitorService.ts`：原来的 `fetchSiteMetrics()` 改名 `fetchSiteMetricsFromAdapter()`，外面套一层 `fetchSiteMetrics()` → `applySiteModelStatusOverride()`。命中站点的模型列表已经拿到、且通用分支没读到指标时，调一次状态页把指标叠加上去，`models_only` → `ok`、清掉「站点没有模型监控接口」那句文案；状态页也读不到时把**真实原因**接到原句后面（「接口在，这一次没读到」与「站点没这个接口」对排查的意义完全不同）。下一个同类站点加在这一个函数里。
+  3. `src/server/services/platforms/agentRouter.ts`：`buildModelStatusHeartbeatSamples()` 与 `windowEnd` 的整点折算改成按秒（`SECONDS_PER_HOUR`），替掉 `MS_PER_HOUR`；两处都补上「单位口径」注释，免得再写回毫秒。
+- **验证**：
+  - 单测：新增 `lanlnModelStatus.test.ts` 17 例（主机名认站、半小时折整点按请求数加权、空格子不产假绿格、成功率缺失时按成功数折算、窗口对齐到整点且最新一格落在第 24 格内、站点级成功率按请求数加权而非各模型算术平均、多分组取最忙那行、`null`/空数据不解析、叠加时保留未报到模型、容忍 `-` `.` `_` 写法差异、一个都没对上时返回 null、读接口的 200/404/502/网络异常四种结果、**采样点落在页面 24 个整点格子里**）；`agentRouter.modelStatus.test.ts` 的时间戳期望改为秒并新增 1 例「采样点落在 24 个整点格子内（毫秒口径会让格子全空）」；`platforms/` 目录 21 文件 286 例 + `modelMonitorService` / `routes/api/modelMonitor` 全绿。
+  - 门禁：`npx tsc -p tsconfig.server.json --noEmit` 通过；`npm run repo:drift-check` 0 违规（登记债务仍 5 条）；`npm run build:server` 通过。
+  - 全量回归：`src/server` 364 文件 2809 通过、3 失败 —— 逐个复跑确认仍是既有的 3 个环境性失败（`siteProxy` / `factoryResetService` / `db.index.default-path`），与本次改动无关。
+  - 实机（`systemctl restart metapi` 后 `POST /api/model-monitor/refresh`）：
+    - Lanln：状态由 `models_only` 变 `ok`、`message: null`；站级 `successRate 100 / avgLatency 8863ms / avgTps 669.4`；6 个近期有流量的模型（`gpt-5.5` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-6-astra` / `gpt-6-sol` / `gpt-6.1-sol`）拿到成功率 / 首字延迟 / 吞吐与 **6–16 个**整点格子，其余 22 个模型保持原来的价格、指标留空显示「—」。第一版误用毫秒时这些模型的格子数是 `0`（页面全空），改秒后同一份数据变成 6–16 格。
+    - agentrouter：`recentSuccess` 的时间戳由 `1791511200000` 变 `1791511200`，`deepseek-v4-flash` 的绿格由 **1/24** 变 **24/24**（它的 72 粒心跳全是 `warn`，本来就该满格）；另外三个模型由「全塌在第 0 格」变成落在各自真实的整点上（现网数据里它们只有 2 个小时有调用）。
+- **副作用**：
+  - 该站从「每天只刷一次模型列表」变成**每 15 分钟全量采集**（状态页是动态数据，必须勤刷）；状态页没报到的模型在页面上「延迟 / 吞吐」列显示「—」，与其它 `ok` 站点一致。
+  - agentrouter 的格子会**多出来**（1 格 → 最多 24 格）：这不是新采到的数据，是同一批采样点终于落在正确的格子里。
+
 ### 87. Responses 回放历史时清洗 reasoning 项与重复工具项：gpt-6-astra 不再报 `input[n].content array too long`
 
 - **类型**：缺陷修复（Responses 入参兼容）
