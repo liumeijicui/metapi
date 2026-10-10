@@ -241,5 +241,87 @@ describe('模型转发路由优先级', () => {
     expect(selected?.channel.id).toBe(forwardChannelId);
     expect(selected?.tokenValue).toBe('sk-forward');
   });
-});
 
+  it('站点运行时熔断中，转发路由仍走顺序 1；非转发路由照旧避让', async () => {
+    // 第二个站点，充当「顺序 2」
+    const siteB = await db.insert(schema.sites).values({
+      name: '转发测试站B',
+      url: 'https://forward-route-b.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: siteB.id,
+      username: 'forward-user-b',
+      accessToken: 'access-forward-b',
+      apiToken: 'sk-forward-b',
+      status: 'active',
+    }).returning().get();
+    const tokenB = await db.insert(schema.accountTokens).values({
+      accountId: accountB.id,
+      name: 'default',
+      token: 'token-forward-b',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    // 对照用的非转发路由：同样横跨两个站点，用来证明熔断这次确实开了
+    const legacyRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'forward-breaker-legacy',
+      modelMapping: JSON.stringify({ 'forward-breaker-legacy': 'legacy-breaker-model' }),
+      enabled: true,
+    }).returning().get();
+    const legacyChannelA = await db.insert(schema.routeChannels).values({
+      routeId: legacyRoute.id,
+      accountId,
+      tokenId,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const legacyChannelB = await db.insert(schema.routeChannels).values({
+      routeId: legacyRoute.id,
+      accountId: accountB.id,
+      tokenId: tokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'forward-breaker',
+      targets: [
+        { siteId, accountId, upstreamModel: 'breaker-upstream-1' },
+        { siteId: siteB.id, accountId: accountB.id, upstreamModel: 'breaker-upstream-2' },
+      ],
+    });
+    const firstChannelId = rule.targets[0].channelId as number;
+    const secondChannelId = rule.targets[1].channelId as number;
+    expect(firstChannelId).not.toBe(secondChannelId);
+    invalidateTokenRouterCache();
+
+    // 站点 A 连续 3 次瞬时失败 → 开站点级运行时熔断（60s 档）
+    const router = new TokenRouter();
+    for (let index = 0; index < 3; index += 1) {
+      await router.recordFailure(legacyChannelA.id, {
+        status: 502,
+        errorText: 'Gateway timeout',
+      });
+    }
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, legacyChannelA.id)).run();
+    invalidateTokenRouterCache();
+
+    // 先证明熔断真的开了：非转发路由避让站点 A，落到站点 B。
+    const legacySelected = await router.selectChannel('forward-breaker-legacy');
+    expect(legacySelected?.channel.id).toBe(legacyChannelB.id);
+
+    // 转发路由只认顺序与启用状态：熔断窗口内照样走顺序 1（站点 A）。
+    const selected = await router.selectChannel('forward-breaker');
+    expect(selected?.channel.id).toBe(firstChannelId);
+  });
+});

@@ -123,6 +123,8 @@ export async function selectProxyChannelForAttempt(input: {
         preferredChannelId,
         input.downstreamPolicy,
         input.excludeChannelIds,
+        // 手工排过顺序的「模型转发」路由：粘滞会让顺序变更对老会话失效，必须忽略。
+        { ignoreOnManualForwardRoute: true },
       );
       if (!selected) {
         const refreshSucceeded = await refreshRoutesForFirstAttempt();
@@ -131,6 +133,7 @@ export async function selectProxyChannelForAttempt(input: {
           preferredChannelId,
           input.downstreamPolicy,
           input.excludeChannelIds,
+          { ignoreOnManualForwardRoute: true },
         );
         if (!selected && refreshSucceeded) {
           proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);

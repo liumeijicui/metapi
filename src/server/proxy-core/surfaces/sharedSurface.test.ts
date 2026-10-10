@@ -210,6 +210,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       55,
       EMPTY_DOWNSTREAM_ROUTING_POLICY,
       [],
+      { ignoreOnManualForwardRoute: true },
     );
     expect(selectChannelMock).not.toHaveBeenCalled();
     expect(clearStickyChannelMock).not.toHaveBeenCalled();

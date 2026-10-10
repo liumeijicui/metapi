@@ -1959,6 +1959,7 @@ export class TokenRouter {
     preferredChannelId: number,
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
     excludeChannelIds: number[] = [],
+    options: { ignoreOnManualForwardRoute?: boolean } = {},
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     const normalizedPreferredChannelId = Math.trunc(preferredChannelId || 0);
@@ -1967,6 +1968,14 @@ export class TokenRouter {
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
+    // 人工排的转发顺序不能被会话粘滞改道。
+    //
+    // 粘滞会把某个下游会话钉在它上次成功的那条通道上（默认 30 分钟），于是用户改完
+    // 顺序（置顶 / 上移 / 下移）后，老会话仍然打到原来那条通道，看起来就是「顺序没生
+    // 效」。转发路由的顺序已经给出唯一答案，粘滞在这里只有副作用，直接按顺序选。
+    if (options.ignoreOnManualForwardRoute && isManualForwardRoute(match.route)) {
+      return await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds);
+    }
     return await this.selectPreferredFromMatch(
       match,
       requestedModel,

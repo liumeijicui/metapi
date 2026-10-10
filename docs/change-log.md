@@ -1,3 +1,29 @@
+### 91. 模型转发「改完顺序老会话不换源」：粘滞会话语义被人工顺序覆盖
+
+- **类型**：缺陷修复（模型转发派发口径）
+- **需求来源**：本会话需求（“顺序1 Lanln / gpt-6.1-sol 启用中，顺序2 agentrouter / deepseek-v4-flash 启用中，明明是这个顺序，但是依旧调用的是 agentrouter……我的置顶、上移、下移 并没有实时改变调用方，不知道是缓存没刷新还是什么其他原因”）
+- **结论（先回答“是不是缓存没刷新”）**：**不是缓存**。顺序本身是立即生效的 —— `syncModelForwardRule()` 每次改完都会重排 `route_channels.priority` 并 `invalidateTokenRouterCache()`，非粘滞选路（例如路由决策页的决策解释、新会话的首次请求）当时就已经正确选到顺序 1 的 Lanln。真正把请求固定到顺序 2 的是**下游会话粘滞**（唯一原因，已实测确认；一度怀疑的“站点运行时熔断避让”经代码与实测排除，见下）。
+- **复现与定位（实机，`/home/app/metapi` 主服务）**：`gpt-6-astra` 规则顺序 1 = Lanln(ch 2628) / 顺序 2 = agentrouter(ch 2286)，两条都启用。
+  - 受控实验（修复前）：同一 `session_id` 首次请求落到 ch 2628；把 agentrouter 置顶后，**同一个 session_id** 再请求仍然落 ch 2628；换成新 `session_id` 则立刻落到 ch 2286。→ 顺序生效，被粘滞挡住的是老会话。
+  - 时间线佐证：那批 12 条 `gpt-6-astra` 日志（07:20–07:22）全部来自同一个 Codex 会话、且全部落 agentrouter；同一时刻新会话发同一模型就已经按顺序走 Lanln。
+- **根因（单一）**：**会话粘滞（sticky session）**。`proxyChannelCoordinator.bindStickyChannel()` 会把某个下游会话钉在它上次成功的那条通道上（`PROXY_STICKY_SESSION_TTL_MS` 默认 30 分钟，且**每次成功都续期**）。`selectProxyChannelForAttempt()` 在 `retryCount === 0` 时优先走 `tokenRouter.selectPreferredChannel(粘滞通道)`，于是**改完顺序对已存在的会话要等 TTL 过期才生效**，而持续使用的会话永远不会过期——看起来就是“改顺序没用”。
+- **排除项：站点运行时熔断避让（实测空转，未改）**：一度怀疑 `filterSiteRuntimeBrokenCandidatesByModel()` 在转发路由上跳过了顺序 1，为此写了“熔断中仍走顺序 1”的对照用例并**故意临时还原修复**验证——两种实现下用例都通过。原因是它按「优先级层」过滤，且对 `candidates.length <= 1` 直接原样返回；而转发路由是 `routingStrategy: 'weighted'`（`modelForwardService.ensureForwardRoute()` 固定写死），每个转发目标独占一个优先级层、层内只有 1 条通道，所以这层过滤对转发路由**根本不生效**。据此把先前试探性加的“转发跳过熔断过滤”改动整个撤掉了，不留无用代码。该用例保留下来当不变量（`tokenRouter.modelForward.test.ts`：先用非转发路由证明熔断确实开了，再断言转发路由仍走顺序 1）。
+- **改动（2 个文件，12 行）**：
+  1. `src/server/services/tokenRouter.ts:1957`：`selectPreferredChannel()` 新增第 5 个可选参数 `options: { ignoreOnManualForwardRoute?: boolean }`；命中人工转发的 `forward:` 路由时**直接按顺序选**（走 `selectFromMatch`），不再认粘滞通道。放在这里而不是 `channelSelection`，是为了不动「固定通道 / 模型测试」那条同样调用 `selectPreferredChannel` 的语义。
+  2. `src/server/proxy-core/channelSelection.ts:122`：粘滞分支的两次 `selectPreferredChannel()` 调用都传入 `{ ignoreOnManualForwardRoute: true }`。顺带修掉一个连带问题：粘滞钉住的通道事后被停用 / 删掉时，原来会走「粘滞未命中 → 全量刷新模型重建路由」那条重路径（串行探测所有 active 账号，实测可让请求挂 60s+ 且一条日志都不留）；现在转发路由按顺序拿到通道就返回，不再踩这条路径。
+- **验证**：
+  - 单测：新增 `src/server/proxy-core/channelSelection.forwardSticky.test.ts` 2 例 —— ①转发路由下把粘滞钉在顺序 2、请求仍必须选顺序 1，且把顺序 2 置顶后**同一个粘滞会话**立刻跟到顺序 2；②对照例确认普通（非转发）路由的粘滞完全不受影响。`tokenRouter.modelForward.test.ts` 加 1 例不变量（站点熔断中转发仍走顺序 1）。`sharedSurface.test.ts` 的粘滞断言补上新参数（23 例）。
+  - 门禁：`tsc --noEmit -p tsconfig.server.json` 通过；`npm run build:server` 通过。
+  - 回归：`src/server/proxy-core` + `src/server/services` + `src/server/routes/proxy` 共 204 文件 1765 通过 / 2 失败（`siteProxy` / `factoryResetService`，均为既有环境性失败）。
+  - 实机最终版（`systemctl restart metapi`，同一个 `session_id` 全程不变）：顺序 1=Lanln 时首次 → ch 2628(Lanln)；把 agentrouter 置顶 → 同一会话下一次请求 **1.0s** → ch 2286(agentrouter)；再发一次仍 ch 2286；把 Lanln 置顶恢复 → 同一会话下一次请求 → ch 2628(Lanln)。即"改完顺序后最晚下一次请求就换过来"，远快于"1 分钟内"的验收口径。
+  - 实机（`systemctl restart metapi` 后，同一套受控实验）：同一 `session_id` 首次 → ch 2628(Lanln)；把 agentrouter 置顶 → **同一会话立刻** → ch 2286(agentrouter)；新会话 → ch 2286；把 Lanln 置顶恢复 → 同一会话立刻回到 ch 2628。规则顺序已复原为 `#0 Lanln(启用) → #1 agentrouter(启用)`。
+  - 连带问题实测：把粘滞钉住的顺序 1（Lanln 目标 26）停用后，**同一个粘滞会话** 1.4s 就落到顺序 2（ch 2286）并正常返回（修复前同一场景：curl 90s 超时、下游一个字节都没收到、`proxy_logs` 一条记录都没有）；重新启用顺序 1 后同一会话立刻回到 Lanln。
+- **主要文件**：`src/server/services/tokenRouter.ts`、`src/server/proxy-core/channelSelection.ts`、`src/server/proxy-core/channelSelection.forwardSticky.test.ts`、`src/server/services/tokenRouter.modelForward.test.ts`、`src/server/proxy-core/surfaces/sharedSurface.test.ts`
+- **副作用**：
+  - 转发路由不再享受会话粘滞：顺序一变，**包括老会话在内的所有请求**都立即跟着变（这正是本次需求要的行为）。代价是同一会话可能在换顺序后换到另一条上游通道；对 Codex 这类会在每轮带上完整上下文的客户端实测无影响，但如果某个站点的多轮续写强依赖「同一个上游连接 / `previous_response_id`」，换顺序时那一轮可能重新起上下文。
+  - 站点运行时熔断对转发路由**没有影响**（层内单候选，过滤函数直接早退，已实测），所以顺序类操作不需要额外处理熔断：置顶 / 上移 / 下移 / 启停改完，下一次请求就换过来（实机 0s，远快于“1 分钟内”的要求）。
+- **状态**：已完成（未提交，等确认）
+
 ### 90. exe 本机的转发顺序 / 启停（以服务器为准）+ 使用日志的「老路由」其实是已删除路由
 
 - **类型**：缺陷修复（使用日志路由标签）+ 功能（边缘版本机转发顺序 / 启停）
