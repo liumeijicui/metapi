@@ -68,7 +68,11 @@ function toFiniteNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-const MS_PER_HOUR = 3_600_000;
+/**
+ * 采样点的时间单位口径：`PerfMetricsSample.ts` / `windowStart` / `windowEnd` 全是
+ * **秒**（`shared/modelMonitorBars` 用 `floor((ts - windowStart) / 3600)` 定位格子）。
+ */
+const SECONDS_PER_HOUR = 3600;
 const DEFAULT_HEARTBEAT_BUCKET_SECONDS = 1200;
 
 /**
@@ -89,7 +93,7 @@ const HEARTBEAT_TIER_RATE: Record<string, number> = {
 };
 
 /**
- * 把 20 分钟一粒的档位心跳折成整点采样点（页面按整点铺 24 个槽位）。
+ * 把 20 分钟一粒的档位心跳折成整点采样点（页面按整点铺 24 个槽位），时间戳按秒。
  *
  * 一粒可能横跨两个整点，同一整点内取最差的一档：对「可用性」而言，最差档才
  * 是有意义的信息。全是 'none' 的整点不产出采样点，让页面对应槽位留空。
@@ -100,10 +104,10 @@ export function buildModelStatusHeartbeatSamples(
   bucketSeconds: unknown,
 ): PerfMetricsSample[] {
   if (!Array.isArray(heartbeat) || !heartbeat.length) return [];
-  const bucketMs = (toFiniteNumber(bucketSeconds) ?? DEFAULT_HEARTBEAT_BUCKET_SECONDS) * 1000;
-  if (!(bucketMs > 0)) return [];
-  const startMs = (toFiniteNumber(heartbeatStartSeconds) ?? 0) * 1000;
-  const hasTimeline = startMs > 0;
+  const safeBucketSeconds = toFiniteNumber(bucketSeconds) ?? DEFAULT_HEARTBEAT_BUCKET_SECONDS;
+  if (!(safeBucketSeconds > 0)) return [];
+  const startSeconds = toFiniteNumber(heartbeatStartSeconds) ?? 0;
+  const hasTimeline = startSeconds > 0;
 
   const byHour = new Map<number, number>();
   (heartbeat as unknown[]).forEach((rawTier, index) => {
@@ -111,9 +115,10 @@ export function buildModelStatusHeartbeatSamples(
     const rate = HEARTBEAT_TIER_RATE[tier];
     if (rate === undefined) return;
     // 没有时间轴时用序号当整点下标，页面会把这串采样点右对齐铺到尾部。
+    // 全部按秒算：毫秒口径不会报错，只会让页面上 24 个格子只剩第 1 格能对上。
     const hourStart = hasTimeline
-      ? Math.floor((startMs + index * bucketMs) / MS_PER_HOUR) * MS_PER_HOUR
-      : Math.floor((index * bucketMs) / MS_PER_HOUR);
+      ? Math.floor((startSeconds + index * safeBucketSeconds) / SECONDS_PER_HOUR) * SECONDS_PER_HOUR
+      : Math.floor((index * safeBucketSeconds) / SECONDS_PER_HOUR) * SECONDS_PER_HOUR;
     const current = byHour.get(hourStart);
     if (current === undefined || rate < current) byHour.set(hourStart, rate);
   });
@@ -194,7 +199,7 @@ export function parseAgentRouterModelStatusPayload(payload: unknown): PerfMetric
       avgTps: 0,
     },
     windowStart: sampleTimes.length ? Math.min(...sampleTimes) : null,
-    windowEnd: sampleTimes.length ? Math.max(...sampleTimes) + MS_PER_HOUR : null,
+    windowEnd: sampleTimes.length ? Math.max(...sampleTimes) + SECONDS_PER_HOUR : null,
     showThroughput: false,
     models,
   };

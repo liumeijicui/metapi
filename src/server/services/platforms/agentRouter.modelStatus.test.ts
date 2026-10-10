@@ -13,6 +13,7 @@ import {
   buildModelStatusHeartbeatSamples,
   parseAgentRouterModelStatusPayload,
 } from './agentRouter.js';
+import { buildModelMonitorSlots } from '../../../shared/modelMonitorBars.js';
 
 const BASE_URL = 'https://agentrouter.org';
 
@@ -74,13 +75,14 @@ describe('parseAgentRouterModelStatusPayload', () => {
     const parsed = parseAgentRouterModelStatusPayload(modelStatusPayload());
     const degraded = parsed!.models.find((model) => model.modelName === 'glm-5.3')!;
     // 第一粒 bad 落在起始整点，第二粒 severe 仍在同一小时内 → 取最差档（0）。
-    expect(degraded.recentSuccess).toEqual([{ ts: 1_800_000_000_000, rate: 0 }]);
+    // 时间戳按秒（页面用 floor((ts - windowStart) / 3600) 定位整点格子）。
+    expect(degraded.recentSuccess).toEqual([{ ts: 1_800_000_000, rate: 0 }]);
     const healthy = parsed!.models.find((model) => model.modelName === 'deepseek-v4-flash')!;
     // 24 小时 × 每小时 1 个槽位，且全部为 ok（100）。
     expect(healthy.recentSuccess).toHaveLength(24);
     expect(healthy.recentSuccess.every((sample) => sample.rate === 100)).toBe(true);
-    expect(parsed!.windowStart).toBe(1_800_000_000_000);
-    expect(parsed!.windowEnd).toBe(1_800_000_000_000 + 23 * 3_600_000 + 3_600_000);
+    expect(parsed!.windowStart).toBe(1_800_000_000);
+    expect(parsed!.windowEnd).toBe(1_800_000_000 + 24 * 3_600);
   });
 
   it('拿不到 data / models 时返回 null，不编造空结果', () => {
@@ -113,9 +115,19 @@ describe('parseAgentRouterModelStatusPayload', () => {
     const samples = buildModelStatusHeartbeatSamples(['ok', 'ok', 'bad', 'ok'], start, 1200);
     // 第 4 粒（下标 3）跨进下一个整点，单列一个槽位。
     expect(samples).toEqual([
-      { ts: start * 1000, rate: 0 },
-      { ts: start * 1000 + 3_600_000, rate: 100 },
+      { ts: start, rate: 0 },
+      { ts: start + 3_600, rate: 100 },
     ]);
+  });
+
+  it('采样点落在 24 个整点格子内（毫秒口径会让格子全空）', () => {
+    const samples = buildModelStatusHeartbeatSamples(
+      Array.from({ length: 72 }, () => 'ok'),
+      1_800_000_000,
+      1200,
+    );
+    const slots = buildModelMonitorSlots(samples, 1_800_000_000);
+    expect(slots.filter((rate) => rate !== null).length).toBeGreaterThanOrEqual(24);
   });
 });
 
