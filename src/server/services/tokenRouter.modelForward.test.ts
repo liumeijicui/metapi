@@ -156,7 +156,36 @@ describe('模型转发路由优先级', () => {
     expect(again?.channel.id).toBe(forwardChannelId);
   });
 
-  it('转发通道冷却中时报无可用通道，不回落到老路由', async () => {
+  it('顺序调整后立即生效：永远走第一个启用目标', async () => {
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-6-astra',
+      targets: [
+        { siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' },
+        { siteId, accountId, upstreamModel: 'glm-5.2' },
+      ],
+    });
+    const firstTarget = rule.targets[0];
+    const secondTarget = rule.targets[1];
+    const firstChannelId = firstTarget.channelId as number;
+    const secondChannelId = secondTarget.channelId as number;
+
+    const router = new TokenRouter();
+    expect((await router.selectChannel('gpt-6-astra'))?.channel.id).toBe(firstChannelId);
+
+    // 把顺序 2 置顶 → 无需重启或等待缓存过期，下一次选路就换到它。
+    await forwardService.moveModelForwardTarget(rule.id, secondTarget.id, 'top');
+    expect((await router.selectChannel('gpt-6-astra'))?.channel.id).toBe(secondChannelId);
+
+    // 顺序 1 再置顶 → 立刻切回去。
+    await forwardService.moveModelForwardTarget(rule.id, firstTarget.id, 'top');
+    expect((await router.selectChannel('gpt-6-astra'))?.channel.id).toBe(firstChannelId);
+
+    // 顺序 1 停用 → 落到顺序 2。
+    await forwardService.setModelForwardTargetEnabled(rule.id, firstTarget.id, false);
+    expect((await router.selectChannel('gpt-6-astra'))?.channel.id).toBe(secondChannelId);
+  });
+
+  it('转发通道冷却中仍然选中它自己，不回落到老路由', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
@@ -172,7 +201,8 @@ describe('模型转发路由优先级', () => {
 
     const router = new TokenRouter();
     const selected = await router.selectChannel('gpt-6-astra');
-    expect(selected).toBeNull();
+    // 冷却只是记账：手动排的顺序 1 照样是每次被调用的那个。
+    expect(selected?.channel.id).toBe(forwardChannelId);
   });
 
   it('账号会话过期时转发通道仍按 SK 正常派发', async () => {

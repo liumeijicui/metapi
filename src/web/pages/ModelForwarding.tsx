@@ -339,22 +339,11 @@ export default function ModelForwarding() {
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {rule.targets.map((target, index) => {
-                  const cooling = target.cooldownUntil && Date.parse(target.cooldownUntil) > Date.now();
-                  // 被自动降级的排到最后，但不会停用：其他目标都不可用时它照旧会被调用。
-                  const demoted = !!target.autoDemotedAt;
-                  const state = !target.enabled
-                    ? tr('已停用')
-                    : demoted
-                      ? tr('已降级')
-                      : cooling
-                        ? tr('冷却中')
-                        : (target.successCount ?? 0) > 0
-                          ? tr('正常')
-                          : tr('待命');
-                  const stateClass = !target.enabled || cooling || demoted ? 'badge-warning' : 'badge-success';
-                  const stateTooltip = demoted
-                    ? tr('连续上游失败，已自动降级到最低优先级；成功一次自动恢复原顺序')
-                    : `${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`;
+                  // 转发只看「启用 / 停用」：顺序由你自己排，第一个启用的目标就是每次
+                  // 被调用的那个，不会因为冷却或连续失败被系统悄悄换掉。
+                  const state = target.enabled ? tr('启用中') : tr('已停用');
+                  const stateClass = target.enabled ? 'badge-success' : 'badge-muted';
+                  const stateTooltip = `${tr('最近使用')}: ${formatDateTime(target.lastUsedAt)}`;
                   const targetBusy = busyTargetKey === `${rule.id}:${target.id}`;
                   return (
                     <div
@@ -461,7 +450,7 @@ export default function ModelForwarding() {
                 data-testid={`forward-target-order-hint-${rule.id}`}
                 style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}
               >
-                {tr('顺序即默认调用顺序：排在前面的目标优先被调用，该目标停用 / 冷却 / 连续失败时才自动落到下一个。')}
+                {tr('顺序即调用顺序：永远只走排在最前面的「启用」目标；把它停用，才会落到下一个。')}
               </div>
 
               <div style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>

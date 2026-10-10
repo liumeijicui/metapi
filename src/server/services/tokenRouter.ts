@@ -1036,6 +1036,21 @@ function buildRuntimeBreakerReason(details: SiteRuntimeHealthDetails): string {
   return '运行时熔断中，优先避让';
 }
 
+/**
+ * 手动转发路由（模型转发）不做「粘滞跳过」。
+ *
+ * 转发通道的顺序是人工拍板的，唯一的开关是通道的启用状态。冷却、最近失败避让、
+ * 自动降级这三样都会让「顺序 1」在用户不知情的情况下被换成「顺序 2」——用户调完
+ * 顺序却看不出为什么调用落到别处。所以转发路由一律跳过它们，永远选顺序最靠前的
+ * 启用通道。
+ *
+ * 同一个请求里真正失败之后的重试换源不受影响（`excludeChannelIds` 那条路）：
+ * 那是「这一次失败了，换一个源再试」，失败本身会如实报错、也会留日志。
+ */
+function isManualForwardRoute(route: { modelPattern?: string | null } | null | undefined): boolean {
+  return isForwardRoutePattern(route?.modelPattern);
+}
+
 function filterSiteRuntimeBrokenCandidatesByModel(
   candidates: RouteChannelCandidate[],
   modelName: string | ((candidate: RouteChannelCandidate) => string),
@@ -2205,7 +2220,7 @@ export class TokenRouter {
         }
       }
 
-      const filteredCandidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const filteredCandidates = this.filterAvoidedCandidatesForRoute(breakerFiltered.candidates, match.route, nowMs);
       const avoided = breakerFiltered.candidates.filter((row) => !filteredCandidates.some((item) => item.channel.id === row.channel.id));
       if (avoided.length > 0) {
         for (const row of avoided) {
@@ -2388,7 +2403,7 @@ export class TokenRouter {
         }
       }
 
-      const filteredLayer = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const filteredLayer = this.filterAvoidedCandidatesForRoute(breakerFiltered.candidates, match.route, nowMs);
       const avoided = breakerFiltered.candidates.filter((row) => !filteredLayer.some((item) => item.channel.id === row.channel.id));
       if (avoided.length > 0) {
         for (const row of avoided) {
@@ -2868,7 +2883,9 @@ export class TokenRouter {
     let autoDemotedAt = ch.autoDemotedAt ?? null;
     let priorityBeforeAutoDemotion = ch.priorityBeforeAutoDemotion ?? null;
     let priority = ch.priority ?? 0;
+    // 转发通道不参与自动降级：它的顺序是人工排的，压到最低就等于用户改完顺序也不生效。
     const shouldAutoDemote = autoDemoteThreshold > 0
+      && !isManualForwardRoute(route)
       && priorityBeforeAutoDemotion == null
       && nextUpstreamFailures >= autoDemoteThreshold;
     if (shouldAutoDemote) {
@@ -2996,7 +3013,7 @@ export class TokenRouter {
 
     if (routeStrategy === 'stable_first') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
-      const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const candidates = this.filterAvoidedCandidatesForRoute(breakerFiltered.candidates, match.route, nowMs);
       const rotationKey = this.buildStableFirstRotationKey(match.route.id, requestedModel);
       const poolPlan = buildStableFirstPoolPlan(
         candidates,
@@ -3051,7 +3068,7 @@ export class TokenRouter {
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-      const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const candidates = this.filterAvoidedCandidatesForRoute(breakerFiltered.candidates, match.route, nowMs);
       const selected = this.weightedRandomSelect(
         candidates,
         requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -3518,11 +3535,29 @@ export class TokenRouter {
     const tokenValue = this.resolveChannelTokenValue(candidate);
     if (!tokenValue) reasonParts.push('令牌不可用');
 
-    if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
+    // 转发路由的冷却只是记账，不再把「顺序 1」挤出候选：下次请求照样先打它。
+    if (
+      !candidate.isForwardChannel
+      && candidate.channel.cooldownUntil
+      && candidate.channel.cooldownUntil > nowIso
+    ) {
       reasonParts.push('冷却中');
     }
 
     return reasonParts;
+  }
+
+  /**
+   * 「最近失败，优先避让」的过滤。只有自动路由才做避让 —— 手动转发路由的候选不因为
+   * 上一次失败就被换掉（否则用户改完顺序要等避让窗口过去才会按新顺序调用）。
+   */
+  private filterAvoidedCandidatesForRoute<T extends { channel: FailureAwareChannel }>(
+    candidates: T[],
+    route: { modelPattern?: string | null } | null | undefined,
+    nowMs: number,
+  ): T[] {
+    if (isManualForwardRoute(route)) return candidates;
+    return filterRecentlyFailedCandidates(candidates, nowMs);
   }
 
   private getRoundRobinCandidates(candidates: RouteChannelCandidate[]): RouteChannelCandidate[] {

@@ -14,7 +14,7 @@ vi.mock('./modelPricingService.js', async () => {
   return { ...actual, getCachedModelRoutingReferenceCost: () => null };
 });
 
-describe('连续上游失败自动降级', () => {
+describe('模型转发不做自动降级与冷却换源', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let TokenRouter: TokenRouterModule['TokenRouter'];
@@ -123,7 +123,7 @@ describe('连续上游失败自动降级', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('连续 10 次上游故障后降到最低优先级，后续请求自动切到别的源', async () => {
+  it('转发通道连续 10 次上游故障也不降级，仍然只走顺序 1', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -132,9 +132,7 @@ describe('连续上游失败自动降级', () => {
       ],
     });
     const firstChannelId = rule.targets[0].channelId as number;
-    const secondChannelId = rule.targets[1].channelId as number;
-
-    // 降级前：顺序 1 才是首选。
+    const priorityBefore = (await readChannel(firstChannelId)).priority ?? 0;
     expect(await selectForwardedChannelId()).toBe(firstChannelId);
 
     const router = new TokenRouter();
@@ -142,15 +140,16 @@ describe('连续上游失败自动降级', () => {
       await router.recordFailure(firstChannelId, { status: 503, errorText: 'upstream boom' });
     }
 
-    const demoted = await readChannel(firstChannelId);
-    expect(demoted.autoDemotedAt).toBeTruthy();
-    expect(demoted.consecutiveUpstreamFailures).toBe(config.proxyAutoDemoteFailureThreshold);
-    // 降级后它不再是首选，调用自动落到第二个源上。
-    expect(demoted.priority).toBeGreaterThan((await readChannel(secondChannelId)).priority ?? 0);
-    expect(await selectForwardedChannelId()).toBe(secondChannelId);
+    const channel = await readChannel(firstChannelId);
+    // 失败次数照记，但顺序不会被系统改掉，也不会出现「已降级」状态。
+    expect(channel.consecutiveUpstreamFailures).toBe(config.proxyAutoDemoteFailureThreshold);
+    expect(channel.autoDemotedAt).toBeNull();
+    expect(channel.priority).toBe(priorityBefore);
+    // 顺序 1 永远是首选，不会自动切到顺序 2。
+    expect(await selectForwardedChannelId()).toBe(firstChannelId);
   });
 
-  it('「类似 400」的错误同样计入：哪怕报错文案像请求错误，连续 10 次也降级', async () => {
+  it('「类似 400」的错误同样计入连续计数，但转发通道仍不降级', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
@@ -158,17 +157,12 @@ describe('连续上游失败自动降级', () => {
     const channelId = rule.targets[0].channelId as number;
     const router = new TokenRouter();
 
-    // 9 次还不够。
-    for (let attempt = 1; attempt < config.proxyAutoDemoteFailureThreshold; attempt += 1) {
+    for (let attempt = 1; attempt <= config.proxyAutoDemoteFailureThreshold; attempt += 1) {
       await router.recordFailure(channelId, { status: 400, errorText: 'invalid request body' });
     }
-    expect((await readChannel(channelId)).autoDemotedAt).toBeNull();
-
-    // 第 10 次到阈值，降级。
-    await router.recordFailure(channelId, { status: 400, errorText: 'invalid request body' });
     const channel = await readChannel(channelId);
-    expect(channel.autoDemotedAt).toBeTruthy();
     expect(channel.consecutiveUpstreamFailures).toBe(config.proxyAutoDemoteFailureThreshold);
+    expect(channel.autoDemotedAt).toBeNull();
   });
 
   it('中间成功一次就把连续计数清零，不会攒到阈值', async () => {
@@ -191,7 +185,7 @@ describe('连续上游失败自动降级', () => {
     expect(channel.consecutiveUpstreamFailures).toBe(0);
   });
 
-  it('成功一次就恢复原来的顺序', async () => {
+  it('转发通道不产生降级状态，成功一次也只是清零计数', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -206,7 +200,9 @@ describe('连续上游失败自动降级', () => {
     for (let attempt = 0; attempt < config.proxyAutoDemoteFailureThreshold; attempt += 1) {
       await router.recordFailure(firstChannelId, { status: 500, errorText: 'upstream boom' });
     }
-    expect((await readChannel(firstChannelId)).priority).not.toBe(priorityBefore);
+    const afterFailures = await readChannel(firstChannelId);
+    expect(afterFailures.priority).toBe(priorityBefore);
+    expect(afterFailures.autoDemotedAt).toBeNull();
 
     await router.recordSuccess(firstChannelId, 120, 0, 'deepseek-v4.1-flash');
 
@@ -217,7 +213,7 @@ describe('连续上游失败自动降级', () => {
     expect(restored.consecutiveUpstreamFailures).toBe(0);
   });
 
-  it('降级不会把通道踢出局：其他源都不可用时仍然会被选中', async () => {
+  it('转发通道冷却中也不会被跳过：顺序 1 永远是首选', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -228,22 +224,23 @@ describe('连续上游失败自动降级', () => {
     const firstChannelId = rule.targets[0].channelId as number;
     const secondChannelId = rule.targets[1].channelId as number;
 
-    const router = new TokenRouter();
-    for (let attempt = 0; attempt < config.proxyAutoDemoteFailureThreshold; attempt += 1) {
-      await router.recordFailure(firstChannelId, { status: 502, errorText: 'bad gateway' });
-    }
+    // 模拟顺序 1 因为上游失败正在冷却：它仍然是每次被调用的那个。
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      cooldownLevel: 1,
+      failCount: 3,
+      lastFailAt: new Date().toISOString(),
+    }).where(eq(schema.routeChannels.id, firstChannelId)).run();
 
-    // 冷却和降级是两件事：这里只验证「降级」不会把通道踢出候选池。
-    // 先让冷却过去（上游连续失败本来就会被冷却，那是另一套机制），
-    // 再把第二个源停用 —— 只剩下被降级的那个源时，它仍然会被选中。
-    await db.update(schema.routeChannels).set({ cooldownUntil: null })
-      .where(eq(schema.routeChannels.id, firstChannelId)).run();
-    await db.update(schema.routeChannels).set({ enabled: false })
-      .where(eq(schema.routeChannels.id, secondChannelId)).run();
     expect(await selectForwardedChannelId()).toBe(firstChannelId);
+
+    // 只有把它停用，才轮到顺序 2。
+    await db.update(schema.routeChannels).set({ enabled: false })
+      .where(eq(schema.routeChannels.id, firstChannelId)).run();
+    expect(await selectForwardedChannelId()).toBe(secondChannelId);
   });
 
-  it('手动保存转发顺序即复位自动降级', async () => {
+  it('手动保存转发顺序即复位通道优先级与失败状态', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -256,7 +253,7 @@ describe('连续上游失败自动降级', () => {
     for (let attempt = 0; attempt < config.proxyAutoDemoteFailureThreshold; attempt += 1) {
       await router.recordFailure(firstChannelId, { status: 503, errorText: 'upstream boom' });
     }
-    expect((await readChannel(firstChannelId)).autoDemotedAt).toBeTruthy();
+    expect((await readChannel(firstChannelId)).autoDemotedAt).toBeNull();
 
     const detail = (await forwardService.listModelForwardRules()).find((item) => item.id === rule.id);
     await forwardService.updateModelForwardRule(rule.id, {
@@ -278,7 +275,7 @@ describe('连续上游失败自动降级', () => {
     expect(after.priority).toBe(0);
   });
 
-  it('转发列表把降级状态透出给页面', async () => {
+  it('转发列表不再透出降级状态', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
@@ -290,11 +287,11 @@ describe('连续上游失败自动降级', () => {
     }
 
     const listed = (await forwardService.listModelForwardRules()).find((item) => item.id === rule.id);
-    expect(listed?.targets[0].autoDemotedAt).toBeTruthy();
+    expect(listed?.targets[0].autoDemotedAt).toBeNull();
     expect(listed?.targets[0].consecutiveUpstreamFailures).toBe(config.proxyAutoDemoteFailureThreshold);
   });
 
-  // 老路由的通道直接用 recordFailure 走一遍，确认降级不只对转发通道生效。
+  // 老路由（自动路由）的通道仍然保留自动降级：被降级后顺序让位给其它源。
   it('老路由通道同样会降级', async () => {
     const router = new TokenRouter();
     for (let attempt = 0; attempt < config.proxyAutoDemoteFailureThreshold; attempt += 1) {

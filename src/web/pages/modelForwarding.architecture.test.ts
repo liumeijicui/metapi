@@ -74,9 +74,9 @@ describe('ModelForwarding 模型转发页', () => {
     expect(page).not.toContain('const isLast = index === rule.targets.length - 1;');
   });
 
-  it('页面明确告知「顺序即默认调用顺序」', () => {
+  it('页面明确告知「顺序即调用顺序，永远走第一个启用目标」', () => {
     expect(page).toContain('forward-target-order-hint-');
-    expect(page).toContain('顺序即默认调用顺序');
+    expect(page).toContain('顺序即调用顺序：永远只走排在最前面的「启用」目标');
     expect(page).toContain('调用顺序：数字越小越先被调用');
   });
 
@@ -120,22 +120,20 @@ describe('ModelForwarding 模型转发页', () => {
     expect(service).toContain('nextSortOrder');
   });
 
-  it('连续上游失败自动降级的通道在页面上标成「已降级」', () => {
-    // 后端把降级状态透出给页面。
+  it('转发目标只显示「启用 / 停用」，不再透出冷却 / 降级状态', () => {
+    // 后端字段还在（列表接口照样回传），页面只是不再拿它做状态徽标。
     expect(types).toContain('autoDemotedAt: string | null');
     expect(types).toContain('consecutiveUpstreamFailures: number | null');
     expect(service).toContain('autoDemotedAt: row.channel?.autoDemotedAt ?? null');
     expect(service).toContain('consecutiveUpstreamFailures: row.channel?.consecutiveUpstreamFailures ?? null');
-    // 页面上能一眼看出这条目标已经被降级，并说明怎么恢复。
-    expect(page).toContain('const demoted = !!target.autoDemotedAt;');
-    expect(page).toContain("tr('已降级')");
+    // 只有两种状态：顺序最靠前的启用目标就是每次被调用的那个。
+    expect(page).toContain("const state = target.enabled ? tr('启用中') : tr('已停用');");
+    expect(page).not.toContain("tr('已降级')");
+    expect(page).not.toContain('const demoted = !!target.autoDemotedAt;');
+    expect(page).not.toContain('cooling');
     expect(page).toContain('stateTooltip');
-    // 降级和冷却 / 停用是三种不同状态，不能混成一个。
-    expect(page).toContain('!target.enabled');
-    expect(page).toContain('cooling');
   });
-
-  it('手动保存顺序即复位自动降级，阈值可配', () => {
+  it('手动保存顺序即复位降级状态，且转发通道本身不参与自动降级', () => {
     expect(service).toContain('consecutiveUpstreamFailures: 0');
     expect(service).toContain('autoDemotedAt: null');
     expect(service).toContain('priorityBeforeAutoDemotion: null');
@@ -146,6 +144,10 @@ describe('ModelForwarding 模型转发页', () => {
     expect(tokenRouter).toContain('resolveAutoDemotedPriority');
     // 轮询策略本来忽略 priority，降级要在候选排序里显式生效。
     expect(tokenRouter).toContain('demotionOrder');
+    // 转发通道跳过自动降级 / 冷却换源：顺序是人工排的。
+    expect(tokenRouter).toContain('!isManualForwardRoute(route)');
+    expect(tokenRouter).toContain("isForwardRoutePattern(route?.modelPattern)");
+    expect(tokenRouter).toContain('filterAvoidedCandidatesForRoute');
   });
 
   it('弹窗会即时提示对外模型名重复，并把它接进保存校验', () => {

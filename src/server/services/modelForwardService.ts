@@ -258,7 +258,8 @@ export async function syncModelForwardRule(ruleId: number): Promise<void> {
   for (const [index, target] of targetRows.entries()) {
     const tokenId = target.tokenId ?? await resolveAccountTokenId(target.accountId, target.upstreamModel);
     const enabled = !!target.enabled && !!rule.enabled;
-    // 排序即优先级：列表越靠前的目标越先被选中，靠前目标不可用（停用/冷却/失败）时才落到下一个。
+    // 排序即优先级：永远只走顺序最靠前的「启用」目标，把它停用才会落到下一个。
+    // 冷却、历史失败避让、自动降级都不再让靠前的目标被跳过（那是自动路由才有的策略）。
     const priority = index;
     if (target.channelId && channelById.has(target.channelId)) {
       const channelId = target.channelId;

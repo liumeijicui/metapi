@@ -1,3 +1,24 @@
+### 89. 模型转发去掉「冷却 / 待命 / 降级」自动换源：第一个启用目标永远就是被调用的那个
+
+- **类型**：行为变更（模型转发派发口径）+ 前端状态简化
+- **需求来源**：本会话需求（“模型转发的顺序1 xxx 正常 顺序2 xxx 待命还有冷却中，帮我把这个功能给去掉，永远转发的是第一个启用状态的，不然我太不好控制了，每次变动顺序后实时生效”）
+- **背景**：模型转发页每个目标带一个状态徽标（`正常` / `待命` / `冷却中` / `已降级`）。用户把顺序排成「1 号优先」，可实际调用会被三套自动策略悄悄改道到 2 号：① 通道冷却（`cooldownUntil` 未过期）直接把它挤出候选；② `filterRecentlyFailedCandidates()` 的「最近失败，优先避让」；③ 连续上游失败到阈值（默认 10 次）后的**自动降级**——把它 `priority` 压到最低。三种都不会报错，只会让「顺序 1 明明启用着却没被调用」，与手动排顺序的直觉冲突。
+- **根因**：这三套避让/降级策略本来是给**自动路由**用的（候选多、需要自愈），但派发路径对转发路由一视同仁（`RouteChannelCandidate.isForwardChannel` 只用来放宽凭据判断，没用来区分策略）。转发通道的「顺序」是人工拍板的，唯一的开关应该是**启用状态**。
+- **改动**：
+  1. `src/server/services/tokenRouter.ts:1050` 新增 `isManualForwardRoute(route)`（`isForwardRoutePattern(route.modelPattern)`），作为「这条路由是手动转发」的唯一判据。
+  2. 同文件 `:3554` 新增 `filterAvoidedCandidatesForRoute()`：转发路由**原样返回**候选，其余路由仍走 `filterRecentlyFailedCandidates()`；4 处调用点（`:2223` / `:2406` 的 explain、`:3016` 的 stable_first 派发、`:3071` 的加权分层派发）全部改用它。
+  3. 同文件 `:3538`：`getCandidateEligibilityReasons()` 里「冷却中」只对非转发通道生效 —— 冷却对转发通道降级为**纯记账**，不再把它踢出候选。
+  4. 同文件 `:2886-2888`：`recordFailure()` 的 `shouldAutoDemote` 增加 `!isManualForwardRoute(route)`，转发通道不再自动降级（失败计数照记、`cooldownUntil` 照写，只是不动 `priority`）。
+  5. `src/server/services/modelForwardService.ts:261` 更正注释：顺序保存 = 通道优先级，但「靠前目标不可用才落到下一个」只由启用状态决定。
+  6. `src/web/pages/ModelForwarding.tsx:344` 目标徽标从四态简化为两态（`启用中` / `已停用`，前者 `badge-success`、后者 `badge-muted`），`:453` 页面提示改为「顺序即调用顺序：永远只走排在最前面的「启用」目标；把它停用，才会落到下一个。」
+- **验证**：
+  - 单测：`tokenRouter.auto-demote.test.ts` 由「自动降级」改写为「转发不做降级与冷却换源」8 例（连续 10 次失败不降级且顺序 1 仍是首选 / 400 类错误同样只计数不降级 / 成功清零计数 / 冷却中仍然选顺序 1、停用后才落到顺序 2 / 保存顺序即复位降级状态且转发通道本身不参与降级 / 转发列表不再透出降级状态 / **老路由通道照样降级**）；`tokenRouter.modelForward.test.ts` 6 例，其中「转发通道冷却中」由「报无可用通道」改为「仍然选中它自己」，并新增「顺序调整（置顶 / 停用）后下一次选路立即生效」；`modelForwarding.architecture.test.ts` 14 例同步。
+  - 全量回归：`src/server` 364 文件 2812 通过 / 3 失败（`siteProxy` / `factoryResetService` / `db.index.default-path`，均为既有环境性失败）；`src/web` 157 文件 558 通过 / 1 失败（既有 `accounts.rebind-panel-focus`）。
+  - 门禁：`npx tsc --noEmit -p tsconfig.server.json`、`tsconfig.web.json` 通过；`npm run repo:drift-check` 0 违规（登记债务仍 5 条）；`npx vite build`、`npm run build:server` 通过。
+  - 实机（`systemctl restart metapi` 后）：先调一次 `POST /v1/chat/completions {model:'gpt-5.5'}` → HTTP 200 / 3.6s，`proxy_logs` 落 `channel_id=2252`（规则 `gpt-5.5` 顺序 1）。再把该通道人为写成「10 分钟冷却 + 当前失败时间」（旧逻辑到这一步就会改道去顺序 2 的 #2629）后再调一次 → HTTP 200 / 2.2s，`proxy_logs` 依旧 `channel_id=2252`；验证后已还原该行字段（`cooldown_until` / `last_fail_at` 置回 NULL）。
+  - 边缘版（exe）：`src/server/edge/` 直接复用主服务的 `routes/proxy/router.js` 与 tokenRouter，**没有独立的换源实现**，因此代码一行不用改；本地 exe 要拿到这次的行为需要重新执行 `npm run dist:desktop:edge` 打包（打包按其所在平台出包，Windows exe 需在 Windows 上打）。
+- **副作用**：转发通道不再有自动避让 / 降级兜底。真正的失败仍由**同一请求内的重试换源**处理（`excludeChannelIds` 那条路），所以顺序 1 报错时这一次请求仍会切到顺序 2 并如实记录；但**下一个请求又会先打顺序 1**。想彻底停用某个源请手动「停用」或调顺序。老路由（自动路由）的冷却 / 避让 / 自动降级一行未改。
+
 ### 88. Lanln 站的模型动态指标：单独一条「模型状态页」采集分支（顺带修掉采样点时间单位）
 
 - **类型**：功能新增（模型监控采集）+ 缺陷修复（采样点单位）
