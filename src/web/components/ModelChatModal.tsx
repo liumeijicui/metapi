@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useToast } from './Toast.js';
 import CenteredModal from './CenteredModal.js';
@@ -120,6 +120,14 @@ async function readStreamErrorText(response: Response): Promise<string> {
   }
 }
 
+/**
+ * 是否已经在底部附近。留一点余量，免得手指 / 触控板抖一下就被判成「用户翻上去了」。
+ */
+function isNearBottom(node: HTMLElement | null, threshold = 48): boolean {
+  if (!node) return true;
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= threshold;
+}
+
 export default function ModelChatModal({
   open,
   target,
@@ -145,6 +153,12 @@ export default function ModelChatModal({
   const [promptQuery, setPromptQuery] = useState('');
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const reasoningScrollRef = useRef<HTMLPreElement | null>(null);
+  // 是否跟随最新。默认跟随；用户自己往上翻时暂停，滚回底部（或点「回到最新」）
+  // 再恢复 —— 边出字边看历史时才不会被一直拽回底部。
+  const [followingLatest, setFollowingLatest] = useState(true);
+  const followLatestRef = useRef(true);
+  const followReasoningRef = useRef(true);
 
   const modelName = target?.modelName || '';
 
@@ -156,6 +170,9 @@ export default function ModelChatModal({
     setSending(false);
     setPromptQuery('');
     setPromptPickerOpen(false);
+    followLatestRef.current = true;
+    followReasoningRef.current = true;
+    setFollowingLatest(true);
     abortRef.current?.abort();
     abortRef.current = null;
   }, [open, modelName, target?.siteId]);
@@ -209,10 +226,102 @@ export default function ModelChatModal({
       .catch(() => setPromptCases([]));
   }, [open, promptCases.length]);
 
-  useEffect(() => {
+  /**
+   * 把「消息列表」和「思考过程」都钉到底部。
+   *
+   * 用 useLayoutEffect 且不写依赖数组：每次提交都跑，所以不管内容是哪条路径改
+   * 的（流式增量、结束标记、报错）都不会漏。只用 `[messages]` 当依赖时，一旦某
+   * 次更新没产生新的 messages 引用，滚动就跟不上了。
+   */
+  const pinToLatest = useCallback(() => {
     const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [messages]);
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+      // 视口很矮时（横屏手机）弹窗卡片自己也会滚起来，一并拉到底，免得最新那
+      // 一行被卡片裁在外面。只在这一层之前停，不去动页面本身的滚动。
+      let ancestor = node.parentElement;
+      while (ancestor) {
+        if (ancestor.classList.contains('modal-content')) {
+          if (ancestor.scrollHeight > ancestor.clientHeight + 1) {
+            ancestor.scrollTop = ancestor.scrollHeight;
+          }
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+    }
+    // 思考过程是独立的滚动容器，单独判断：用户自己在里面往上翻时不要拽回来。
+    const reasoning = reasoningScrollRef.current;
+    if (reasoning && followReasoningRef.current) reasoning.scrollTop = reasoning.scrollHeight;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!followLatestRef.current) return;
+    pinToLatest();
+  });
+
+  // 用户往上翻就暂停跟随（否则刚看两行又被拽回底部），滚回底部自动恢复。
+  const handleMessagesScroll = useCallback(() => {
+    const next = isNearBottom(scrollRef.current);
+    if (next === followLatestRef.current) return;
+    followLatestRef.current = next;
+    // 回到最新时思考过程也一起跟上。
+    if (next) followReasoningRef.current = true;
+    setFollowingLatest(next);
+  }, []);
+
+  /**
+   * 「用户想往上看」必须从滚轮 / 滑动这些输入上判定，不能等 scroll 事件：
+   * 流式增量每几十毫秒提交一次，每次提交都会把容器钉回底部，而 scroll 事件要等
+   * 下一帧才派发，那时位置早被钉回去了，永远会被判成「还在底部」。
+   */
+  const pauseFollowing = useCallback(() => {
+    followReasoningRef.current = false;
+    if (!followLatestRef.current) return;
+    followLatestRef.current = false;
+    setFollowingLatest(false);
+  }, []);
+
+  const handleMessagesWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) pauseFollowing();
+  }, [pauseFollowing]);
+
+  const touchStartYRef = useRef<number | null>(null);
+  const handleMessagesTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    touchStartYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+  const handleMessagesTouchMove = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const startY = touchStartYRef.current;
+    const y = event.touches[0]?.clientY;
+    if (startY == null || y == null) return;
+    // 手指往下拉 = 想看更早的内容。
+    if (y - startY > 4) pauseFollowing();
+  }, [pauseFollowing]);
+
+  const handleReasoningScroll = useCallback(() => {
+    followReasoningRef.current = isNearBottom(reasoningScrollRef.current);
+  }, []);
+
+  // 思考过程是 <details>，默认收着；用户展开时直接跳到最新的一段，而不是从头看。
+  // 收起时 pre 不可见，赋值 scrollTop 不生效，所以只在展开这一刻补一次。
+  const handleReasoningToggle = useCallback((event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (!event.currentTarget.open) return;
+    followReasoningRef.current = true;
+    const pin = () => {
+      const node = reasoningScrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    };
+    pin();
+    // 展开的一帧内内容才拿到真实高度，补一次，避免停在第一行。
+    if (typeof window !== 'undefined') window.requestAnimationFrame(pin);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    followReasoningRef.current = true;
+    setFollowingLatest(true);
+    pinToLatest();
+  }, [pinToLatest]);
 
   const filteredPrompts = useMemo(() => {
     const query = promptQuery.trim().toLowerCase();
@@ -236,6 +345,10 @@ export default function ModelChatModal({
     setMessages([...nextMessages, { role: 'assistant', content: '' }]);
     setInput('');
     setSending(true);
+    // 新的一轮从底部开始：用户可能上一轮翻到中间看历史了，这里要回到最新。
+    followLatestRef.current = true;
+    followReasoningRef.current = true;
+    setFollowingLatest(true);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -433,39 +546,57 @@ export default function ModelChatModal({
           )}
         </div>
 
-        <div className="model-chat-messages" ref={scrollRef}>
-          {messages.length === 0 ? (
-            <div className="model-chat-empty">
-              {tr('发一条消息试试这个模型；也可以从下方快捷选一条测试提示词。')}
-              {activeCredential ? (
-                <div className="model-chat-empty-hint">
-                  {tr('直连')} {target?.siteName || ''} · {activeCredential.label}
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            messages.map((item, index) => (
-              <div key={index} className={`model-chat-bubble is-${item.role}${item.error ? ' is-error' : ''}`}>
-                <div className="model-chat-role">{item.role === 'user' ? tr('我') : tr('模型')}</div>
-                {item.reasoning ? (
-                  <details className="model-chat-reasoning">
-                    <summary>{tr('思考过程')}</summary>
-                    <pre>{item.reasoning}</pre>
-                  </details>
-                ) : null}
-                <div className="model-chat-content">
-                  {item.content || (sending && index === messages.length - 1 ? tr('生成中…') : '')}
-                </div>
-                {item.role === 'assistant' && item.finishReason !== undefined ? (
-                  <div className="model-chat-finish">
-                    {item.sawDone
-                      ? `${tr('上游结束原因')}: ${item.finishReason || tr('未声明')}${item.completionTokens == null ? '' : ` · ${tr('输出')} ${item.completionTokens} tokens`}`
-                      : tr('上游没有发送结束标记，这轮可能被中断')}
+        <div className="model-chat-messages-wrap">
+          <div
+            className="model-chat-messages"
+            ref={scrollRef}
+            onScroll={handleMessagesScroll}
+            onWheel={handleMessagesWheel}
+            onTouchStart={handleMessagesTouchStart}
+            onTouchMove={handleMessagesTouchMove}
+          >
+            {messages.length === 0 ? (
+              <div className="model-chat-empty">
+                {tr('发一条消息试试这个模型；也可以从下方快捷选一条测试提示词。')}
+                {activeCredential ? (
+                  <div className="model-chat-empty-hint">
+                    {tr('直连')} {target?.siteName || ''} · {activeCredential.label}
                   </div>
                 ) : null}
               </div>
-            ))
-          )}
+            ) : (
+              messages.map((item, index) => (
+                <div key={index} className={`model-chat-bubble is-${item.role}${item.error ? ' is-error' : ''}`}>
+                  <div className="model-chat-role">{item.role === 'user' ? tr('我') : tr('模型')}</div>
+                  {item.reasoning ? (
+                    <details className="model-chat-reasoning" onToggle={handleReasoningToggle}>
+                      <summary>{tr('思考过程')}</summary>
+                      <pre ref={reasoningScrollRef} onScroll={handleReasoningScroll}>{item.reasoning}</pre>
+                    </details>
+                  ) : null}
+                  <div className="model-chat-content">
+                    {item.content || (sending && index === messages.length - 1 ? tr('生成中…') : '')}
+                  </div>
+                  {item.role === 'assistant' && item.finishReason !== undefined ? (
+                    <div className="model-chat-finish">
+                      {item.sawDone
+                        ? `${tr('上游结束原因')}: ${item.finishReason || tr('未声明')}${item.completionTokens == null ? '' : ` · ${tr('输出')} ${item.completionTokens} tokens`}`
+                        : tr('上游没有发送结束标记，这轮可能被中断')}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+          {!followingLatest ? (
+            <button
+              type="button"
+              className="model-chat-jump-latest"
+              onClick={jumpToLatest}
+            >
+              {tr('回到最新')}
+            </button>
+          ) : null}
         </div>
 
         <div className="model-chat-composer">

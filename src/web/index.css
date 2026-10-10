@@ -6192,14 +6192,44 @@ a.model-monitor-site-name:hover {
   color: var(--color-text-secondary);
 }
 
-.model-chat-messages {
+/* 消息区外面套一层，好让「回到最新」按钮浮在消息区右下角而不跟着滚走。 */
+.model-chat-messages-wrap {
+  position: relative;
   flex: 1 1 auto;
   min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+
+.model-chat-messages {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 4px 2px;
+}
+
+/* 用户往上翻看历史时，流式内容就不再自动钉底了，点这个回到最新。 */
+.model-chat-jump-latest {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+
+.model-chat-jump-latest:hover {
+  color: var(--color-text-primary);
+  border-color: color-mix(in srgb, var(--color-primary) 45%, transparent);
 }
 
 .model-chat-empty {
