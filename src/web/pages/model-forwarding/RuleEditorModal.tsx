@@ -181,7 +181,7 @@ export default function RuleEditorModal({
               style={{ width: 16, height: 16, accentColor: 'var(--color-primary)' }}
             />
             <span style={{ fontSize: 12.5, color: 'var(--color-text-primary)' }}>
-              {tr('启用该规则（关闭后同名请求回落走老路由）')}
+              {tr('启用该规则（关闭后该模型没有可派发的通道，不会回落到同名老路由）')}
             </span>
           </label>
         </div>

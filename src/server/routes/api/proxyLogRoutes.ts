@@ -293,7 +293,7 @@ function mapProxyLogRow(
       groupName?: string | null;
       tags?: string | null;
     } | null;
-    token_routes?: { modelPattern?: string | null } | null;
+    token_routes?: { id?: number | null; modelPattern?: string | null } | null;
   },
   options?: { includeBillingDetails?: boolean },
 ) {
@@ -306,10 +306,14 @@ function mapProxyLogRow(
   const routeModelPattern = typeof row.token_routes?.modelPattern === "string"
     ? row.token_routes.modelPattern.trim()
     : "";
-  // 区分「模型转发」新路由与老路由；routeId 为空表示请求没有经过路由（或路由已删）。
-  const routeKind = routeModelPattern
-    ? (isForwardRoutePattern(routeModelPattern) ? "forward" : "legacy")
-    : (row.proxy_logs.routeId == null ? null : "legacy");
+  // 区分「模型转发」新路由、老路由，以及「当时的路由现在已经不在了」。
+  // 第三种不能当老路由显示：转发路由重建过（历史 route_id 会指向不存在的行），
+  // 一律算老路由会让人误以为请求走了老路由 —— exe 的日志是长期归档的，尤其明显。
+  const routeKind = row.proxy_logs.routeId == null
+    ? null
+    : row.token_routes?.id == null
+      ? "deleted"
+      : (isForwardRoutePattern(routeModelPattern) ? "forward" : "legacy");
 
   return {
     ...row.proxy_logs,
@@ -384,6 +388,7 @@ export async function proxyLogRoutes(app: FastifyInstance) {
               username: schema.accounts.username,
             },
             token_routes: {
+              id: schema.tokenRoutes.id,
               modelPattern: schema.tokenRoutes.modelPattern,
             },
             sites: {
@@ -441,7 +446,7 @@ export async function proxyLogRoutes(app: FastifyInstance) {
         groupName?: string | null;
         tags?: string | null;
       } | null;
-      token_routes?: { modelPattern?: string | null } | null;
+      token_routes?: { id?: number | null; modelPattern?: string | null } | null;
     }>;
 
     let totalQuery = db
@@ -650,6 +655,7 @@ export async function proxyLogRoutes(app: FastifyInstance) {
               accounts: schema.accounts,
               sites: schema.sites,
               token_routes: {
+                id: schema.tokenRoutes.id,
                 modelPattern: schema.tokenRoutes.modelPattern,
               },
               downstream_api_keys: {
@@ -696,7 +702,7 @@ export async function proxyLogRoutes(app: FastifyInstance) {
               groupName?: string | null;
               tags?: string | null;
             } | null;
-            token_routes?: { modelPattern?: string | null } | null;
+            token_routes?: { id?: number | null; modelPattern?: string | null } | null;
           }
         | undefined;
 

@@ -279,10 +279,27 @@ function formatLatency(ms: number) {
   return `${text}s`;
 }
 
-// 区分请求走的是「模型转发」新路由还是老路由。
+// 区分请求走的是「模型转发」新路由、老路由，还是「当时的路由现在已经不在了」。
+// 第三种不能当老路由显示：转发路由重建过，历史日志的 route_id 会指向已删除的行，
+// 一律算老路由会让人误以为请求走了老路由（exe 的日志是长期归档的，尤其明显）。
 function formatRouteKindLabel(kind: ProxyLogRouteKind | null | undefined) {
   if (kind === "forward") return "新路由";
   if (kind === "legacy") return "老路由";
+  if (kind === "deleted") return "路由已删除";
+  return null;
+}
+
+// 徽标配色：新路由高亮，老路由中性，早已不存在的路由用警示色（这行的路由标签不可靠）。
+function resolveRouteKindBadgeClass(kind: ProxyLogRouteKind | null | undefined) {
+  if (kind === "forward") return "badge-info";
+  if (kind === "deleted") return "badge-warning";
+  return "badge-muted";
+}
+
+function resolveRouteKindTooltip(kind: ProxyLogRouteKind | null | undefined) {
+  if (kind === "deleted") {
+    return "记录这条日志时的路由已经被删除或重建，无法判断当时走的是新路由还是老路由";
+  }
   return null;
 }
 
@@ -2707,7 +2724,8 @@ export default function ProxyLogs() {
                     ) : null}
                     {routeKindLabel ? (
                       <span
-                        className={`badge ${log.routeKind === "forward" ? "badge-info" : "badge-muted"}`}
+                        className={`badge ${resolveRouteKindBadgeClass(log.routeKind)}`}
+                        title={resolveRouteKindTooltip(log.routeKind) ?? undefined}
                         style={{ fontSize: 10 }}
                       >
                         {routeKindLabel}
@@ -3006,7 +3024,8 @@ export default function ProxyLogs() {
                             >
                               {routeKindLabel ? (
                                 <span
-                                  className={`badge ${log.routeKind === "forward" ? "badge-info" : "badge-muted"}`}
+                                  className={`badge ${resolveRouteKindBadgeClass(log.routeKind)}`}
+                                  title={resolveRouteKindTooltip(log.routeKind) ?? undefined}
                                   style={{ fontSize: 10 }}
                                 >
                                   {routeKindLabel}

@@ -1,8 +1,19 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { config } from '../config.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { proxyLogRoutes } from '../routes/api/proxyLogRoutes.js';
-import { listModelForwardOptions, listModelForwardRules } from '../services/modelForwardService.js';
+import {
+  ModelForwardError,
+  listModelForwardOptions,
+  listModelForwardRules,
+} from '../services/modelForwardService.js';
+import { syncEdgeForwardRules } from './configSync.js';
+import {
+  moveLocalForwardTarget,
+  resetLocalForwardEdits,
+  setLocalForwardRuleEnabled,
+  setLocalForwardTargetEnabled,
+} from './forwardLocalEdits.js';
 import { rehydrateLocalRuntimeSettings } from './localSettingsPolicy.js';
 
 /** 日志页调试面板能改的字段：请求体字段名 → settings 表的键。 */
@@ -33,6 +44,30 @@ function readEdgeRuntimeSettings() {
   };
 }
 
+/**
+ * 解析路径里的 id：不合法就抛 ModelForwardError，交给下面的统一错误处理回 400。
+ */
+function parseLocalId(value: unknown, label: string): number {
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric) || numeric <= 0) throw new ModelForwardError(`${label} id 不合法`);
+  return numeric;
+}
+
+/** 本机镜像上的写操作：只把 ModelForwardError 翻成 400，其它错误照原样抛。 */
+async function runLocalForwardEdit<T>(
+  reply: FastifyReply,
+  handler: () => Promise<T>,
+): Promise<T | void> {
+  try {
+    return await handler();
+  } catch (error) {
+    if (error instanceof ModelForwardError) {
+      return reply.code(400).send({ success: false, message: error.message });
+    }
+    throw error;
+  }
+}
+
 /** 把请求里的值转成 settings 表该存的形式；返回 null 表示取值不合法。 */
 function normalizeDebugSettingValue(kind: 'boolean' | 'integer' | 'string', raw: unknown): unknown {
   if (kind === 'boolean') return typeof raw === 'boolean' ? raw : null;
@@ -46,7 +81,9 @@ function normalizeDebugSettingValue(kind: 'boolean' | 'integer' | 'string', raw:
  * exe 本地页面要用的接口，只有两个页面：模型转发与使用日志。
  *
  * - 使用日志直接复用主服务那份只读接口（proxyLogRoutes），路径与服务器一致；
- * - 模型转发只放两个 GET，数据来自同步下来的内存镜像，规则只能在服务器上改；
+ * - 模型转发：读取走镜像；顺序 / 启停的写接口只改本机内存镜像（见 forwardLocalEdits），
+ *   路径与主服务完全一致，所以前端页面不用为 exe 分叉；规则的增删改仍然只在服务器上做；
+ * - 绝不向配置源（服务器）写任何东西：这几个写接口的落点全是本机内存库。
  * - `/api/settings/runtime` 只认日志页调试面板那几项，其余运行设置在服务器上配；
  *   改完只写进内存库，进程退出即失效。
  */
@@ -62,6 +99,61 @@ export async function edgeLocalApiRoutes(app: FastifyInstance) {
     success: true,
     ...(await listModelForwardOptions()),
   }));
+
+  // 下面四个写接口只动本机镜像（exe 自己的转发顺序），不回写服务器。
+  // 路径与主服务一致，所以「模型转发」页面在服务器和 exe 里是同一份代码。
+  app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>(
+    '/api/model-forward-rules/:id/enabled',
+    async (request, reply) => runLocalForwardEdit(reply, async () => ({
+      success: true,
+      rule: await setLocalForwardRuleEnabled(
+        parseLocalId(request.params.id, '规则'),
+        !!request.body?.enabled,
+      ),
+    })),
+  );
+
+  app.post<{ Params: { id: string; targetId: string }; Body: { action?: string } }>(
+    '/api/model-forward-rules/:id/targets/:targetId/move',
+    async (request, reply) => runLocalForwardEdit(reply, async () => {
+      const action = String(request.body?.action ?? '').trim().toLowerCase();
+      if (action !== 'up' && action !== 'down' && action !== 'top') {
+        throw new ModelForwardError('action 只支持 up / down / top');
+      }
+      return {
+        success: true,
+        rule: await moveLocalForwardTarget(
+          parseLocalId(request.params.id, '规则'),
+          parseLocalId(request.params.targetId, '目标'),
+          action,
+        ),
+      };
+    }),
+  );
+
+  app.post<{ Params: { id: string; targetId: string }; Body: { enabled?: boolean } }>(
+    '/api/model-forward-rules/:id/targets/:targetId/enabled',
+    async (request, reply) => runLocalForwardEdit(reply, async () => ({
+      success: true,
+      rule: await setLocalForwardTargetEnabled(
+        parseLocalId(request.params.id, '规则'),
+        parseLocalId(request.params.targetId, '目标'),
+        !!request.body?.enabled,
+      ),
+    })),
+  );
+
+  // 「恢复服务器顺序」：丢掉本机改动，并强制重新拉一次服务器快照（以服务器为准）。
+  app.post('/api/edge/model-forward-local-edits/reset', async () => {
+    await resetLocalForwardEdits();
+    const sync = await syncEdgeForwardRules();
+    return {
+      ok: true,
+      synced: sync.ok,
+      message: sync.ok ? null : sync.message,
+      rules: await listModelForwardRules(),
+    };
+  });
 
   app.get('/api/settings/runtime', async () => readEdgeRuntimeSettings());
 

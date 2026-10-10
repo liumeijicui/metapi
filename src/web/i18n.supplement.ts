@@ -977,4 +977,13 @@ export const zhToEnSupplemental: Record<string, string> = {
   '下拉是我们已获取的全部模型，可按名字搜索，也可以直接输入别的': 'The dropdown lists every model we have collected — search by name, or just type another one',
   '没有匹配的模型，直接输入即可': 'No matching model — just type one',
   '共 ${candidateModels.length} 个可选模型${keyModelNames.length > 0 ? `，其中 ${keyModelNames.length} 个属于该密钥的白名单` : \'\'}': '${candidateModels.length} models available${keyModelNames.length > 0 ? `, ${keyModelNames.length} of them on this key\'s allowlist` : \'\'}',
+  // ==== 日志路由标签 + exe 本机转发顺序 ====
+  '记录这条日志时的路由已经被删除或重建，无法判断当时走的是新路由还是老路由': 'The route recorded in this log has been deleted or rebuilt, so the original new/legacy route cannot be determined',
+  '本机可以调整转发顺序与启停（只对本机生效）；规则的增删改请在服务器上做。': 'This machine can reorder targets and toggle them on or off (local only); add, edit, or delete rules on the server.',
+  '本机的顺序与启停只对本机转发生效，不写服务器；服务器上的模型转发规则一变，这里就以服务器为准。': 'Order and on/off toggles apply to this machine only and are never written back to the server; whenever the server rules change, the server wins here.',
+  '恢复服务器顺序': 'Restore server order',
+  '已恢复为服务器顺序': 'Restored to the server order',
+  '恢复服务器顺序失败': 'Failed to restore the server order',
+  '（本机的顺序只对本机转发生效）': ' (the local order applies to this machine only)',
+  '启用该规则（关闭后该模型没有可派发的通道，不会回落到同名老路由）': 'Enable this rule (when off, this model has no dispatchable channel and will not fall back to a legacy route of the same name)',
 };

@@ -1,3 +1,31 @@
+### 90. exe 本机的转发顺序 / 启停（以服务器为准）+ 使用日志的「老路由」其实是已删除路由
+
+- **类型**：缺陷修复（使用日志路由标签）+ 功能（边缘版本机转发顺序 / 启停）
+- **需求来源**：本会话需求（“好的提交吧。在帮我看看我们现在不是完全不用老路由了么？但是exe版本的日志我看见还有老路由的日志，分析一下是不是又bug,还有另一个问题：exe版本的模型转发帮我开放置顶、上移、下移、停用等按钮，点击后也实时生效，假如出现冲突的情况，就拉一遍服务端数据，永远以服务端数据为准”）
+- **结论（先回答“是不是又 bug”）**：**不是派发 bug**。exe 直接复用主服务的 `src/server/routes/proxy/router.js` + `tokenRouter`，没有任何独立的派发实现；本机实测那个边缘实例的请求**全部**落 `forward:` 路由（`routeKind=forward`），一条都没走老路由。看着像老路由的是**历史日志的标签**错了。
+- **根因**：`route_channels` / `token_routes` 会被定期重建（`modelService.rebuildTokenRoutesFromAvailability`、`syncPatternRouteChannelsAfterAffectedRouteChanges` 会删掉失效的精确路由），于是历史 `proxy_logs.route_id` 指向了**已经不存在**的路由行。`mapProxyLogRow()` 原来把「`route_id` 有值但 join 不到 `token_routes`」的行一律标成 `legacy`（老路由）。exe 的日志是长期归档的，所以那里最扎眼。线上数据：`route_id` 指向已删除路由 **1841** 行（最新 2026-10-09 14:21）、真老路由 109 行、新路由 506 行。
+- **改动**：
+  1. `src/server/routes/api/proxyLogRoutes.ts:312`：路由标签加第三态 `deleted` —— `route_id` 为空 → `null`；`token_routes.id` 为空 → `deleted`；否则按 `isForwardRoutePattern` 分 `forward` / `legacy`。列表与详情两处 select 补 `token_routes.id`（`:391`、`:658`）。
+  2. `src/web/api.ts:494`：`ProxyLogRouteKind` 加 `'deleted'`。
+  3. `src/web/pages/ProxyLogs.tsx:285`：`formatRouteKindLabel()` 加「路由已删除」；新增 `resolveRouteKindBadgeClass()`（forward → `badge-info`、deleted → `badge-warning`、其余 `badge-muted`）与 `resolveRouteKindTooltip()`（悬停说明「记录这条日志时的路由已经被删除或重建」），两处徽标改用这两个 helper。
+  4. 边缘版本机顺序 / 启停：新增 `src/server/edge/forwardLocalEdits.ts`。本机改动落在数据目录 `edge-logs.db` 的 `edge_settings`（`edge_forward_local_edit`），同时记下所基于的服务器快照指纹（`edge_forward_source_hash`）；每次写完立刻把镜像里的 `model_forward_targets.sort_order / enabled` 同步到真正决定派发的 `route_channels.priority / enabled`（并清掉历史降级状态），再 `invalidateTokenRouterCache()` —— 点完按钮**下一次请求**就按新顺序走。
+  5. `src/server/edge/configSync.ts:181`：每次快照导入后调用 `reapplyLocalForwardEditsAfterSync(forwardRulesHash)`（必须排在 `rebuildRoutesOnly()` 之后，否则重建会冲掉本机顺序）：指纹没变 → 本机改动盖回镜像并重排通道；指纹变了（服务器改过模型转发规则）→ 本机改动**整份作废**，永远以服务器为准。新增 `syncEdgeForwardRules()` 给「恢复服务器顺序」强制重新导入用。
+  6. `src/server/edge/localApiRoutes.ts:106`：新增 4 个写接口，**路径与主服务完全一致**（`POST /api/model-forward-rules/:id/enabled`、`.../targets/:targetId/move`、`.../targets/:targetId/enabled`）+ `POST /api/edge/model-forward-local-edits/reset`；只写本机内存库，绝不回写服务器（`edgeBoundary.architecture.test.ts` 的「不对配置源做任何写请求」断言原样通过）。
+  7. `src/web/pages/ModelForwarding.tsx`：`readOnly` → `edgeMode`；置顶 / 上移 / 下移 / 停用对 exe 开放（与服务器同一份代码），规则编辑 / 删除与「目标删除」仍然只在服务器；新增「恢复服务器顺序」按钮（`data-testid="edge-forward-restore-order"`，:301）；`model-forwarding/RuleEditorModal.tsx` 文案纠正为「关闭后该模型没有可派发的通道，不会回落到同名老路由」。
+  8. `src/web/i18n.supplement.ts` 补 8 条新文案。
+- **验证**：
+  - 单测：新增 `src/server/edge/forwardLocalEdits.test.ts` 6 例（置顶 / 上移 / 下移改通道优先级且 `selectChannel` 下一次就生效；本机停用落到下一个；规则停用后无通道可派发；指纹变化 → 本机改动整份作废、指纹不变 → 盖回本机顺序；恢复服务器顺序后不再盖回；镜像里没有的目标直接报错）。`modelForwarding.architecture.test.ts` 新增 1 例（共 15 例）；`ProxyLogs.server-driven.test.tsx` 补「路由已删除」断言（共 16 例）。
+  - 门禁：`tsconfig.server.json` / `tsconfig.web.json` / `tsconfig.web.test.json` `--noEmit` 全过；`npx vite build`、`npm run build:server` 通过。
+  - 全量回归：`src/server` 365 文件 2818 通过 / 3 失败（`siteProxy` / `factoryResetService` / `db.index.default-path`，均为既有环境性失败）；`src/web` 157 文件 559 通过 / 1 失败（既有 `accounts.rebind-panel-focus`）。
+  - 实机（`systemctl restart metapi` 后）：
+    - 日志标签：`/api/stats/proxy-logs/2578`（`route_id=1332` 已不在路由表）→ `routeKind: "deleted"`；`/2625` → `forward`；`/2558`（`route_id=67` 仍在且非 forward:）→ `legacy`。
+    - exe（`METAPI_EDGE_MODE=1 DATA_DIR=/home/app/edge-repro HOST=127.0.0.1 PORT=30099`，配置源 `http://127.0.0.1:4000`）：`POST /api/model-forward-rules/12/targets/26/move {action:'top'}` → 镜像顺序变 `26 → 23`，紧跟的 `/v1/chat/completions` **直接**命中 `channel_id=2628`（不再先试顺序 1 的 2286）；`POST .../targets/26/enabled {enabled:false}` → 落到 23；`POST /api/edge/model-forward-local-edits/reset` → 顺序回到服务器版（`23 → 26`）且下一次调用重新先走 2286；非法 `action` / 不存在的目标 → 400。
+    - 该边缘实例全部请求 `routeKind=forward`，确认「老路由」只是历史标签问题。
+- **副作用**：
+  - 本机顺序 / 启停只对本机转发生效，**服务器上的模型转发规则一变，本机改动会被整份清掉**（以服务器为准）；界面上有「恢复服务器顺序」可手动拉回，恢复失败时会明确提示而不是假装成功。
+  - 本机改动存在 `edge-logs.db`（重启仍在），工作库依旧是内存库，配置不落盘。
+  - Windows exe 要带上这两处改动需要重新执行 `npm run dist:desktop:edge`（只能在 Windows 上打）。
+
 ### 89. 模型转发去掉「冷却 / 待命 / 降级」自动换源：第一个启用目标永远就是被调用的那个
 
 - **类型**：行为变更（模型转发派发口径）+ 前端状态简化

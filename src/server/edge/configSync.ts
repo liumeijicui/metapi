@@ -5,6 +5,7 @@ import { invalidateSiteProxyCache } from '../services/siteProxy.js';
 import { invalidateTokenRouterCache } from '../services/tokenRouter.js';
 import { getEdgeEnv } from './edgeEnv.js';
 import { applyForwardRulesSnapshot, type ForwardRulesSnapshot } from './forwardRulesMirror.js';
+import { reapplyLocalForwardEditsAfterSync } from './forwardLocalEdits.js';
 import { flushEdgeLogs, restoreEdgeLogs } from './logArchive.js';
 import {
   buildLocalPreferencesPayload,
@@ -35,6 +36,8 @@ let lastSyncError: string | null = null;
 let lastSyncSections: EdgeSyncSections = { accounts: false, preferences: false, forwardRules: false };
 let inFlight: Promise<EdgeSyncResult> | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
+/** 「恢复服务器顺序」用：这一次同步强制重新导入模型转发快照，不吃内容指纹。 */
+let forceForwardRulesNext = false;
 
 /**
  * 稳定序列化：递归排序对象 key，并剔除每次都变的字段，
@@ -111,6 +114,8 @@ export function syncEdgeConfig(): Promise<EdgeSyncResult> {
 }
 
 async function runSync(): Promise<EdgeSyncResult> {
+  const forceForwardRules = forceForwardRulesNext;
+  forceForwardRulesNext = false;
   const source = await readEdgeSyncSource();
   if (!source.url || !source.token) {
     // 还没登录（登录页只填了地址、令牌还没进来）：这不是故障，定时同步安静跳过，不写成错误状态。
@@ -133,7 +138,7 @@ async function runSync(): Promise<EdgeSyncResult> {
     const sections: EdgeSyncSections = {
       accounts: accountsHash !== lastHashes.accounts,
       preferences: preferencesHash !== lastHashes.preferences,
-      forwardRules: forwardRulesHash !== lastHashes.forwardRules,
+      forwardRules: forceForwardRules || forwardRulesHash !== lastHashes.forwardRules,
     };
 
     if (!sections.accounts && !sections.preferences && !sections.forwardRules) {
@@ -169,6 +174,13 @@ async function runSync(): Promise<EdgeSyncResult> {
       await routeRefreshWorkflow.rebuildRoutesOnly();
     }
 
+    // 本机的顺序 / 启停是「这台机器先用哪个源」的开关：快照指纹没变就重新盖回镜像，
+    // 服务器那边改过模型转发规则（指纹变了）就整份作废 —— 永远以服务器为准。
+    // 必须排在 rebuildRoutesOnly 之后，不然路由重建会把本机顺序冲掉。
+    if (sections.accounts || sections.forwardRules) {
+      await reapplyLocalForwardEditsAfterSync(forwardRulesHash);
+    }
+
     lastHashes.accounts = accountsHash;
     lastHashes.preferences = preferencesHash;
     lastHashes.forwardRules = forwardRulesHash;
@@ -189,6 +201,16 @@ function recordFailure(message: string): EdgeSyncResult {
   // 失败时保留 lastSyncAt（那仍是最后一次成功的时间），只更新错误信息。
   lastSyncError = message;
   return { ok: false, message, at: new Date().toISOString() };
+}
+
+/**
+ * 「恢复服务器顺序」用：强制重新导入一次模型转发快照。
+ * 先等正在跑的那次同步收尾，避免两次导入并发把镜像写乱。
+ */
+export async function syncEdgeForwardRules(): Promise<EdgeSyncResult> {
+  if (inFlight) await inFlight.catch(() => undefined);
+  forceForwardRulesNext = true;
+  return await syncEdgeConfig();
 }
 
 /** 启动定时同步（间隔默认 5 分钟，可由 METAPI_EDGE_CONFIG_SYNC_INTERVAL_MS 覆盖）。 */

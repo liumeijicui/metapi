@@ -44,8 +44,9 @@ function describeTargets(rule: ModelForwardRuleRow): string[] {
 export default function ModelForwarding() {
   const toast = useToast();
   const edgeStatus = useEdgeStatus();
-  // 边缘版（exe）里这台机器只是服务器配置的只读镜像：规则只能在服务器上改。
-  const readOnly = edgeStatus?.edgeMode === true;
+  // 边缘版（exe）：规则本身仍然是服务器配置的镜像，但「顺序 / 启停」是这台机器的
+  // 转发开关 —— 点完立即对本机生效，服务器上的规则一变就以服务器为准。
+  const edgeMode = edgeStatus?.edgeMode === true;
   const [rules, setRules] = useState<ModelForwardRuleRow[]>([]);
   const [options, setOptions] = useState<ModelForwardOptions>(EMPTY_OPTIONS);
   const [siteModels, setSiteModels] = useState<Record<number, string[]>>({});
@@ -92,6 +93,31 @@ export default function ModelForwarding() {
       } else {
         toast.error(result.message || tr('同步失败'));
       }
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // 「恢复服务器顺序」：清掉本机改过的顺序 / 启停，并按服务器那一版重排（以服务器为准）。
+  const handleEdgeResetOrder = async () => {
+    setSyncing(true);
+    try {
+      const result = await api.resetEdgeModelForwardLocalOrder() as {
+        ok?: boolean;
+        synced?: boolean;
+        message?: string | null;
+      } | null;
+      // 本机改动已经清掉、但这一轮没拉到服务器配置时不能报成功：
+      // 镜像里还是本机那版顺序，得等下一次同步成功才会真正回到服务器顺序。
+      if (result?.ok && result.synced !== false) {
+        toast.success(tr('已恢复为服务器顺序'));
+      } else {
+        const detail = typeof result?.message === 'string' && result.message ? `：${result.message}` : '';
+        toast.error(`${tr('恢复服务器顺序失败')}${detail}`);
+      }
+      await load();
+    } catch (error: any) {
+      toast.error(error?.message || tr('恢复服务器顺序失败'));
     } finally {
       setSyncing(false);
     }
@@ -237,12 +263,12 @@ export default function ModelForwarding() {
         <div>
           <h1 className="page-title">{tr('模型转发')}</h1>
           <div className="page-subtitle">
-            {readOnly
-              ? tr('本机是只读镜像：转发规则在服务器上维护，这里只用来查看和拉取。')
-              : tr('把对外模型名固定转发到指定站点、上游模型与账号；优先级高于「路由」页面里的同名路由，规则未启用时自动回落老路由。')}
+            {edgeMode
+              ? tr('本机可以调整转发顺序与启停（只对本机生效）；规则的增删改请在服务器上做。')
+              : tr('把对外模型名固定转发到指定站点、上游模型与账号；规则声明过的模型只走这里配的站点，不再回落到同名的老路由。')}
           </div>
         </div>
-        {readOnly ? (
+        {edgeMode ? (
           <button
             type="button"
             className="btn btn-primary"
@@ -262,11 +288,21 @@ export default function ModelForwarding() {
         )}
       </div>
 
-      {readOnly ? (
+      {edgeMode ? (
         <div className="edge-mirror-banner">
           <span>
-            {tr('本机不改转发规则：需要调整时请在服务器上改好，再点右上角「从服务器同步」拉下来。')}
+            {tr('本机的顺序与启停只对本机转发生效，不写服务器；服务器上的模型转发规则一变，这里就以服务器为准。')}
           </span>
+          <button
+            type="button"
+            className="btn btn-link"
+            style={{ fontSize: 11.5, padding: '0 4px' }}
+            disabled={syncing}
+            data-testid="edge-forward-restore-order"
+            onClick={() => void handleEdgeResetOrder()}
+          >
+            {tr('恢复服务器顺序')}
+          </button>
         </div>
       ) : null}
 
@@ -276,7 +312,7 @@ export default function ModelForwarding() {
         </div>
       ) : rules.length === 0 ? (
         <div className="card" style={{ padding: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
-          {readOnly
+          {edgeMode
             ? tr('本机还没有转发规则。请确认服务器上已配置，然后点右上角「从服务器同步」。')
             : tr('还没有转发规则。点右上角「新建转发」，选择站点、模型和账号即可。')}
         </div>
@@ -298,16 +334,16 @@ export default function ModelForwarding() {
                   </span>
                 ) : null}
                 <span style={{ flex: 1 }} />
-                {readOnly ? null : (
+                <button
+                  type="button"
+                  className="btn btn-link"
+                  disabled={busyRuleId === rule.id}
+                  onClick={() => void handleToggle(rule)}
+                >
+                  {rule.enabled ? tr('停用') : tr('启用')}
+                </button>
+                {edgeMode ? null : (
                   <>
-                    <button
-                      type="button"
-                      className="btn btn-link"
-                      disabled={busyRuleId === rule.id}
-                      onClick={() => void handleToggle(rule)}
-                    >
-                      {rule.enabled ? tr('停用') : tr('启用')}
-                    </button>
                     <button
                       type="button"
                       className="btn btn-link"
@@ -384,8 +420,6 @@ export default function ModelForwarding() {
                         {state}
                       </span>
                       <span style={{ flex: 1 }} />
-                      {readOnly ? null : (
-                      <>
                       <button
                         type="button"
                         className="btn btn-link"
@@ -428,18 +462,18 @@ export default function ModelForwarding() {
                       >
                         {target.enabled ? tr('停用') : tr('启用')}
                       </button>
-                      <button
-                        type="button"
-                        className="btn btn-link btn-link-danger"
-                        style={{ fontSize: 11.5, padding: '0 4px' }}
-                        title={tr('删除该转发目标（无需进入编辑）')}
-                        disabled={targetBusy}
-                        data-testid={`forward-target-delete-${target.id}`}
-                        onClick={() => setPendingDelete({ mode: 'target', rule, target })}
-                      >
-                        {tr('删除')}
-                      </button>
-                      </>
+                      {edgeMode ? null : (
+                        <button
+                          type="button"
+                          className="btn btn-link btn-link-danger"
+                          style={{ fontSize: 11.5, padding: '0 4px' }}
+                          title={tr('删除该转发目标（无需进入编辑）')}
+                          disabled={targetBusy}
+                          data-testid={`forward-target-delete-${target.id}`}
+                          onClick={() => setPendingDelete({ mode: 'target', rule, target })}
+                        >
+                          {tr('删除')}
+                        </button>
                       )}
                     </div>
                   );
@@ -451,6 +485,7 @@ export default function ModelForwarding() {
                 style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}
               >
                 {tr('顺序即调用顺序：永远只走排在最前面的「启用」目标；把它停用，才会落到下一个。')}
+                {edgeMode ? ` ${tr('（本机的顺序只对本机转发生效）')}` : ''}
               </div>
 
               <div style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
@@ -496,7 +531,7 @@ export default function ModelForwarding() {
       />
 
       <RuleEditorModal
-        open={editorOpen && !readOnly}
+        open={editorOpen && !edgeMode}
         editingRule={editingRule}
         options={options}
         siteModels={siteModels}

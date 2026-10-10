@@ -150,6 +150,44 @@ describe('ModelForwarding 模型转发页', () => {
     expect(tokenRouter).toContain('filterAvoidedCandidatesForRoute');
   });
 
+  it('exe 放开顺序与启停（只对本机生效），规则增删改仍以服务器为准', () => {
+    const localEdits = read('src/server/edge/forwardLocalEdits.ts');
+    const localApi = read('src/server/edge/localApiRoutes.ts');
+    const configSync = read('src/server/edge/configSync.ts');
+
+    // 页面不再有「只读镜像」这个总开关：exe 里顺序与启停和服务器是同一份代码。
+    expect(page).not.toContain('readOnly');
+    expect(page).toContain('const edgeMode = edgeStatus?.edgeMode === true;');
+    expect(page).toContain('handleMoveTarget');
+    expect(page).toContain('handleToggleTarget');
+    expect(page).toContain('data-testid="edge-forward-restore-order"');
+    expect(page).toContain('api.resetEdgeModelForwardLocalOrder');
+    // 规则的增删改仍然只在服务器上做：编辑入口与弹窗对 exe 关闭。
+    expect(page).toContain('{edgeMode ? null : (');
+    expect(page).toContain('open={editorOpen && !edgeMode}');
+
+    // exe 的本机写接口路径与主服务完全一致，所以前端不用分叉。
+    expect(localApi).toContain("'/api/model-forward-rules/:id/enabled'");
+    expect(localApi).toContain("'/api/model-forward-rules/:id/targets/:targetId/move'");
+    expect(localApi).toContain("'/api/model-forward-rules/:id/targets/:targetId/enabled'");
+    expect(localApi).toContain("'/api/edge/model-forward-local-edits/reset'");
+    expect(localApi).not.toContain(".delete(");
+    expect(api).toContain('/api/edge/model-forward-local-edits/reset');
+
+    // 本机改动落在内存镜像上，并且点完立刻失效路由器缓存。
+    expect(localEdits).toContain('invalidateTokenRouterCache()');
+    expect(localEdits).toContain('edge_forward_local_edit');
+    expect(localEdits).toContain('edge_forward_source_hash');
+    // 服务器快照指纹一变，本机改动整份作废。
+    expect(localEdits).toContain('const serverChanged = storedHash !== sourceHash;');
+    expect(localEdits).toContain('writeEditState({ rules: {} });');
+    // 必须在路由重建之后盖回本机顺序，否则重建会把顺序冲掉。
+    const reapplyIndex = configSync.indexOf('await reapplyLocalForwardEditsAfterSync(');
+    const rebuildIndex = configSync.indexOf('await routeRefreshWorkflow.rebuildRoutesOnly();');
+    expect(rebuildIndex).toBeGreaterThan(-1);
+    expect(reapplyIndex).toBeGreaterThan(rebuildIndex);
+  });
+
   it('弹窗会即时提示对外模型名重复，并把它接进保存校验', () => {
     expect(editor).toContain('existingRuleNames');
     expect(editor).toContain('duplicatedModelName');

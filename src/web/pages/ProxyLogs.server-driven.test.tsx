@@ -307,6 +307,14 @@ describe('ProxyLogs server-driven page', () => {
         modelActual: 'gpt-4o',
         routeKind: 'legacy',
       },
+      {
+        ...mapped.items[0],
+        id: 203,
+        modelRequested: 'gpt-4o',
+        modelActual: 'gpt-4o',
+        // 转发路由被重建过，历史日志的 route_id 指向已删除的行：不能显示成老路由。
+        routeKind: 'deleted',
+      },
     ];
     apiMock.getProxyLogs.mockResolvedValue(mapped);
     apiMock.getProxyLogsQuery.mockResolvedValue(mapped);
@@ -330,6 +338,9 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('→ deepseek-v4.1-flash');
       // 映射后与请求模型一致时不再重复展示。
       expect(text.match(/→ gpt-4o/g)).toBeNull();
+      // 路由已被删除 / 重建的日志单独标出来，不再被当成老路由。
+      expect(text).toContain('老路由');
+      expect(text).toContain('路由已删除');
     } finally {
       await act(async () => {
         root?.unmount();

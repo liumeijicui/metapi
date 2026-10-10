@@ -489,7 +489,9 @@ export type ProxyLogBillingDetails = {
   };
 } | null;
 
-export type ProxyLogRouteKind = 'forward' | 'legacy';
+// 'deleted'：日志里的 route_id 已经不在当前路由表里（转发路由被重建过，历史行会这样），
+// 不能当成老路由显示。
+export type ProxyLogRouteKind = 'forward' | 'legacy' | 'deleted';
 
 export type ProxyLogListItem = {
   id: number;
@@ -1031,6 +1033,9 @@ export const api = {
     request(`/api/model-forward-rules/${ruleId}/targets/${targetId}`, { method: "DELETE" }),
   deleteModelForwardRule: (id: number) =>
     request(`/api/model-forward-rules/${id}`, { method: "DELETE" }),
+  // 边缘版（exe）专用：丢掉本机改过的顺序 / 启停，回到服务器那一版（只对本机生效）。
+  resetEdgeModelForwardLocalOrder: () =>
+    request("/api/edge/model-forward-local-edits/reset", { method: "POST" }),
   addRoute: (data: any) =>
     request("/api/routes", { method: "POST", body: JSON.stringify(data) }),
   updateRoute: (id: number, data: any) =>
