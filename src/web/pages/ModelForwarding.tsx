@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { triggerEdgeSync, useEdgeStatus } from '../edgeMode.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -10,6 +11,17 @@ import type {
   ModelForwardRuleRow,
   ModelForwardTargetRow,
 } from './model-forwarding/types.js';
+
+/**
+ * 待确认的删除操作。
+ *
+ * 删除转发规则会连带它的全部目标，删错一次就得重新配站点、模型、账号三样；
+ * 目标也是「站点 + 上游模型 + 账号」拼出来的，手滑点掉不好复原。所以两种删除
+ * 都先弹确认框，用户点了「确认删除」才真的发请求。
+ */
+type PendingDelete =
+  | { mode: 'rule'; rule: ModelForwardRuleRow }
+  | { mode: 'target'; rule: ModelForwardRuleRow; target: ModelForwardTargetRow };
 
 const EMPTY_OPTIONS: ModelForwardOptions = { sites: [], accounts: [], models: [] };
 
@@ -44,6 +56,8 @@ export default function ModelForwarding() {
   const [busyRuleId, setBusyRuleId] = useState<number | null>(null);
   const [busyTargetKey, setBusyTargetKey] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -159,19 +173,6 @@ export default function ModelForwarding() {
     }
   };
 
-  const handleDelete = async (rule: ModelForwardRuleRow) => {
-    setBusyRuleId(rule.id);
-    try {
-      await api.deleteModelForwardRule(rule.id);
-      toast.success(tr('转发规则已删除'));
-      await load();
-    } catch (error: any) {
-      toast.error(error?.message || tr('删除转发规则失败'));
-    } finally {
-      setBusyRuleId(null);
-    }
-  };
-
   const handleMoveTarget = async (
     rule: ModelForwardRuleRow,
     target: ModelForwardTargetRow,
@@ -201,20 +202,31 @@ export default function ModelForwarding() {
     }
   };
 
-  const handleDeleteTarget = async (rule: ModelForwardRuleRow, target: ModelForwardTargetRow) => {
-    const label = target.siteName || `#${target.siteId}`;
-    const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function'
-      ? true
-      : window.confirm(tr(`确认删除该转发目标（${label} / ${target.upstreamModel}）吗？`));
-    if (!confirmed) return;
-    setBusyTargetKey(`${rule.id}:${target.id}`);
+  // 真正执行删除：只由确认框里的「确认删除」触发，页面上的「删除」按钮只负责
+  // 把待删对象放进 pendingDelete。
+  const confirmDelete = async () => {
+    const pending = pendingDelete;
+    if (!pending) return;
+    setDeleting(true);
+    if (pending.mode === 'rule') setBusyRuleId(pending.rule.id);
+    else setBusyTargetKey(`${pending.rule.id}:${pending.target.id}`);
     try {
-      await api.deleteModelForwardTarget(rule.id, target.id);
-      toast.success(tr('转发目标已删除'));
+      if (pending.mode === 'rule') {
+        await api.deleteModelForwardRule(pending.rule.id);
+        toast.success(tr('转发规则已删除'));
+      } else {
+        await api.deleteModelForwardTarget(pending.rule.id, pending.target.id);
+        toast.success(tr('转发目标已删除'));
+      }
+      setPendingDelete(null);
       await load();
     } catch (error: any) {
-      toast.error(error?.message || tr('删除转发目标失败'));
+      toast.error(error?.message || tr(
+        pending.mode === 'rule' ? '删除转发规则失败' : '删除转发目标失败',
+      ));
     } finally {
+      setDeleting(false);
+      setBusyRuleId(null);
       setBusyTargetKey(null);
     }
   };
@@ -307,7 +319,9 @@ export default function ModelForwarding() {
                       type="button"
                       className="btn btn-link btn-link-danger"
                       disabled={busyRuleId === rule.id}
-                      onClick={() => void handleDelete(rule)}
+                      title={tr('删除该转发规则（会一并删除它的全部目标）')}
+                      data-testid={`forward-rule-delete-${rule.id}`}
+                      onClick={() => setPendingDelete({ mode: 'rule', rule })}
                     >
                       {tr('删除')}
                     </button>
@@ -429,10 +443,10 @@ export default function ModelForwarding() {
                         type="button"
                         className="btn btn-link btn-link-danger"
                         style={{ fontSize: 11.5, padding: '0 4px' }}
-                        title={tr('删除该转发目标（直接删除，无需进入编辑）')}
+                        title={tr('删除该转发目标（无需进入编辑）')}
                         disabled={targetBusy}
                         data-testid={`forward-target-delete-${target.id}`}
-                        onClick={() => void handleDeleteTarget(rule, target)}
+                        onClick={() => setPendingDelete({ mode: 'target', rule, target })}
                       >
                         {tr('删除')}
                       </button>
@@ -457,6 +471,40 @@ export default function ModelForwarding() {
           ))}
         </div>
       )}
+
+      <DeleteConfirmModal
+        open={pendingDelete !== null}
+        onClose={() => { if (!deleting) setPendingDelete(null); }}
+        onConfirm={() => { void confirmDelete(); }}
+        loading={deleting}
+        title={pendingDelete?.mode === 'target'
+          ? tr('确认删除转发目标')
+          : tr('确认删除转发规则')}
+        description={pendingDelete?.mode === 'target'
+          ? (
+            <>
+              {tr('将删除该转发规则下的目标')}
+              {' '}
+              <strong>
+                {`${pendingDelete.target.siteName || `#${pendingDelete.target.siteId}`} / `
+                  + `${pendingDelete.target.accountUsername || `#${pendingDelete.target.accountId}`} / `
+                  + `${pendingDelete.target.upstreamModel}`}
+              </strong>
+              {tr('。同一规则下的其它目标不受影响。')}
+            </>
+          )
+          : pendingDelete
+            ? (
+              <>
+                {tr('将删除转发规则')}
+                {' '}
+                <strong>{pendingDelete.rule.modelName}</strong>
+                {` ${tr('及其')} ${pendingDelete.rule.targets.length} ${tr('个转发目标')}`}
+                {tr('。删除后该模型名不再由本页接管。')}
+              </>
+            )
+            : null}
+      />
 
       <RuleEditorModal
         open={editorOpen && !readOnly}
