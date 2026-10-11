@@ -62,8 +62,11 @@ describe('imageCaptcha', () => {
     }
     const characterAccuracy = charactersCorrect / charactersSeen;
     const answerAccuracy = answersCorrect / fixtures.length;
-    expect(characterAccuracy).toBeGreaterThanOrEqual(0.9);
-    expect(answerAccuracy).toBeGreaterThanOrEqual(0.7);
+    // Corpus LOO currently reads 99.0% / 95.1%. This bar is NOT a live-accuracy
+    // claim (live is ~65%, see the module header); it only fails loudly when a
+    // fixture is added or edited without regenerating the embedded table.
+    expect(characterAccuracy).toBeGreaterThanOrEqual(0.97);
+    expect(answerAccuracy).toBeGreaterThanOrEqual(0.9);
   });
 
   it('reads the whole corpus with the embedded table', () => {
@@ -72,7 +75,9 @@ describe('imageCaptcha', () => {
       const solved = solveImageCaptcha(fixture.png);
       if (solved.answer === fixture.answer) correct += 1;
     }
-    expect(correct / fixtures.length).toBeGreaterThanOrEqual(0.95);
+    // Exact: the embedded table was generated from this very corpus, so a single
+    // miss means a fixture was added or edited without regenerating the table.
+    expect(correct).toBe(fixtures.length);
   });
 
   it('reports a null answer instead of guessing when the image is not a captcha', () => {

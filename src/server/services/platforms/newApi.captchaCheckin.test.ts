@@ -92,6 +92,12 @@ describe('NewApiAdapter captcha check-in', () => {
   function startCaptchaSite(options: {
     rejectFirstAttempt?: boolean;
     captchaRouteMissing?: boolean;
+    /** The plain, captcha-less call answers with this instead of the usual demand. */
+    plainDemandMessage?: string;
+    /** Answer the *last* submission with this instead of paying out. */
+    verdict?: string;
+    /** Reject the first submission because the id was spent, not because of the read. */
+    invalidIdFirst?: boolean;
   } = {}) {
     let issuedIndex = -1;
     let attempts = 0;
@@ -122,7 +128,7 @@ describe('NewApiAdapter captcha check-in', () => {
       if (url === '/api/user/checkin') {
         const parsed = body ? (JSON.parse(body) as { captcha_id?: string }) : {};
         if (!parsed.captcha_id) {
-          json(res, { success: false, message: '请输入验证码' });
+          json(res, { success: false, message: options.plainDemandMessage || '请输入验证码' });
           return;
         }
         attempts += 1;
@@ -130,10 +136,18 @@ describe('NewApiAdapter captcha check-in', () => {
           json(res, { success: false, message: '验证码错误，请重试' });
           return;
         }
+        if (options.invalidIdFirst && attempts === 1) {
+          json(res, { success: false, message: '验证码无效，请刷新后重试' });
+          return;
+        }
         const expected = fixtures[Number(parsed.captcha_id.replace('cap-', ''))].answer;
         const posted = (JSON.parse(body) as { captcha_answer?: string }).captcha_answer || '';
         if (posted !== expected) {
           json(res, { success: false, message: '验证码错误，请重试' });
+          return;
+        }
+        if (options.verdict) {
+          json(res, { success: false, message: options.verdict });
           return;
         }
         json(res, { success: true, message: '签到成功', data: { quota_awarded: 5000000 } });
@@ -179,6 +193,35 @@ describe('NewApiAdapter captcha check-in', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/captcha|验证码/i);
+  });
+
+  it('reports the captcha exchange verdict, not the demand wording that triggered it', async () => {
+    // Regression: the plain call answered `验证码无效，请刷新后重试` (an instruction
+    // to supply a captcha), the exchange then read the image correctly and the
+    // site said `今日已签到`. The instruction used to win and get reported.
+    await startCaptchaSite({
+      plainDemandMessage: '验证码无效，请刷新后重试',
+      verdict: '今日已签到',
+    });
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, `session=${COOKIE_TOKEN}`, USER_ID);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('今日已签到');
+    expect(result.message).not.toContain('刷新后重试');
+  });
+
+  it('re-reads a fresh captcha when the site calls the submitted id spent', async () => {
+    await startCaptchaSite({ invalidIdFirst: true });
+    const adapter = new NewApiAdapter();
+    const result = await adapter.checkin(baseUrl, `session=${COOKIE_TOKEN}`, USER_ID);
+
+    expect(result.success).toBe(true);
+    const solved = requests.filter((r) => r.url === '/api/user/checkin' && r.body.includes('captcha_answer'));
+    expect(solved).toHaveLength(2);
+    const firstId = (JSON.parse(solved[0].body) as { captcha_id: string }).captcha_id;
+    const secondId = (JSON.parse(solved[1].body) as { captcha_id: string }).captcha_id;
+    expect(firstId).not.toBe(secondId);
   });
 
   it('does not touch the captcha route when the plain call succeeds', async () => {

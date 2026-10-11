@@ -1324,9 +1324,16 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return /验证码|captcha/i.test((message || '').trim());
   }
 
-  /** Whether a verdict means the captcha answer was rejected, i.e. re-read a fresh one. */
+  /**
+   * Whether a verdict means the captcha answer was rejected, i.e. re-read a
+   * fresh one.
+   *
+   * `无效` is in the list because these forks answer a spent or unknown
+   * `captcha_id` with `验证码无效，请刷新后重试` — the wording asks for exactly
+   * what the retry loop does, so treating it as terminal would waste the advice.
+   */
   private isCaptchaRejectionMessage(message: string | null | undefined): boolean {
-    return /验证码(错误|不正确|已失效|失效|过期)|captcha\s*(is\s*)?(invalid|incorrect|expired|mismatch)/i.test(
+    return /验证码(错误|不正确|无效|已失效|失效|过期)|captcha\s*(is\s*)?(invalid|incorrect|expired|mismatch)/i.test(
       (message || '').trim(),
     );
   }
@@ -1353,15 +1360,17 @@ export class NewApiAdapter extends BasePlatformAdapter {
    * Answers the daily check-in captcha.
    *
    * Each attempt pulls a *new* captcha, because a rejected answer invalidates the
-   * one it was computed from. A single read is right about three quarters of the
-   * time, so three attempts put the flow above 98%; when every attempt is spent
-   * the caller keeps the site's own wording rather than a generic failure.
+   * one it was computed from. The read is only about 65% correct per attempt —
+   * the renderer drops pixels, which erases the difference between shapes like
+   * `E`/`F` and `5`/`S` — so the budget is what carries the flow: five attempts
+   * take it to ~99.5%. When every attempt is spent the caller keeps the site's own
+   * wording rather than a generic failure.
    */
   private async tryCaptchaCheckin(
     baseUrl: string,
     cookie: string,
     cookieUserId?: number | null,
-    maxAttempts = 3,
+    maxAttempts = 5,
   ): Promise<CheckinResult> {
     let lastMessage: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -2195,7 +2204,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
         if (!this.isCaptchaRequiredCheckinMessage(message)) return null;
         const captchaResult = await this.tryCaptchaCheckin(baseUrl, cookie, cookieUserId);
         if (captchaResult.success) return captchaResult;
-        rememberFailure(captchaResult.message);
+        // The wording that got us here ("请输入验证码" / "验证码无效，请刷新后重试")
+        // is an instruction to supply a captcha, not a verdict about the account.
+        // Whatever the captcha exchange concluded is the site's real answer, so it
+        // replaces that demand outright instead of losing to it on "keep the first
+        // message" grounds.
+        firstFailureMessage = captchaResult.message;
         return null;
       };
 
