@@ -13,6 +13,7 @@ import {
   buildUpstreamEndpointRequest,
   isUnsupportedMediaTypeError,
   isEndpointDowngradeError,
+  isGatewayServerError,
   resolveUpstreamEndpointCandidates,
 } from './upstreamEndpoint.js';
 import {
@@ -751,6 +752,21 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(isEndpointDowngradeError(400, '{"error":{"message":"upstream_error: unsupported endpoint /v1/responses","type":"upstream_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(true);
     expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
+  });
+
+  it('does not treat gateways or generic API errors as endpoint mismatches', () => {
+    // 网关层的 5xx（HTML 页面 / 空响应）说明端点根本没被处理过，可以降级。
+    expect(isGatewayServerError(502, '<html><title>502: Bad gateway</title></html>')).toBe(true);
+    expect(isGatewayServerError(504, '')).toBe(true);
+
+    // API 本体回的结构化错误说明请求已经打到端点，属于瞬时/语义故障，不能降级。
+    const upstreamFailure = '{"error":{"message":"Item \'msg_1\' of type \'message\' was provided without its required \'reasoning\' item","type":"invalid_request_error"}}';
+    expect(isGatewayServerError(500, upstreamFailure)).toBe(false);
+    expect(isEndpointDowngradeError(500, upstreamFailure)).toBe(false);
+    expect(isGatewayServerError(500, '{"error":{"message":"上游服务返回异常，本次请求未能完成。","type":"<nil>"}}')).toBe(false);
+
+    // 端点确实不存在时仍然要能降级。
+    expect(isEndpointDowngradeError(500, '{"error":{"message":"Invalid URL (POST /v1/responses)","type":"invalid_request_error"}}')).toBe(true);
   });
 
   it('treats Claude Code CLI-only restriction on responses as downgrade candidate', () => {

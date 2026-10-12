@@ -41,12 +41,13 @@ describe('route refresh workflow architecture boundaries', () => {
 
   it('keeps exact-route pattern sync detection behind the pattern sync service', () => {
     const tokensSource = readSource('./tokens.ts');
-    const patternSyncServiceSource = readSource('../../services/patternRouteChannelSyncService.ts');
 
-    expect(tokensSource).toContain('syncPatternRouteChannelsAfterAffectedRouteChanges');
+    // 老路由（按 model_pattern 生成的路由）已整体退出派发，路由 API 不再做任何
+    // pattern 路由/通道同步，只剩读取与重建。
+    expect(tokensSource).not.toContain('patternRouteChannelSyncService');
+    expect(tokensSource).not.toContain('syncPatternRouteChannelsAfterAffectedRouteChanges');
     expect(tokensSource).not.toContain('rebuildPatternRouteChannelsAfterExactSourceRouteChange');
     expect(tokensSource).not.toContain('rebuildAllPatternRouteChannels');
-    expect(patternSyncServiceSource).toContain('syncPatternRouteChannelsAfterAffectedRouteChanges');
   });
 
   it('keeps proxy fallback refreshes and scheduler hooks on the route refresh workflow', () => {
@@ -62,10 +63,15 @@ describe('route refresh workflow architecture boundaries', () => {
     const geminiSurfaceSource = readSource('../../proxy-core/surfaces/geminiSurface.ts');
     const channelSelectionSource = readSource('../../proxy-core/channelSelection.ts');
 
-    for (const source of [schedulerSource, oauthServiceSource, channelSelectionSource]) {
+    for (const source of [schedulerSource, oauthServiceSource]) {
       expectImportsRouteRefreshWorkflow(source);
       expectNoDirectModelServiceRouteRefresh(source);
     }
+
+    // 选路落在老路由上时曾经会「刷新模型并重建路由再试一次」，老路由退出派发后这段
+    // 兜底只会拖慢失败请求，已经删掉；channelSelection 不能再依赖 routeRefreshWorkflow。
+    expect(channelSelectionSource).not.toContain('routeRefreshWorkflow');
+    expectNoDirectModelServiceRouteRefresh(channelSelectionSource);
 
     for (const source of [
       completionsSource,

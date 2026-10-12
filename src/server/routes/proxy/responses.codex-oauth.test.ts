@@ -997,7 +997,10 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondResponse.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(selectChannelMock).toHaveBeenCalledTimes(2);
-    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(2);
+    // 第 1 个请求还没有粘滞绑定（走 selectChannel），第 2 个请求命中粘滞通道但选不出来，
+    // 于是回落到 selectChannel。老路由时代的「刷新模型 + 再试一次粘滞通道」已经删掉，
+    // 所以这里每个请求最多只查一次粘滞通道。
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
 
     const [, firstOptions] = fetchMock.mock.calls[0] as [string, any];
     const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];

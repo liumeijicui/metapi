@@ -123,7 +123,7 @@ describe('模型转发不做自动降级与冷却换源', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('转发通道连续 10 次上游故障也不降级，仍然只走顺序 1', async () => {
+  it('转发通道连续 10 次上游故障不降级、也不换源，仍然只走第一个', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -132,6 +132,7 @@ describe('模型转发不做自动降级与冷却换源', () => {
       ],
     });
     const firstChannelId = rule.targets[0].channelId as number;
+    const secondChannelId = rule.targets[1].channelId as number;
     const priorityBefore = (await readChannel(firstChannelId)).priority ?? 0;
     expect(await selectForwardedChannelId()).toBe(firstChannelId);
 
@@ -145,8 +146,9 @@ describe('模型转发不做自动降级与冷却换源', () => {
     expect(channel.consecutiveUpstreamFailures).toBe(config.proxyAutoDemoteFailureThreshold);
     expect(channel.autoDemotedAt).toBeNull();
     expect(channel.priority).toBe(priorityBefore);
-    // 顺序 1 永远是首选，不会自动切到顺序 2。
+    // 连续失败只会让它进入冷却，但不会自动换源：第一个永远是第一个。
     expect(await selectForwardedChannelId()).toBe(firstChannelId);
+    expect(secondChannelId).not.toBe(firstChannelId);
   });
 
   it('「类似 400」的错误同样计入连续计数，但转发通道仍不降级', async () => {
@@ -213,7 +215,7 @@ describe('模型转发不做自动降级与冷却换源', () => {
     expect(restored.consecutiveUpstreamFailures).toBe(0);
   });
 
-  it('转发通道冷却中也不会被跳过：顺序 1 永远是首选', async () => {
+  it('转发通道冷却中也不让位：换源只能靠人工停用', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [
@@ -224,7 +226,7 @@ describe('模型转发不做自动降级与冷却换源', () => {
     const firstChannelId = rule.targets[0].channelId as number;
     const secondChannelId = rule.targets[1].channelId as number;
 
-    // 模拟顺序 1 因为上游失败正在冷却：它仍然是每次被调用的那个。
+    // 模拟顺序 1 因为上游失败正在冷却：冷却只是记账，选路不会因此换源。
     await db.update(schema.routeChannels).set({
       cooldownUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       cooldownLevel: 1,
@@ -234,7 +236,7 @@ describe('模型转发不做自动降级与冷却换源', () => {
 
     expect(await selectForwardedChannelId()).toBe(firstChannelId);
 
-    // 只有把它停用，才轮到顺序 2。
+    // 换源只有人工操作：停用它，才轮到顺序 2。
     await db.update(schema.routeChannels).set({ enabled: false })
       .where(eq(schema.routeChannels.id, firstChannelId)).run();
     expect(await selectForwardedChannelId()).toBe(secondChannelId);

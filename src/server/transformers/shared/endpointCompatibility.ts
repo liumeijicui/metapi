@@ -95,6 +95,34 @@ function parseEndpointErrorShape(upstreamErrorText?: string | null): ParsedEndpo
   }
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function looksLikeApiErrorEnvelope(upstreamErrorText?: string | null): boolean {
+  const trimmed = (upstreamErrorText || '').trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return false;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  if (!isPlainRecord(parsed)) return false;
+
+  const error = parsed.error;
+  if (isPlainRecord(error)) {
+    return (
+      typeof error.message === 'string'
+      || typeof error.code === 'string'
+      || typeof error.type === 'string'
+    );
+  }
+
+  return typeof parsed.message === 'string' || typeof parsed.code === 'string';
+}
+
 function inferEndpointMentionFromText(text: string): CompatibilityEndpoint | null {
   if (!text) return null;
   if (text.includes('/v1/responses') || /\bresponses\b/.test(text)) return 'responses';
@@ -257,6 +285,19 @@ export function promoteResponsesCandidateAfterLegacyChatError(
   endpointCandidates.splice(currentIndex + 1, 0, 'responses');
 }
 
+/**
+ * 上游 5xx 只在「响应体不是 API 自己回的结构化错误」时才作为端点不兼容的信号。
+ *
+ * 结构化错误信封说明请求已经打到 API 本体（例如模型不支持某能力、上游渠道报错），
+ * 属于瞬时故障或语义错误，降级到别的协议端点只会把请求送进更窄的通道、
+ * 制造更难读懂的上游报错。真正需要降级的是网关/接入层返回的 5xx（Cloudflare
+ * HTML 页、空响应体等），那时协议端点根本没被处理过。
+ */
+export function isGatewayServerError(status: number, upstreamErrorText?: string | null): boolean {
+  if (status < 500) return false;
+  return !looksLikeApiErrorEnvelope(upstreamErrorText);
+}
+
 export function isEndpointDowngradeError(status: number, upstreamErrorText?: string | null): boolean {
   if (status < 400) return false;
   const parsed = parseEndpointErrorShape(upstreamErrorText);
@@ -306,7 +347,9 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
       && endpointMismatchHint
     )
     || parsed.type === 'not_found_error'
-    || parsed.type === 'invalid_request_error'
+    // `invalid_request_error` 是 OpenAI 的通用客户端错误类型（参数错、字段缺失、
+    // 模型不支持某能力都会用它），本身不说明「端点不对」，必须配合端点提示才算。
+    || (parsed.type === 'invalid_request_error' && endpointMismatchHint)
     || parsed.type === 'unsupported_endpoint'
     || parsed.type === 'unsupported_path'
     || parsed.type === 'bad_response_status_code'

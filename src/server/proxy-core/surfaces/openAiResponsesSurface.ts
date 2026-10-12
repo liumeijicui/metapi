@@ -101,7 +101,7 @@ import {
 } from '../../services/proxyDebugTraceRuntime.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
 } from '../channelSelection.js';
@@ -372,7 +372,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
       });
 
       if (!selected) {
-        const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
+        const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
         await reportProxyAllFailed({
           model: requestedModel,
           reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
@@ -456,13 +456,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
         body,
         normalizedResponsesBody,
       );
-      // 有些站点自建的 Responses 接口只接受一部分自定义工具（agentrouter 只认
-      // apply_patch）。带它不认的 custom 工具时，请求体里那些声明会被降级成
-      // function 再发（见 upstreamRequestBuilder），所以回程也要把对应的
+      // 站点的 Responses 接口不接受 custom（freeform）工具声明时（agentrouter 只认
+      // apply_patch；new-api 这类转发站的薄壳端点一个都不认），请求体里那些声明会被
+      // 降级成 function 再发（见 upstreamRequestBuilder），所以回程也要把对应的
       // function_call 还原成 custom_tool_call，客户端才拿得到它声明的类型。
       const downgradedCustomToolNames = resolveUnsupportedResponsesCustomToolNames(
         selected.site.url,
         customToolNames,
+        selected.site.platform,
       );
       const openAiBody = openAiResponsesTransformer.inbound.toOpenAiBody(
         normalizedResponsesBody,

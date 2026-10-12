@@ -40,6 +40,8 @@ describe('sites token-router cache invalidation', () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.modelForwardTargets).run();
+    await db.delete(schema.modelForwardRules).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();
@@ -56,85 +58,48 @@ describe('sites token-router cache invalidation', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('recomputes probabilities with the new site weight after updating a site', async () => {
-    const targetSite = await db.insert(schema.sites).values({
-      name: 'weighted-target',
-      url: 'https://weighted-target.example.com',
+  it('invalidates the router cache after updating a site', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cache-target',
+      url: 'https://cache-target.example.com',
       platform: 'new-api',
       status: 'active',
-      globalWeight: 1,
     }).returning().get();
 
-    const competitorSite = await db.insert(schema.sites).values({
-      name: 'weighted-competitor',
-      url: 'https://weighted-competitor.example.com',
-      platform: 'new-api',
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cache-user',
+      accessToken: 'cache-access-token',
+      apiToken: 'sk-cache-api-token',
       status: 'active',
-      globalWeight: 1,
     }).returning().get();
 
-    const targetAccount = await db.insert(schema.accounts).values({
-      siteId: targetSite.id,
-      username: 'target-user',
-      accessToken: 'target-access-token',
-      apiToken: 'sk-target-api-token',
-      status: 'active',
-      unitCost: 1,
-      balance: 0,
-    }).returning().get();
-
-    const competitorAccount = await db.insert(schema.accounts).values({
-      siteId: competitorSite.id,
-      username: 'competitor-user',
-      accessToken: 'competitor-access-token',
-      apiToken: 'sk-competitor-api-token',
-      status: 'active',
-      unitCost: 1,
-      balance: 0,
-    }).returning().get();
-
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values([
-      {
-        routeId: route.id,
-        accountId: targetAccount.id,
-        tokenId: null,
-        priority: 0,
-        weight: 10,
-        enabled: true,
-      },
-      {
-        routeId: route.id,
-        accountId: competitorAccount.id,
-        tokenId: null,
-        priority: 0,
-        weight: 10,
-        enabled: true,
-      },
-    ]).run();
+    // 派发只认「模型转发」：缓存失效的语义要在转发通道上验证。
+    const forwardService = await import('../../services/modelForwardService.js');
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id, upstreamModel: 'gpt-4o-mini' }],
+    });
+    const channelId = rule.targets[0].channelId as number;
+    invalidateTokenRouterCache();
 
     const before = await tokenRouter.explainSelection('gpt-4o-mini');
-    const beforeTarget = before.candidates.find((candidate) => candidate.accountId === targetAccount.id);
-    expect(beforeTarget?.probability).toBeCloseTo(50, 1);
+    expect(before.matched).toBe(true);
+    expect(before.candidates.find((candidate) => candidate.channelId === channelId)?.eligible).toBe(true);
 
+    // 站点被停用后必须立刻反映到决策里：缓存在 60s TTL 内也不能把旧结果端出来。
     const response = await app.inject({
       method: 'PUT',
-      url: `/api/sites/${targetSite.id}`,
+      url: `/api/sites/${site.id}`,
       payload: {
-        globalWeight: 100,
+        status: 'disabled',
       },
     });
-
     expect(response.statusCode).toBe(200);
 
     const after = await tokenRouter.explainSelection('gpt-4o-mini');
-    const afterTarget = after.candidates.find((candidate) => candidate.accountId === targetAccount.id);
-
-    expect(afterTarget?.probability || 0).toBeGreaterThan(90);
-    expect(afterTarget?.reason || '').toContain('站点权重=100.00');
+    const candidate = after.candidates.find((item) => item.channelId === channelId);
+    expect(candidate?.eligible).toBe(false);
   });
+
 });

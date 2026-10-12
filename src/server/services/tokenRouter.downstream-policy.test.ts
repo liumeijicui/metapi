@@ -26,7 +26,33 @@ describe('TokenRouter downstream policy', () => {
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
   });
 
-  beforeEach(async () => {
+  /**
+ * 造一条「模型转发」规则（A → B）。
+ *
+ * 派发只认模型转发：老路由（token_routes 里按 model_pattern 命中的自动路由）已经整体
+ * 退出派发，所以这些用例必须通过规则来建通道，才验证得到下游策略本身。
+ */
+async function seedForwardRule(input: {
+  modelName: string;
+  targets: Array<{ siteId: number; accountId: number; tokenId?: number | null; upstreamModel?: string }>;
+}) {
+  const service = await import('./modelForwardService.js');
+  const rule = await service.createModelForwardRule({
+    modelName: input.modelName,
+    targets: input.targets.map((target) => ({
+      siteId: target.siteId,
+      accountId: target.accountId,
+      tokenId: target.tokenId ?? null,
+      upstreamModel: target.upstreamModel ?? 'upstream-model',
+    })),
+  });
+  invalidateTokenRouterCache();
+  return rule;
+}
+
+beforeEach(async () => {
+    await db.delete(schema.modelForwardTargets).run();
+    await db.delete(schema.modelForwardRules).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();
@@ -56,49 +82,32 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const routeAllowed = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-opus-4-6',
-      enabled: true,
-    }).returning().get();
-
-    const routeBlocked = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: routeAllowed.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).run();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: routeBlocked.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).run();
+    const ruleAllowed = await seedForwardRule({
+      modelName: 'claude-opus-4-6',
+      targets: [{ siteId: site.id, accountId: account.id }],
+    });
+    const ruleBlocked = await seedForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id }],
+    });
+    const routeAllowedId = ruleAllowed.routeId as number;
 
     const router = new TokenRouter();
 
     const allowedPick = await router.selectChannel('claude-opus-4-6', {
-      allowedRouteIds: [routeAllowed.id],
+      allowedRouteIds: [routeAllowedId],
       supportedModels: [],
       siteWeightMultipliers: {},
     });
     const blockedPick = await router.selectChannel('gpt-4o-mini', {
-      allowedRouteIds: [routeAllowed.id],
+      allowedRouteIds: [routeAllowedId],
       supportedModels: [],
       siteWeightMultipliers: {},
     });
 
     expect(allowedPick).toBeTruthy();
-    expect(allowedPick?.channel.routeId).toBe(routeAllowed.id);
+    expect(allowedPick?.channel.routeId).toBe(routeAllowedId);
+    expect(ruleBlocked.routeId).not.toBe(routeAllowedId);
     expect(blockedPick).toBeNull();
   });
 
@@ -324,37 +333,18 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const claudeGroupRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 're:^claude-(opus|sonnet)-4-6$',
-      enabled: true,
-    }).returning().get();
-
-    const gptExactRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: claudeGroupRoute.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).run();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: gptExactRoute.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).run();
+    const ruleClaude = await seedForwardRule({
+      modelName: 'claude-opus-4-6',
+      targets: [{ siteId: site.id, accountId: account.id }],
+    });
+    const ruleGpt = await seedForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id }],
+    });
 
     const router = new TokenRouter();
     const policy = {
-      allowedRouteIds: [claudeGroupRoute.id],
+      allowedRouteIds: [ruleClaude.routeId as number],
       supportedModels: ['gpt-4o-mini'],
       siteWeightMultipliers: {},
     };
@@ -362,8 +352,8 @@ describe('TokenRouter downstream policy', () => {
     const claudePick = await router.selectChannel('claude-opus-4-6', policy);
     const gptPick = await router.selectChannel('gpt-4o-mini', policy);
 
-    expect(claudePick?.channel.routeId).toBe(claudeGroupRoute.id);
-    expect(gptPick?.channel.routeId).toBe(gptExactRoute.id);
+    expect(claudePick?.channel.routeId).toBe(ruleClaude.routeId);
+    expect(gptPick?.channel.routeId).toBe(ruleGpt.routeId);
   });
 
   it('excludes candidates from excluded sites before route selection', async () => {
@@ -382,19 +372,12 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    const channel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
+    const rule = await seedForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id }],
+    });
+    const route = { id: rule.routeId as number };
+    const channel = { id: rule.targets[0].channelId as number };
 
     const router = new TokenRouter();
     const policy: any = {
@@ -454,27 +437,16 @@ describe('TokenRouter downstream policy', () => {
       valueStatus: 'ready',
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-sonnet-4-6',
-      enabled: true,
-    }).returning().get();
-
-    const blockedChannel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: blockedAccount.id,
-      tokenId: blockedToken.id,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
-    const allowedChannel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: allowedAccount.id,
-      tokenId: allowedToken.id,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
+    const rule = await seedForwardRule({
+      modelName: 'claude-sonnet-4-6',
+      targets: [
+        { siteId: site.id, accountId: blockedAccount.id, tokenId: blockedToken.id },
+        { siteId: site.id, accountId: allowedAccount.id, tokenId: allowedToken.id },
+      ],
+    });
+    const route = { id: rule.routeId as number };
+    const blockedChannel = { id: rule.targets[0].channelId as number };
+    const allowedChannel = { id: rule.targets[1].channelId as number };
 
     const router = new TokenRouter();
     const policy: any = {
@@ -521,27 +493,16 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-5-mini',
-      enabled: true,
-    }).returning().get();
-
-    const blockedChannel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: blockedAccount.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
-    const allowedChannel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: allowedAccount.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
+    const rule = await seedForwardRule({
+      modelName: 'gpt-5-mini',
+      targets: [
+        { siteId: site.id, accountId: blockedAccount.id, tokenId: null },
+        { siteId: site.id, accountId: allowedAccount.id, tokenId: null },
+      ],
+    });
+    const route = { id: rule.routeId as number };
+    const blockedChannel = { id: rule.targets[0].channelId as number };
+    const allowedChannel = { id: rule.targets[1].channelId as number };
 
     const router = new TokenRouter();
     const policy: any = {

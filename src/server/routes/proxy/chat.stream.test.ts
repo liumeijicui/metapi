@@ -2325,6 +2325,34 @@ describe('chat proxy stream behavior', () => {
     expect(body.output_text).toContain('ok via chat fallback');
   });
 
+  it('keeps /v1/responses when the upstream returns a structured API 5xx', async () => {
+    // 源站对 /v1/responses 的瞬时/语义 5xx 不等于「端点不支持」：
+    // 以前这里会降级到 chat/messages，结果被更窄的通道用另一个 500 打死。
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: {
+        message: "Item 'msg_1' of type 'message' was provided without its required 'reasoning' item",
+        type: 'invalid_request_error',
+      },
+    }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.2',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+  });
+
   it('retries /v1/chat/completions with minimal JSON headers on unsupported media type', async () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -2764,18 +2792,20 @@ describe('chat proxy stream behavior', () => {
     });
 
     fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: { message: 'Gateway time-out', type: 'upstream_error' },
-      }), {
-        status: 504,
-        headers: { 'content-type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: { message: 'Bad gateway', type: 'upstream_error' },
-      }), {
-        status: 502,
-        headers: { 'content-type': 'application/json' },
-      }))
+      .mockResolvedValueOnce(new Response(
+        '<html><head><title>504 Gateway Time-out</title></head></html>',
+        {
+          status: 504,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        },
+      ))
+      .mockResolvedValueOnce(new Response(
+        '<html><head><title>502 Bad gateway</title></head></html>',
+        {
+          status: 502,
+          headers: { 'content-type': 'text/html; charset=UTF-8' },
+        },
+      ))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         id: 'msg_fallback_1',
         type: 'message',

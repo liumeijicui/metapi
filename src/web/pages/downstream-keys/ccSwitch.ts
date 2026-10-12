@@ -219,3 +219,71 @@ export function mergeCcSwitchModelOptions(
   }
   return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
+
+/**
+ * 导入对象有两种，模型名该怎么填完全相反：
+ *
+ * - `gateway`：导入我们自己的网关（下游密钥）。地址是我们的面板/网关，模型名要写
+ *   **对外模型名**（例如 `gpt-6-astra`），由网关自己再映射到源站模型。
+ * - `origin-site`：从「模型监控」直接导入某个源站（原站 sk- 密钥 + 原站地址，不经过
+ *   网关）。这时模型名必须是**该站点自己的模型名**（例如 `deepseek-v4.1-flash`），
+ *   写对外别名源站会直接回 503 `No available channel for model ... under group default`。
+ */
+export type CcSwitchImportMode = 'gateway' | 'origin-site';
+
+/** 下拉候选：网关导入给全量模型，原站导入只给该站自己的模型名。 */
+export function resolveCcSwitchCandidateModels(input: {
+  mode: CcSwitchImportMode;
+  gatewayModels?: CcSwitchModelOption[];
+  siteModels?: string[];
+}): CcSwitchModelOption[] {
+  const siteModels = Array.isArray(input.siteModels)
+    ? input.siteModels.map((name) => String(name ?? '').trim()).filter(Boolean)
+    : [];
+  if (input.mode === 'origin-site') {
+    return buildCcSwitchModelOptions([], siteModels);
+  }
+  return mergeCcSwitchModelOptions(input.gatewayModels || [], siteModels);
+}
+
+function normalizeModelKey(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+/** 原站导入时必须用该站的模型名；网关导入写什么由网关负责映射。 */
+export function isCcSwitchModelAllowed(input: {
+  mode: CcSwitchImportMode;
+  model?: string | null;
+  siteModels?: string[];
+}): boolean {
+  if (input.mode !== 'origin-site') return true;
+  const model = normalizeModelKey(input.model);
+  // 留空表示交给客户端决定，不拦（但下面会提示该站可用的模型名）。
+  if (!model) return true;
+  const known = (input.siteModels || []).map(normalizeModelKey).filter(Boolean);
+  if (known.length <= 0) return true;
+  return known.includes(model);
+}
+
+/** 打开弹窗时预填的模型名：原站导入默认填该站自己的模型。 */
+export function resolveCcSwitchDefaultModel(input: {
+  mode: CcSwitchImportMode;
+  preferred?: string | null;
+  siteModels?: string[];
+}): string {
+  const preferred = String(input.preferred ?? '').trim();
+  if (isSelectableModelName(preferred) && isCcSwitchModelAllowed({
+    mode: input.mode,
+    model: preferred,
+    siteModels: input.siteModels,
+  })) {
+    return preferred;
+  }
+  if (input.mode === 'origin-site') {
+    const firstSiteModel = (input.siteModels || [])
+      .map((name) => String(name ?? '').trim())
+      .find((name) => isSelectableModelName(name));
+    return firstSiteModel || '';
+  }
+  return '';
+}

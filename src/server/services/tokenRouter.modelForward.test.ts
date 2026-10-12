@@ -124,11 +124,12 @@ describe('模型转发路由优先级', () => {
     expect(selected?.channel.id).toBe(channelId);
   });
 
-  it('转发规则一旦声明该模型，就只走新转发通道；停用后不再回落老路由', async () => {
+  it('只有模型转发能派发：没规则就调不通，规则停用也不回落老路由', async () => {
     const router = new TokenRouter();
-    // 规则还没建之前，模型仍按老路由派发（新老并存只发生在「没被规则声明」的模型上）。
+    // 老路由（按 model_pattern 命中的自动路由）已整体退出派发：没有转发规则就是调不通，
+    // 哪怕路由表里有一条同名、启用、带通道的老路由。
     const before = await router.selectChannel('gpt-6-astra');
-    expect(before?.channel.id).toBe(oldChannelId);
+    expect(before).toBeNull();
 
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
@@ -185,7 +186,7 @@ describe('模型转发路由优先级', () => {
     expect((await router.selectChannel('gpt-6-astra'))?.channel.id).toBe(secondChannelId);
   });
 
-  it('转发通道冷却中仍然选中它自己，不回落到老路由', async () => {
+  it('只有一条转发通道且它冷却中时，仍然用它兜底，不回落到老路由', async () => {
     const rule = await forwardService.createModelForwardRule({
       modelName: 'gpt-6-astra',
       targets: [{ siteId, accountId, upstreamModel: 'deepseek-v4.1-flash' }],
@@ -201,7 +202,8 @@ describe('模型转发路由优先级', () => {
 
     const router = new TokenRouter();
     const selected = await router.selectChannel('gpt-6-astra');
-    // 冷却只是记账：手动排的顺序 1 照样是每次被调用的那个。
+    // 冷却只影响排序：没有别的通道可让位时，顺序 1 照样是兜底的那个
+    // （宁可试一次可能已恢复的通道，也不要直接回 503「没有可用通道」）。
     expect(selected?.channel.id).toBe(forwardChannelId);
   });
 
@@ -316,12 +318,76 @@ describe('模型转发路由优先级', () => {
     }).where(eq(schema.routeChannels.id, legacyChannelA.id)).run();
     invalidateTokenRouterCache();
 
-    // 先证明熔断真的开了：非转发路由避让站点 A，落到站点 B。
-    const legacySelected = await router.selectChannel('forward-breaker-legacy');
-    expect(legacySelected?.channel.id).toBe(legacyChannelB.id);
-
-    // 转发路由只认顺序与启用状态：熔断窗口内照样走顺序 1（站点 A）。
+    // 老路由不再参与派发，所以这里只能从转发侧断言：模型转发不做任何按健康度 /
+    // 熔断 / 冷却的自动换源，站点 A 处于熔断窗口内也照样走顺序 1。
     const selected = await router.selectChannel('forward-breaker');
     expect(selected?.channel.id).toBe(firstChannelId);
+    expect(secondChannelId).not.toBe(firstChannelId);
+  });
+
+  it('永远只走第一个候选：不因冷却/失败/重试而换源', async () => {
+    const siteB = await db.insert(schema.sites).values({
+      name: '转发测试站C',
+      url: 'https://forward-route-c.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: siteB.id,
+      username: 'forward-user-c',
+      accessToken: 'access-forward-c',
+      apiToken: 'sk-forward-c',
+      status: 'active',
+    }).returning().get();
+    const tokenB = await db.insert(schema.accountTokens).values({
+      accountId: accountB.id,
+      name: 'default',
+      token: 'token-forward-c',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'forward-healthy',
+      targets: [
+        { siteId, accountId, upstreamModel: 'healthy-upstream-1' },
+        { siteId: siteB.id, accountId: accountB.id, upstreamModel: 'healthy-upstream-2' },
+      ],
+    });
+    const firstChannelId = rule.targets[0].channelId as number;
+    const secondChannelId = rule.targets[1].channelId as number;
+    expect(firstChannelId).not.toBe(secondChannelId);
+    invalidateTokenRouterCache();
+
+    // 连续多次选路都必须落在顺序 1，不做权重随机、不轮询。
+    const router = new TokenRouter();
+    for (let index = 0; index < 5; index += 1) {
+      expect((await router.selectChannel('forward-healthy'))?.channel.id).toBe(firstChannelId);
+    }
+
+    // 顺序 1 进入冷却（刚失败 / 被上游限流）—— 也不让位，仍然是它。
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: new Date(Date.now() + 60 * 1000).toISOString(),
+    }).where(eq(schema.routeChannels.id, firstChannelId)).run();
+    invalidateTokenRouterCache();
+    expect((await router.selectChannel('forward-healthy'))?.channel.id).toBe(firstChannelId);
+
+    // 请求内重试（excludeChannelIds 带上刚才失败的通道）同样不换源。
+    expect((await router.selectNextChannel('forward-healthy', [firstChannelId]))?.channel.id)
+      .toBe(firstChannelId);
+
+    // 全部候选都在冷却时也照样是第一个。
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: new Date(Date.now() + 60 * 1000).toISOString(),
+    }).where(eq(schema.routeChannels.id, secondChannelId)).run();
+    invalidateTokenRouterCache();
+    expect((await router.selectChannel('forward-healthy'))?.channel.id).toBe(firstChannelId);
+
+    // 换源只能由人来：停用第一个。
+    await db.update(schema.routeChannels).set({ enabled: false })
+      .where(eq(schema.routeChannels.id, firstChannelId)).run();
+    invalidateTokenRouterCache();
+    expect((await router.selectChannel('forward-healthy'))?.channel.id).toBe(secondChannelId);
   });
 });

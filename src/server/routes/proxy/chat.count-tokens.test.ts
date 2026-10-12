@@ -42,6 +42,21 @@ vi.mock('../../services/tokenRouter.js', () => ({
   },
 }));
 
+// 「没有可用通道」的对外文案由模型转发规则决定（老路由不再参与派发）。
+// 这个用例把 db 换成了内存桩，所以这里直接给出规则查不到时的那份文案。
+vi.mock('../../services/modelForwardService.js', async () => {
+  const actual = await vi.importActual<typeof import('../../services/modelForwardService.js')>(
+    '../../services/modelForwardService.js',
+  );
+  return {
+    ...actual,
+    describeForwardDispatchFailure: async (modelName: string) => ({
+      code: 'no_rule',
+      message: `模型 ${modelName} 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）`,
+    }),
+  };
+});
+
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
@@ -304,9 +319,10 @@ describe('claude count_tokens proxy route', () => {
     });
 
     expect(response.statusCode).toBe(503);
+    // 老路由已整体退出派发，所以这里必须说真话：没有「模型转发」规则。
     expect(response.json()).toEqual({
       error: {
-        message: 'No available channels for this model',
+        message: '模型 gpt-5.4 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）',
         type: 'server_error',
       },
     });

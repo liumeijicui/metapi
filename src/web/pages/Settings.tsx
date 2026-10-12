@@ -1083,12 +1083,6 @@ export default function Settings() {
       setRuntime((prev) => ({ ...prev, globalBlockedBrands: resolved }));
       setBlockedBrands(resolved);
       toast.success('品牌屏蔽设置已保存');
-      try {
-        await api.rebuildRoutes(false);
-        toast.success('路由已重建');
-      } catch {
-        toast.error('品牌屏蔽已保存，但路由重建失败，请手动重建');
-      }
     } catch (err: any) {
       toast.error(err?.message || '保存品牌屏蔽设置失败');
     } finally {
@@ -1104,12 +1098,6 @@ export default function Settings() {
       setRuntime((prev) => ({ ...prev, globalAllowedModels: resolved }));
       setAllowedModels(resolved);
       toast.success('模型白名单设置已保存');
-      try {
-        await api.rebuildRoutes(false);
-        toast.success('路由已重建');
-      } catch {
-        toast.error('模型白名单已保存，但路由重建失败，请手动重建');
-      }
     } catch (err: any) {
       toast.error(err?.message || '保存模型白名单设置失败');
     } finally {

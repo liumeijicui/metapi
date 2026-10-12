@@ -33,6 +33,16 @@ describe('模型监控行内操作按钮', () => {
     expect(modal).toContain("String(initialBaseUrl || '').trim() || resolveDefaultGatewayBaseUrl()");
   });
 
+  it('原站导入带上有该站模型名约束：预填该站模型名，且不允许写对外别名', () => {
+    // 原站不认识我们的对外模型名，写别名会直接 503 No available channel。
+    expect(page).toContain('mode="origin-site"');
+    expect(page).toContain('siteModels={ccSwitchTarget?.siteModels || []}');
+    expect(page).toContain("defaultModel={ccSwitchTarget?.item?.supportedModels?.[0] || ''}");
+    expect(modal).toContain('resolveCcSwitchCandidateModels');
+    expect(modal).toContain('isCcSwitchModelAllowed');
+    expect(modal).toContain('No available channel');
+  });
+
   it('「对话 / 挂到转发」入口仍然可用', () => {
     expect(page.split('onClick={() => setChatTarget(model)}').length - 1).toBe(2);
     expect(page.split('onClick={() => void openAttach(model)}').length - 1).toBe(2);

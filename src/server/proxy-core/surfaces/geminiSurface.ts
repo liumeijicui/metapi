@@ -65,7 +65,7 @@ import {
   runWithSurfaceSiteConcurrency,
 } from './sharedSurface.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
 } from '../channelSelection.js';
@@ -599,7 +599,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           lastContentType = 'application/json';
           lastText = JSON.stringify({
             error: {
-              message: buildForcedChannelUnavailableMessage(forcedChannelId),
+              message: await buildModelUnavailableMessage(requestedModel, forcedChannelId),
               type: 'server_error',
             },
           });

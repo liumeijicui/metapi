@@ -439,8 +439,11 @@ describe('syncPatternRouteChannelsAfterAffectedRouteChanges', () => {
       rebuildAllPatternRoutes: true,
       allowedModelNames: ['gpt-5-cache-old'],
     });
+    // 老路由（pattern 路由）已不参与派发，所以缓存失效要通过「按路由 id 的决策」来验证：
+    // 决策读的是 route match 缓存，通道被换掉后必须立刻反映出来，不能等 TTL。
     const router = new TokenRouter();
-    expect((await router.selectChannel('gpt-5-cache-old'))?.channel.routeId).toBe(patternRoute.id);
+    const before = await router.explainSelectionForRoute(patternRoute.id, 'gpt-5-cache-old');
+    expect(before.candidates.map((candidate) => candidate.sourceModel)).toContain('gpt-5-cache-old');
 
     await db.update(schema.tokenModelAvailability)
       .set({ modelName: 'gpt-5-cache-new' })
@@ -451,7 +454,12 @@ describe('syncPatternRouteChannelsAfterAffectedRouteChanges', () => {
       allowedModelNames: ['gpt-5-cache-new'],
     });
 
-    expect(await router.selectChannel('gpt-5-cache-old')).toBeNull();
-    expect((await router.selectChannel('gpt-5-cache-new'))?.channel.routeId).toBe(patternRoute.id);
+    const after = await router.explainSelectionForRoute(patternRoute.id, 'gpt-5-cache-new');
+    const sourceModels = after.candidates.map((candidate) => candidate.sourceModel);
+    expect(sourceModels).toContain('gpt-5-cache-new');
+    expect(sourceModels).not.toContain('gpt-5-cache-old');
+    // 老路由不再参与派发：任何模型都选不出通道。
+    expect(await router.selectChannel('gpt-5-cache-new')).toBeNull();
   });
+
 });

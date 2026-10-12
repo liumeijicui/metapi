@@ -6,9 +6,12 @@ import {
   buildCcSwitchDeepLink,
   buildManualConfigSnippet,
   CC_SWITCH_APP_OPTIONS,
-  mergeCcSwitchModelOptions,
+  isCcSwitchModelAllowed,
+  resolveCcSwitchCandidateModels,
+  resolveCcSwitchDefaultModel,
   resolveDefaultGatewayBaseUrl,
   type CcSwitchApp,
+  type CcSwitchImportMode,
   type CcSwitchModelOption,
 } from './ccSwitch.js';
 
@@ -36,6 +39,15 @@ type Props = {
   title?: string;
   /** 提示语里的「来源」说明，默认按网关口径解释。 */
   sourceHint?: React.ReactNode;
+  /**
+   * 导入对象：`gateway` = 我们的网关（写对外模型名）；`origin-site` = 某个源站
+   * （必须写该站自己的模型名，否则源站会 503）。默认按网关处理。
+   */
+  mode?: CcSwitchImportMode;
+  /** 该导入对象的模型名候选：原站导入时就是该站的模型清单。 */
+  siteModels?: string[];
+  /** 打开时预填的模型名。 */
+  defaultModel?: string | null;
 };
 
 async function copyToClipboard(text: string): Promise<void> {
@@ -83,6 +95,9 @@ export default function DownstreamKeyCcSwitchModal({
   initialBaseUrl,
   title,
   sourceHint,
+  mode = 'gateway',
+  siteModels = [],
+  defaultModel,
 }: Props) {
   const toast = useToast();
   const [app, setApp] = useState<CcSwitchApp>('claude');
@@ -96,10 +111,14 @@ export default function DownstreamKeyCcSwitchModal({
   useEffect(() => {
     if (!open) return;
     setBaseUrl(String(initialBaseUrl || '').trim() || resolveDefaultGatewayBaseUrl());
-    setModel('');
+    setModel(resolveCcSwitchDefaultModel({
+      mode,
+      preferred: String(defaultModel ?? '').trim() || (item?.supportedModels || [])[0] || '',
+      siteModels,
+    }));
     setEnabled(true);
     setCopiedLink(false);
-  }, [open, item?.id, initialBaseUrl]);
+  }, [open, item?.id, initialBaseUrl, mode, defaultModel, siteModels]);
 
   const fullKey = (item?.key || '').trim();
   const keyModelNames = useMemo(
@@ -107,11 +126,16 @@ export default function DownstreamKeyCcSwitchModal({
     [item?.supportedModels],
   );
 
-  // 全部模型（我们已获取的）+ 该密钥自己的白名单，同一个下拉里挑。
+  // 网关导入：全部模型 + 该密钥白名单；原站导入：只允许该站自己的模型名。
   const candidateModels = useMemo(
-    () => mergeCcSwitchModelOptions(modelOptions, keyModelNames),
-    [keyModelNames, modelOptions],
+    () => resolveCcSwitchCandidateModels({
+      mode,
+      gatewayModels: modelOptions,
+      siteModels: keyModelNames,
+    }),
+    [keyModelNames, modelOptions, mode],
   );
+  const modelAllowed = isCcSwitchModelAllowed({ mode, model, siteModels: keyModelNames });
 
   const deepLink = useMemo(
     () => buildCcSwitchDeepLink({
@@ -131,7 +155,7 @@ export default function DownstreamKeyCcSwitchModal({
   );
 
   const missingKey = !fullKey;
-  const deepLinkReady = !!deepLink;
+  const deepLinkReady = !!deepLink && modelAllowed;
 
   const handleCopyLink = async () => {
     if (!deepLinkReady) return;
@@ -258,7 +282,13 @@ export default function DownstreamKeyCcSwitchModal({
         </div>
 
         <div>
-          <FieldLabel hint="下拉是我们已获取的全部模型，可按名字搜索，也可以直接输入别的">模型（可选）</FieldLabel>
+          <FieldLabel
+            hint={mode === 'origin-site'
+              ? '必须填该站点自己的模型名（源站不认识我们的对外模型名）'
+              : '下拉是我们已获取的全部模型，可按名字搜索，也可以直接输入别的'}
+          >
+            模型（可选）
+          </FieldLabel>
           <Combobox
             value={model}
             onChange={setModel}
@@ -270,8 +300,15 @@ export default function DownstreamKeyCcSwitchModal({
             data-testid="ccswitch-model-combobox"
           />
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>
-            共 {candidateModels.length} 个可选模型{keyModelNames.length > 0 ? `，其中 ${keyModelNames.length} 个属于该密钥的白名单` : ''}
+            {mode === 'origin-site'
+              ? `该站点共 ${candidateModels.length} 个模型可选`
+              : `共 ${candidateModels.length} 个可选模型${keyModelNames.length > 0 ? `，其中 ${keyModelNames.length} 个属于该密钥的白名单` : ''}`}
           </div>
+          {modelAllowed ? null : (
+            <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', marginTop: 6 }}>
+              {`「${model}」不是该站点的模型名。源站会直接回 503 No available channel，请改选：${keyModelNames.slice(0, 3).join('、')}${keyModelNames.length > 3 ? ' 等' : ''}`}
+            </div>
+          )}
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>

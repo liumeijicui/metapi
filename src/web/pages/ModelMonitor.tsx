@@ -213,7 +213,13 @@ export default function ModelMonitor() {
   const [attachBusy, setAttachBusy] = useState(false);
   const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);
   // 「导入到 CC Switch」：先把原站的 base 地址与 sk- 密钥取回来，再打开弹窗。
-  const [ccSwitchTarget, setCcSwitchTarget] = useState<{ item: CcSwitchKeyTarget; baseUrl: string } | null>(null);
+  // 这是「原站直连」配置，模型名必须用该站自己的模型名，所以把该站的模型清单
+  // 一并带进弹窗，避免误选我们的对外模型名（源站会直接回 503）。
+  const [ccSwitchTarget, setCcSwitchTarget] = useState<{
+    item: CcSwitchKeyTarget;
+    baseUrl: string;
+    siteModels: string[];
+  } | null>(null);
   const [ccSwitchBusyKey, setCcSwitchBusyKey] = useState<string | null>(null);
   const [forwardNames, setForwardNames] = useState<string[]>([]);
   const [forwardNamesLoaded, setForwardNamesLoaded] = useState(false);
@@ -248,13 +254,21 @@ export default function ModelMonitor() {
           supportedModels: [model.modelName],
         },
         baseUrl: String(model.siteUrl || '').trim(),
+        siteModels: Array.from(new Set(
+          (overview?.models || [])
+            .filter((row) => row.siteId === model.siteId)
+            .map((row) => String(row.modelName || '').trim())
+            .filter(Boolean)
+            .concat(String(model.modelName || '').trim())
+            .filter(Boolean),
+        )),
       });
     } catch (error: any) {
       toast.error(error?.message || tr('读取原站配置失败'));
     } finally {
       setCcSwitchBusyKey(null);
     }
-  }, [toast]);
+  }, [overview?.models, toast]);
 
   // 打开「挂到转发」弹窗时再拉一次对外模型清单，保证是当前的。
   const openAttach = useCallback(async (model: ModelRow) => {
@@ -937,6 +951,9 @@ export default function ModelMonitor() {
         item={ccSwitchTarget?.item || null}
         modelOptions={ccSwitchModelOptions}
         initialBaseUrl={ccSwitchTarget?.baseUrl}
+        mode="origin-site"
+        siteModels={ccSwitchTarget?.siteModels || []}
+        defaultModel={ccSwitchTarget?.item?.supportedModels?.[0] || ''}
         title={tr('把原站配置导入到 CC Switch')}
         sourceHint={(
           <>

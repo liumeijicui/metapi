@@ -5,6 +5,7 @@ type Candidate = {
   channel: {
     failCount?: number | null;
     lastFailAt?: string | null;
+    consecutiveUpstreamFailures?: number | null;
   };
   id: string;
 };
@@ -19,6 +20,7 @@ describe('filterRecentlyFailedCandidates', () => {
     const nowMs = Date.now();
     expect(isChannelRecentlyFailed({
       failCount: 1,
+      consecutiveUpstreamFailures: 1,
       lastFailAt: new Date(nowMs - 20 * 1000).toISOString(),
     }, nowMs)).toBe(false);
   });
@@ -27,11 +29,23 @@ describe('filterRecentlyFailedCandidates', () => {
     const nowMs = Date.now();
     expect(isChannelRecentlyFailed({
       failCount: 4,
+      consecutiveUpstreamFailures: 4,
       lastFailAt: new Date(nowMs - 40 * 1000).toISOString(),
     }, nowMs)).toBe(true);
     expect(isChannelRecentlyFailed({
       failCount: 4,
+      consecutiveUpstreamFailures: 4,
       lastFailAt: new Date(nowMs - 50 * 1000).toISOString(),
+    }, nowMs)).toBe(false);
+  });
+
+  it('ignores the lifetime failure total when the channel has recovered', () => {
+    const nowMs = Date.now();
+    // 累计失败 61 次的通道，只要中间成功过（连续失败归零），就不该再被躲开/长冷却。
+    expect(isChannelRecentlyFailed({
+      failCount: 61,
+      consecutiveUpstreamFailures: 0,
+      lastFailAt: new Date(nowMs).toISOString(),
     }, nowMs)).toBe(false);
   });
 
@@ -42,6 +56,7 @@ describe('filterRecentlyFailedCandidates', () => {
         id: 'failed',
         channel: {
           failCount: 2,
+          consecutiveUpstreamFailures: 2,
           lastFailAt: new Date(nowMs - 30 * 1000).toISOString(),
         },
       },
@@ -65,6 +80,7 @@ describe('filterRecentlyFailedCandidates', () => {
         id: 'a',
         channel: {
           failCount: 1,
+          consecutiveUpstreamFailures: 1,
           lastFailAt: new Date(nowMs - 20 * 1000).toISOString(),
         },
       },
@@ -72,6 +88,7 @@ describe('filterRecentlyFailedCandidates', () => {
         id: 'b',
         channel: {
           failCount: 3,
+          consecutiveUpstreamFailures: 3,
           lastFailAt: new Date(nowMs - 40 * 1000).toISOString(),
         },
       },
@@ -88,6 +105,7 @@ describe('filterRecentlyFailedCandidates', () => {
         id: 'recent-failure',
         channel: {
           failCount: 3,
+          consecutiveUpstreamFailures: 3,
           lastFailAt: new Date(nowMs - 5 * 1000).toISOString(),
         },
       },
@@ -111,6 +129,7 @@ describe('filterRecentlyFailedCandidates', () => {
         id: 'stale-failure',
         channel: {
           failCount: 5,
+          consecutiveUpstreamFailures: 5,
           lastFailAt: new Date(nowMs - 20 * 60 * 1000).toISOString(),
         },
       },

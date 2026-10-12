@@ -28,6 +28,8 @@ describe('TokenRouter site status guard', () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.modelForwardTargets).run();
+    await db.delete(schema.modelForwardRules).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
@@ -42,6 +44,22 @@ describe('TokenRouter site status guard', () => {
     invalidateTokenRouterCache();
     delete process.env.DATA_DIR;
   });
+
+  /**
+   * 造一条「模型转发」规则（A → B）并返回它的通道 id。
+   *
+   * 派发只认模型转发：老路由已整体退出派发，这些「凭证 / 站点状态」的可选性判定必须
+   * 在转发通道上验证。
+   */
+  async function seedForwardRule(modelName: string, siteId: number, accountId: number) {
+    const service = await import('./modelForwardService.js');
+    const rule = await service.createModelForwardRule({
+      modelName,
+      targets: [{ siteId, accountId, upstreamModel: `${modelName}-upstream` }],
+    });
+    invalidateTokenRouterCache();
+    return rule.targets[0].channelId as number;
+  }
 
   it('does not select channels from disabled sites', async () => {
     const site = await db.insert(schema.sites).values({
@@ -59,20 +77,7 @@ describe('TokenRouter site status guard', () => {
       status: 'active',
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    const channel = await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-      manualOverride: false,
-    }).returning().get();
+    const channel = { id: await seedForwardRule('gpt-4o-mini', site.id, account.id) };
 
     const router = new TokenRouter();
     const selected = await router.selectChannel('gpt-4o-mini');
@@ -101,20 +106,7 @@ describe('TokenRouter site status guard', () => {
       extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4.1-mini',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-      manualOverride: false,
-    }).run();
+    await seedForwardRule('gpt-4.1-mini', site.id, account.id);
 
     const selected = await new TokenRouter().selectChannel('gpt-4.1-mini');
     expect(selected).toBeNull();
@@ -145,20 +137,7 @@ describe('TokenRouter site status guard', () => {
       }),
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-5.2-codex',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-      manualOverride: false,
-    }).run();
+    await seedForwardRule('gpt-5.2-codex', site.id, account.id);
 
     const selected = await new TokenRouter().selectChannel('gpt-5.2-codex');
     expect(selected).not.toBeNull();
@@ -190,20 +169,7 @@ describe('TokenRouter site status guard', () => {
       }),
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-5.2-codex',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-      manualOverride: false,
-    }).run();
+    await seedForwardRule('gpt-5.2-codex', site.id, account.id);
 
     const selected = await new TokenRouter().selectChannel('gpt-5.2-codex');
     expect(selected).not.toBeNull();
@@ -235,20 +201,7 @@ describe('TokenRouter site status guard', () => {
       }),
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-5.2-codex',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: null,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-      manualOverride: false,
-    }).run();
+    await seedForwardRule('gpt-5.2-codex', site.id, account.id);
 
     const selected = await new TokenRouter().selectChannel('gpt-5.2-codex');
     expect(selected).toBeNull();

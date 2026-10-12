@@ -46,6 +46,8 @@ describe('/v1/models route', () => {
 
   beforeEach(async () => {
     invalidateTokenRouterCache();
+    await db.delete(schema.modelForwardTargets).run();
+    await db.delete(schema.modelForwardRules).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
@@ -61,53 +63,69 @@ describe('/v1/models route', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('hides models that have no routable channel even if model availability contains them', async () => {
+
+  /**
+   * 造一条「模型转发」规则（A → B）并返回它的 routeId。
+   *
+   * /v1/models 现在只列「模型转发」声明的对外模型名：老路由已经不再参与派发，把它们
+   * 列出来只会让下游看到一个「列得出来、调不通」的清单。
+   */
+  async function seedForwardRule(input: {
+    modelName: string;
+    siteId: number;
+    accountId: number;
+    upstreamModel?: string;
+  }) {
+    const service = await import('../../services/modelForwardService.js');
+    const rule = await service.createModelForwardRule({
+      modelName: input.modelName,
+      targets: [{
+        siteId: input.siteId,
+        accountId: input.accountId,
+        upstreamModel: input.upstreamModel ?? `${input.modelName}-upstream`,
+      }],
+    });
+    invalidateTokenRouterCache();
+    return rule;
+  }
+
+  async function seedSiteWithAccount(name: string) {
     const site = await db.insert(schema.sites).values({
-      name: 'test-site',
-      url: 'https://upstream.example.com',
+      name,
+      url: `https://${name}.example.com`,
       platform: 'openai',
       status: 'active',
     }).returning().get();
-
     const account = await db.insert(schema.accounts).values({
       siteId: site.id,
-      accessToken: 'account-access-token',
+      accessToken: `${name}-access-token`,
       status: 'active',
     }).returning().get();
-
     const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default',
-      token: 'account-api-token',
+      token: `${name}-api-token`,
       enabled: true,
       isDefault: true,
+      valueStatus: 'ready',
     }).returning().get();
+    return { site, account, token };
+  }
+
+  function readModelIds(payload: unknown): string[] {
+    const body = payload as { data?: Array<{ id: string }> };
+    return (body.data ?? []).map((item) => item.id);
+  }
+
+  it('hides models that have no routable channel even if model availability contains them', async () => {
+    const { site, account } = await seedSiteWithAccount('routable');
 
     await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: 'routable-model',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'orphan-model',
-        available: true,
-      },
+      { accountId: account.id, modelName: 'routable-model', available: true },
+      { accountId: account.id, modelName: 'orphan-model', available: true },
     ]).run();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'routable-model',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: token.id,
-      sourceModel: 'routable-model',
-      enabled: true,
-    }).run();
+    await seedForwardRule({ modelName: 'routable-model', siteId: site.id, accountId: account.id });
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key',
@@ -119,140 +137,33 @@ describe('/v1/models route', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-managed-models',
-      },
+      headers: { authorization: 'Bearer sk-managed-models' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-
-    const ids = body.data.map((item) => item.id);
+    const ids = readModelIds(response.json());
     expect(ids).toContain('routable-model');
     expect(ids).not.toContain('orphan-model');
   });
 
   it('keeps global proxy token unrestricted when no managed key matches', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'global-site',
-      url: 'https://global.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
-      siteId: site.id,
-      accessToken: 'global-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
-      accountId: account.id,
-      name: 'default',
-      token: 'global-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values({
-      accountId: account.id,
-      modelName: 'global-routable-model',
-      available: true,
-    }).run();
-
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'global-routable-model',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: token.id,
-      sourceModel: 'global-routable-model',
-      enabled: true,
-    }).run();
+    const { site, account } = await seedSiteWithAccount('global');
+    await seedForwardRule({ modelName: 'global-routable-model', siteId: site.id, accountId: account.id });
 
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-global-proxy-token',
-      },
+      headers: { authorization: 'Bearer sk-global-proxy-token' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-
-    expect(body.data.map((item) => item.id)).toContain('global-routable-model');
+    expect(readModelIds(response.json())).toContain('global-routable-model');
   });
 
   it('returns only whitelist models for managed key with supportedModels policy', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'test-site',
-      url: 'https://upstream.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
-      siteId: site.id,
-      accessToken: 'account-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
-      accountId: account.id,
-      name: 'default',
-      token: 'account-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: 'allowed-model',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'blocked-model',
-        available: true,
-      },
-    ]).run();
-
-    const allowedRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'allowed-model',
-      enabled: true,
-    }).returning().get();
-    const blockedRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'blocked-model',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values([
-      {
-        routeId: allowedRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'allowed-model',
-        enabled: true,
-      },
-      {
-        routeId: blockedRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'blocked-model',
-        enabled: true,
-      },
-    ]).run();
+    const { site, account } = await seedSiteWithAccount('whitelist');
+    await seedForwardRule({ modelName: 'allowed-model', siteId: site.id, accountId: account.id });
+    await seedForwardRule({ modelName: 'blocked-model', siteId: site.id, accountId: account.id });
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key',
@@ -264,156 +175,46 @@ describe('/v1/models route', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-managed-whitelist',
-      },
+      headers: { authorization: 'Bearer sk-managed-whitelist' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-    const ids = body.data.map((item) => item.id);
+    const ids = readModelIds(response.json());
     expect(ids).toContain('allowed-model');
     expect(ids).not.toContain('blocked-model');
   });
 
-  it('returns only selected group route alias for managed key with allowedRouteIds policy', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'test-site',
-      url: 'https://upstream.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
+  it('returns only the models bound by allowedRouteIds policy', async () => {
+    const { site, account } = await seedSiteWithAccount('allowed-routes');
+    const allowedRule = await seedForwardRule({
+      modelName: 'claude-opus-4-6',
       siteId: site.id,
-      accessToken: 'account-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
-      name: 'default',
-      token: 'account-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: 'claude-opus-4-5',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'claude-sonnet-4-5',
-        available: true,
-      },
-    ]).run();
-
-    const groupRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 're:^claude-(opus|sonnet)-4-5$',
-      displayName: 'claude-opus-4-6',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: groupRoute.id,
-      accountId: account.id,
-      tokenId: token.id,
-      enabled: true,
-    }).run();
+    });
+    await seedForwardRule({ modelName: 'claude-sonnet-4-5', siteId: site.id, accountId: account.id });
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key',
       key: 'sk-managed-group-only',
       enabled: true,
-      allowedRouteIds: JSON.stringify([groupRoute.id]),
+      allowedRouteIds: JSON.stringify([allowedRule.routeId]),
     }).run();
 
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-managed-group-only',
-      },
+      headers: { authorization: 'Bearer sk-managed-group-only' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('claude-opus-4-6');
-    expect(ids).not.toContain('claude-opus-4-5');
-    expect(ids).not.toContain('claude-sonnet-4-5');
+    const ids = readModelIds(response.json());
+    expect(ids).toEqual(['claude-opus-4-6']);
   });
 
-  it('returns all models for managed key with empty model and group selections', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'deny-all-site',
-      url: 'https://deny-all.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
-      siteId: site.id,
-      accessToken: 'deny-all-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
-      accountId: account.id,
-      name: 'default',
-      token: 'deny-all-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: 'gpt-4o-mini',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'claude-opus-4-6',
-        available: true,
-      },
-    ]).run();
-
-    const gptRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-    const claudeRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-opus-4-6',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values([
-      {
-        routeId: gptRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'gpt-4o-mini',
-        enabled: true,
-      },
-      {
-        routeId: claudeRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'claude-opus-4-6',
-        enabled: true,
-      },
-    ]).run();
+  it('returns all forwarded models for managed key with empty model and group selections', async () => {
+    const { site, account } = await seedSiteWithAccount('deny-all');
+    await seedForwardRule({ modelName: 'gpt-4o-mini', siteId: site.id, accountId: account.id });
+    await seedForwardRule({ modelName: 'claude-opus-4-6', siteId: site.id, accountId: account.id });
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key-deny-all',
@@ -426,189 +227,49 @@ describe('/v1/models route', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-managed-deny-all',
-      },
+      headers: { authorization: 'Bearer sk-managed-deny-all' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-
-    expect(body.data.map((item) => item.id).sort()).toEqual([
+    expect(readModelIds(response.json()).sort()).toEqual([
       'claude-opus-4-6',
       'gpt-4o-mini',
     ]);
   });
 
-  it('returns only explicit-group public name while hiding source exact routes', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'explicit-group-site',
-      url: 'https://explicit-group.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
+  it('hides models whose forward rule is disabled', async () => {
+    const { site, account } = await seedSiteWithAccount('disabled-rule');
+    const rule = await seedForwardRule({
+      modelName: 'enabled-model',
       siteId: site.id,
-      accessToken: 'explicit-group-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
-      name: 'default',
-      token: 'explicit-group-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: 'claude-opus-4-5',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'claude-sonnet-4-5',
-        available: true,
-      },
-    ]).run();
-
-    const sourceRouteA = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-opus-4-5',
-      enabled: true,
-    }).returning().get();
-    const sourceRouteB = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-sonnet-4-5',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values([
-      {
-        routeId: sourceRouteA.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'claude-opus-4-5',
-        enabled: true,
-      },
-      {
-        routeId: sourceRouteB.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'claude-sonnet-4-5',
-        enabled: true,
-      },
-    ]).run();
-
-    const groupResponse = await app.inject({
-      method: 'POST',
-      url: '/api/routes',
-      payload: {
-        routeMode: 'explicit_group',
-        displayName: 'claude-opus-4-6',
-        sourceRouteIds: [sourceRouteA.id, sourceRouteB.id],
-      },
     });
-    expect(groupResponse.statusCode).toBe(200);
-    const groupId = (groupResponse.json() as { id: number }).id;
-
-    await db.insert(schema.downstreamApiKeys).values({
-      name: 'managed-explicit-group-key',
-      key: 'sk-managed-explicit-group',
-      enabled: true,
-      allowedRouteIds: JSON.stringify([groupId]),
-    }).run();
+    const disabledRule = await seedForwardRule({
+      modelName: 'disabled-model',
+      siteId: site.id,
+      accountId: account.id,
+    });
+    const service = await import('../../services/modelForwardService.js');
+    await service.setModelForwardRuleEnabled(disabledRule.id, false);
+    invalidateTokenRouterCache();
 
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-managed-explicit-group',
-      },
+      headers: { authorization: 'Bearer sk-global-proxy-token' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('claude-opus-4-6');
-    expect(ids).not.toContain('claude-opus-4-5');
-    expect(ids).not.toContain('claude-sonnet-4-5');
+    const ids = readModelIds(response.json());
+    expect(ids).toContain('enabled-model');
+    expect(ids).not.toContain('disabled-model');
+    expect(rule.routeId).toBeTruthy();
   });
 
   it('filters search pseudo models out of /v1/models', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'search-site',
-      url: 'https://search.example.com',
-      platform: 'openai',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
-      siteId: site.id,
-      accessToken: 'search-access-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
-      accountId: account.id,
-      name: 'default',
-      token: 'search-api-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    await db.insert(schema.modelAvailability).values([
-      {
-        accountId: account.id,
-        modelName: '__search',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: '__tavily_search',
-        available: true,
-      },
-      {
-        accountId: account.id,
-        modelName: 'gpt-4.1',
-        available: true,
-      },
-    ]).run();
-
-    const searchRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: '__search',
-      enabled: true,
-    }).returning().get();
-
-    const llmRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4.1',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values([
-      {
-        routeId: searchRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: '__search',
-        enabled: true,
-      },
-      {
-        routeId: llmRoute.id,
-        accountId: account.id,
-        tokenId: token.id,
-        sourceModel: 'gpt-4.1',
-        enabled: true,
-      },
-    ]).run();
+    const { site, account } = await seedSiteWithAccount('search');
+    await seedForwardRule({ modelName: '__search', siteId: site.id, accountId: account.id });
+    await seedForwardRule({ modelName: 'gpt-4.1', siteId: site.id, accountId: account.id });
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'search-key',
@@ -620,19 +281,13 @@ describe('/v1/models route', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
-      headers: {
-        authorization: 'Bearer sk-search-key',
-      },
+      headers: { authorization: 'Bearer sk-search-key' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as {
-      object: 'list';
-      data: Array<{ id: string }>;
-    };
-    const ids = body.data.map((item) => item.id);
+    const ids = readModelIds(response.json());
     expect(ids).toContain('gpt-4.1');
     expect(ids).not.toContain('__search');
-    expect(ids).not.toContain('__tavily_search');
   });
+
 });

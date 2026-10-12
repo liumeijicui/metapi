@@ -11,6 +11,7 @@ describe('ModelForwarding 模型转发页', () => {
   const editor = read('src/web/pages/model-forwarding/RuleEditorModal.tsx');
   const types = read('src/web/pages/model-forwarding/types.ts');
   const app = read('src/web/App.tsx');
+  const modal = read('src/web/components/ModelChatModal.tsx');
   const api = read('src/web/api.ts');
   const tokensRoute = read('src/server/routes/api/tokens.ts');
   const tokenRouter = read('src/server/services/tokenRouter.ts');
@@ -34,10 +35,10 @@ describe('ModelForwarding 模型转发页', () => {
 
   it('规则生成的路由带 forward: 前缀，派发只认规则、不回落到老路由', () => {
     expect(tokenRouter).toContain('isForwardRoutePattern');
-    // 「模型转发」声明过的模型名一旦命中，就只走这条规则：规则没有可派发通道时
-    // 如实失败，不再回落到按 model_pattern 命中的老路由。
-    expect(tokenRouter).toContain('loadDeclaredForwardModelNames');
+    // 老路由整体退出派发：findRoute 只解析「模型转发」规则，命中不了就返回 null，
+    // 不再按 model_pattern 回落到自动路由（权重 / 粘滞 / 冷却 / 自动降级那套）。
     expect(tokenRouter).not.toContain('hasDispatchableChannel');
+    expect(tokenRouter).not.toContain('loadDeclaredForwardModelNames');
     expect(tokensRoute).toContain('.filter((route) => !isForwardRoutePattern(route.modelPattern))');
   });
 
@@ -194,5 +195,34 @@ describe('ModelForwarding 模型转发页', () => {
     expect(editor).toContain('模型名不能重复');
     expect(page).toContain('existingRuleNames={rules');
     expect(page).toContain('rule.id !== editingRule?.id');
+  });
+
+  it('每条规则都能开「对话」，用对外模型名打一次真实网关来验证转发对不对', () => {
+    // 入口按钮 + 只有对外模型名的 target（网关模式不需要站点 / 凭据）。
+    expect(page).toContain('setChatModelName(rule.modelName)');
+    expect(page).toContain('data-testid={`forward-rule-chat-${rule.id}`}');
+    expect(page).toContain('<ModelChatModal');
+    expect(page).toContain('mode="gateway"');
+    expect(page).toContain("target={chatModelName ? { modelName: chatModelName } : null}");
+
+    // 发之前先按和真实派发同一套逻辑（/api/routes/decision）预告「本次会走」哪个目标，
+    // 发完再刷一次，让「顺序和预期不一致」当场就能看出来。
+    expect(modal).toContain("const isGateway = mode === 'gateway';");
+    expect(modal).toContain('api.getRouteDecision(modelName)');
+    expect(modal).toContain("tr('本次会走：')");
+    expect(modal).toContain("tr('目标顺序')");
+    expect(modal).toContain("tr('上游模型')");
+    expect(api).toContain('/api/routes/decision');
+    expect(tokensRoute).toContain("app.get<{ Querystring: { model?: string } }>('/api/routes/decision'");
+    expect(tokensRoute).toContain('tokenRouter.explainSelection(model)');
+
+    // 网关模式：请求直接打我们自己的网关（/v1/chat/completions），不是直连上游站点。
+    expect(modal).toContain('api.proxyTestStream(');
+    expect(modal).toContain("path: '/v1/chat/completions'");
+    // 回复里自报的模型名 = 实际被调用的模型，作为派发结果的直接证据。
+    expect(modal).toContain('responseModel');
+    expect(modal).toContain("tr('实际模型')");
+    // 明确不自动切换：永远走顺序最靠前的启用目标。
+    expect(modal).toContain("tr('永远用列表里顺序最靠前的启用目标，不做自动切换。')");
   });
 });

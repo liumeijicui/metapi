@@ -23,7 +23,7 @@ import {
 } from '../../services/proxyVideoTaskStore.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
   selectProxyChannelForAttempt,
@@ -75,7 +75,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
       });
 
       if (!selected) {
-        const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
+        const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
         await reportProxyAllFailed({
           model: requestedModel,
           reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',

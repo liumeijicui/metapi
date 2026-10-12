@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCcSwitchDeepLink,
   buildCcSwitchModelOptions,
+  isCcSwitchModelAllowed,
   isSelectableModelName,
   mergeCcSwitchModelOptions,
   buildManualConfigSnippet,
   normalizeGatewayBaseUrl,
+  resolveCcSwitchCandidateModels,
+  resolveCcSwitchDefaultModel,
   resolveCcSwitchEndpoint,
   resolveDefaultGatewayBaseUrl,
 } from './ccSwitch.js';
@@ -211,5 +214,63 @@ describe('mergeCcSwitchModelOptions', () => {
 
   it('skips blank and wildcard names', () => {
     expect(mergeCcSwitchModelOptions([], ['  ', 'gpt-*'])).toEqual([]);
+  });
+});
+
+describe('原站直连导入的模型名约束', () => {
+  const gatewayModels = [
+    { value: 'gpt-6-astra', label: 'gpt-6-astra' },
+    { value: 'gpt-5.5', label: 'gpt-5.5' },
+  ];
+  const siteModels = ['deepseek-v4.1-flash', 'deepseek-v4-flash'];
+
+  it('原站导入只给该站自己的模型名，不给我们的对外模型名', () => {
+    const options = resolveCcSwitchCandidateModels({
+      mode: 'origin-site',
+      gatewayModels,
+      siteModels,
+    });
+    expect(options.map((option) => option.value)).toEqual([
+      'deepseek-v4-flash',
+      'deepseek-v4.1-flash',
+    ]);
+  });
+
+  it('网关导入仍然用全量对外模型名', () => {
+    const options = resolveCcSwitchCandidateModels({
+      mode: 'gateway',
+      gatewayModels,
+      siteModels,
+    });
+    expect(options.map((option) => option.value)).toEqual([
+      'deepseek-v4-flash',
+      'deepseek-v4.1-flash',
+      'gpt-5.5',
+      'gpt-6-astra',
+    ]);
+  });
+
+  it('原站导入写对外别名会被拦下', () => {
+    expect(isCcSwitchModelAllowed({ mode: 'origin-site', model: 'gpt-6-astra', siteModels })).toBe(false);
+    expect(isCcSwitchModelAllowed({ mode: 'origin-site', model: 'deepseek-v4-flash', siteModels })).toBe(true);
+    expect(isCcSwitchModelAllowed({ mode: 'gateway', model: 'gpt-6-astra', siteModels })).toBe(true);
+    // 留空交给客户端决定，不拦。
+    expect(isCcSwitchModelAllowed({ mode: 'origin-site', model: '', siteModels })).toBe(true);
+  });
+
+  it('打开弹窗时原站导入预填该站的模型名', () => {
+    expect(resolveCcSwitchDefaultModel({ mode: 'origin-site', siteModels })).toBe('deepseek-v4.1-flash');
+    expect(resolveCcSwitchDefaultModel({
+      mode: 'origin-site',
+      preferred: 'deepseek-v4-flash',
+      siteModels,
+    })).toBe('deepseek-v4-flash');
+    // 预填的是对外别名时不采纳，退回该站自己的模型名。
+    expect(resolveCcSwitchDefaultModel({
+      mode: 'origin-site',
+      preferred: 'gpt-6-astra',
+      siteModels,
+    })).toBe('deepseek-v4.1-flash');
+    expect(resolveCcSwitchDefaultModel({ mode: 'gateway', preferred: 'gpt-6-astra' })).toBe('gpt-6-astra');
   });
 });

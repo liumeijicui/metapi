@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
+import ModelChatModal from '../components/ModelChatModal.js';
 import { triggerEdgeSync, useEdgeStatus } from '../edgeMode.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -58,6 +59,8 @@ export default function ModelForwarding() {
   const [busyTargetKey, setBusyTargetKey] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  // 「对话」测试：用对外模型名打一次网关，看实际落到哪条转发通道上。
+  const [chatModelName, setChatModelName] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
@@ -265,7 +268,7 @@ export default function ModelForwarding() {
           <div className="page-subtitle">
             {edgeMode
               ? tr('本机可以调整转发顺序与启停（只对本机生效）；规则的增删改请在服务器上做。')
-              : tr('把对外模型名固定转发到指定站点、上游模型与账号；规则声明过的模型只走这里配的站点，不再回落到同名的老路由。')}
+              : tr('把对外模型名固定转发到指定站点、上游模型与账号。网关的模型派发只认这里的规则：调用 A 模型就转发到规则里顺序最靠前的那一个目标（B 模型），命中不了规则就如实报错。')}
           </div>
         </div>
         {edgeMode ? (
@@ -329,11 +332,20 @@ export default function ModelForwarding() {
                   {rule.targets.length} {tr('账号')}
                 </span>
                 {rule.routeId ? (
-                  <span className="badge badge-muted" style={{ fontSize: 10.5 }} data-tooltip={tr('转发规则接管后，同名的老路由不会再被选中')}>
-                    {tr('已接管同名老路由')}
+                  <span className="badge badge-muted" style={{ fontSize: 10.5 }} data-tooltip={tr('只有「模型转发」能派发请求：这条规则生成的转发路由就是该模型的唯一派发通道')}>
+                    {tr('唯一派发通道')}
                   </span>
                 ) : null}
                 <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  className="btn btn-link"
+                  title={tr('用这个对外模型名打一次网关，直接看实际命中的目标与上游模型')}
+                  data-testid={`forward-rule-chat-${rule.id}`}
+                  onClick={() => setChatModelName(rule.modelName)}
+                >
+                  {tr('对话')}
+                </button>
                 <button
                   type="button"
                   className="btn btn-link"
@@ -524,7 +536,7 @@ export default function ModelForwarding() {
                 {' '}
                 <strong>{pendingDelete.rule.modelName}</strong>
                 {` ${tr('及其')} ${pendingDelete.rule.targets.length} ${tr('个转发目标')}`}
-                {tr('。删除后该模型名不再由本页接管。')}
+                {tr('。删除后该模型名没有转发规则，调用会直接失败（不会走其它路由）。')}
               </>
             )
             : null}
@@ -543,6 +555,17 @@ export default function ModelForwarding() {
         onLoadSiteModels={(siteId) => { void loadSiteModels(siteId); }}
         onClose={() => { setEditorOpen(false); setEditingRule(null); }}
         onSave={handleSave}
+      />
+
+      {/*
+        网关模式对话：用对外模型名打我们自己的网关，所以「回复里自报的模型名」和
+        「顶部预览的目标」就是真实派发结果。用来验证「调用 A 模型有没有真的转发到 B」。
+      */}
+      <ModelChatModal
+        mode="gateway"
+        open={chatModelName !== null}
+        target={chatModelName ? { modelName: chatModelName } : null}
+        onClose={() => setChatModelName(null)}
       />
     </div>
   );

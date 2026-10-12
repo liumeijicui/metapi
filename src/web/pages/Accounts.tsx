@@ -701,12 +701,7 @@ export default function Accounts() {
         siteId,
         Array.from(modelModal.pendingDisabled),
       );
-      try {
-        await api.rebuildRoutes(false, false);
-        toast.success("模型禁用设置已保存，路由已重建");
-      } catch {
-        toast.error("模型禁用设置已保存，但路由重建失败，请手动刷新路由");
-      }
+      toast.success("模型禁用设置已保存");
       closeModelModal();
     } catch (e: any) {
       toast.error(e.message || "保存失败");

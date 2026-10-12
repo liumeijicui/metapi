@@ -25,7 +25,7 @@ import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
   selectProxyChannelForAttempt,
@@ -67,7 +67,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       });
 
       if (!selected) {
-        const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
+        const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
         await reportProxyAllFailed({
           model: requestedModel,
           reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',

@@ -406,12 +406,20 @@ describe('upstreamRequestBuilder', () => {
     expect(tools.find((tool: any) => tool.name === 'apply_patch')).toMatchObject({ type: 'custom' });
   });
 
-  it('不限制自定义工具的站点保持 custom 声明不变', () => {
+  it('转发站（new-api）的 Responses 请求把全部 custom 工具降级成 function', () => {
+    // happycoding 实测：把 tools 原样转到 /v1/responses 会连 custom 声明一起
+    // 交给只认 Chat Completions 的上游，回
+    // `422 tools[0].type: unknown variant 'custom', expected 'function'`；
+    // 改写成 function 后同一个端点回 200（Codex 的 apply_patch 就这么修好的）。
     const originalBody = {
       model: 'kimi-k3',
       stream: true,
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
-      tools: [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } }],
+      tools: [
+        { type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } },
+        { type: 'custom', name: 'apply_patch', format: { type: 'grammar', syntax: 'lark', definition: 'start: PATCH' } },
+      ],
+      tool_choice: { type: 'custom', name: 'exec' },
     };
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',
@@ -421,6 +429,35 @@ describe('upstreamRequestBuilder', () => {
       sitePlatform: 'new-api',
       siteUrl: 'https://happycoding.xyz',
       openaiBody: { model: 'kimi-k3', input: originalBody.input, tools: originalBody.tools },
+      downstreamFormat: 'responses',
+      downstreamHeaders: {},
+      responsesOriginalBody: originalBody,
+    });
+
+    const body = request.body as any;
+    expect(body.tools.map((tool: any) => tool.type)).toEqual(['function', 'function']);
+    expect(body.tools[0]).toMatchObject({ type: 'function', name: 'exec', parameters: { required: ['input'] } });
+    // 语法提示要跟着走，否则模型不知道 input 该长什么样。
+    expect(String(body.tools[0].description)).toContain('start: SOURCE');
+    // 强制选择项也要一起改成 function，否则等于强制调用一个没声明过的 custom 工具。
+    expect(body.tool_choice).toEqual({ type: 'function', name: 'exec' });
+  });
+
+  it('原生 Responses 平台（openai / codex）保持 custom 声明不变', () => {
+    const originalBody = {
+      model: 'gpt-5.5',
+      stream: true,
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: SOURCE' } }],
+    };
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.5',
+      stream: true,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://api.openai.com',
+      openaiBody: { model: 'gpt-5.5', input: originalBody.input, tools: originalBody.tools },
       downstreamFormat: 'responses',
       downstreamHeaders: {},
       responsesOriginalBody: originalBody,

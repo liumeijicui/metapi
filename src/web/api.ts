@@ -981,21 +981,6 @@ export const api = {
   // Routes
   getRoutes: () => request("/api/routes"),
   getRoutesLite: () => request("/api/routes/lite"),
-  getRoutesSummary: () => request("/api/routes/summary"),
-  getRouteChannels: (routeId: number) =>
-    request(`/api/routes/${routeId}/channels`),
-  batchAddChannels: (
-    routeId: number,
-    channels: Array<{
-      accountId: number;
-      tokenId?: number;
-      sourceModel?: string;
-    }>,
-  ) =>
-    request(`/api/routes/${routeId}/channels/batch`, {
-      method: "POST",
-      body: JSON.stringify({ channels }),
-    }),
   // 模型转发（对外模型名 → 站点/上游模型/多账号）
   getModelForwardRules: () => request("/api/model-forward-rules"),
   attachModelForwardTarget: (data: {
@@ -1033,94 +1018,12 @@ export const api = {
     request(`/api/model-forward-rules/${ruleId}/targets/${targetId}`, { method: "DELETE" }),
   deleteModelForwardRule: (id: number) =>
     request(`/api/model-forward-rules/${id}`, { method: "DELETE" }),
+
   // 边缘版（exe）专用：丢掉本机改过的顺序 / 启停，回到服务器那一版（只对本机生效）。
   resetEdgeModelForwardLocalOrder: () =>
     request("/api/edge/model-forward-local-edits/reset", { method: "POST" }),
-  addRoute: (data: any) =>
-    request("/api/routes", { method: "POST", body: JSON.stringify(data) }),
-  updateRoute: (id: number, data: any) =>
-    request(`/api/routes/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteRoute: (id: number) =>
-    request(`/api/routes/${id}`, { method: "DELETE" }),
-  clearRouteCooldown: (id: number) =>
-    request(`/api/routes/${id}/cooldown/clear`, { method: "POST" }),
-  batchUpdateRoutes: (data: { ids: number[]; action: "enable" | "disable" }) =>
-    request("/api/routes/batch", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-  addChannel: (routeId: number, data: any) =>
-    request(`/api/routes/${routeId}/channels`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-  updateChannel: (id: number, data: any) =>
-    request(`/api/channels/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
-  batchUpdateChannels: (updates: Array<{ id: number; priority: number }>) =>
-    request("/api/channels/batch", {
-      method: "PUT",
-      body: JSON.stringify({ updates }),
-    }),
-  deleteChannel: (id: number) =>
-    request(`/api/channels/${id}`, { method: "DELETE" }),
-  rebuildRoutes: (refreshModels = true, wait = false) =>
-    request("/api/routes/rebuild", {
-      method: "POST",
-      body: JSON.stringify({ refreshModels, ...(wait ? { wait: true } : {}) }),
-      timeoutMs: wait ? 150_000 : 30_000,
-    }),
-  refreshRouteDecisionSnapshots: () =>
-    request("/api/routes/decision/refresh", {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
   getRouteDecision: (model: string) =>
     request(`/api/routes/decision?model=${encodeURIComponent(model)}`),
-  getRouteDecisionsBatch: (
-    models: string[],
-    options?: { refreshPricingCatalog?: boolean; persistSnapshots?: boolean },
-  ) =>
-    request("/api/routes/decision/batch", {
-      method: "POST",
-      body: JSON.stringify({
-        models,
-        ...(options?.refreshPricingCatalog
-          ? { refreshPricingCatalog: true }
-          : {}),
-        ...(options?.persistSnapshots ? { persistSnapshots: true } : {}),
-      }),
-    }),
-  getRouteDecisionsByRouteBatch: (
-    items: Array<{ routeId: number; model: string }>,
-    options?: { refreshPricingCatalog?: boolean; persistSnapshots?: boolean },
-  ) =>
-    request("/api/routes/decision/by-route/batch", {
-      method: "POST",
-      body: JSON.stringify({
-        items,
-        ...(options?.refreshPricingCatalog
-          ? { refreshPricingCatalog: true }
-          : {}),
-        ...(options?.persistSnapshots ? { persistSnapshots: true } : {}),
-      }),
-    }),
-  getRouteWideDecisionsBatch: (
-    routeIds: number[],
-    options?: { refreshPricingCatalog?: boolean; persistSnapshots?: boolean },
-  ) =>
-    request("/api/routes/decision/route-wide/batch", {
-      method: "POST",
-      body: JSON.stringify({
-        routeIds,
-        ...(options?.refreshPricingCatalog
-          ? { refreshPricingCatalog: true }
-          : {}),
-        ...(options?.persistSnapshots ? { persistSnapshots: true } : {}),
-      }),
-    }),
 
   // Stats
   getDashboard: () => request("/api/stats/dashboard"),

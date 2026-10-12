@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+﻿import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY, isUsableAccountToken } from './accountTokenService.js';
@@ -552,7 +552,22 @@ export async function updateModelForwardRule(id: number, raw: unknown): Promise<
     }).run();
   }
 
+  const previousModelName = (existing.modelName || '').trim().toLowerCase();
+  const nextModelName = input.modelName.trim().toLowerCase();
+  const previousRouteId = existing.routeId;
+
   await syncModelForwardRule(id);
+
+  // 改名会生成一条新的转发路由（pattern 是 forward:<模型名>），旧路由必须删掉：
+  // 留着的旧路由仍然带着旧 display_name 和旧通道，等于「规则改名了但旧模型名照样能调」。
+  if (previousRouteId && previousModelName !== nextModelName) {
+    const staleRoute = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, previousRouteId))
+      .get();
+    if (staleRoute && isForwardRoutePattern(staleRoute.modelPattern)) {
+      await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, previousRouteId)).run();
+    }
+  }
   const updated = (await listModelForwardRules()).find((rule) => rule.id === id);
   if (!updated) throw new ModelForwardError('更新转发规则失败');
   return updated;
@@ -819,6 +834,61 @@ export async function deleteModelForwardRule(id: number): Promise<void> {
   }
   // 通道被删掉了，进程内的路由快照也必须一并丢。
   invalidateTokenRouterCache();
+}
+
+/**
+ * 派发失败时的可读原因。
+ *
+ * 老路由已经整体退出派发，所以「模型调不通」只有三种真实原因：没配转发规则、规则
+ * 停用了、规则里没有可用的目标/通道。以前这些情况都会掉进老路由，报出来的错也和真实
+ * 原因无关（比如明明是没配规则，却显示 401 / 上游限流）。
+ */
+export type ForwardDispatchFailure = {
+  code: 'no_rule' | 'rule_disabled' | 'no_enabled_target' | 'no_channel';
+  message: string;
+};
+
+export async function describeForwardDispatchFailure(modelName: string): Promise<ForwardDispatchFailure> {
+  const normalized = (modelName || '').trim();
+  const rule = await findRuleByModelName(normalized);
+  if (!rule) {
+    return {
+      code: 'no_rule',
+      message: `模型 ${normalized} 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）`,
+    };
+  }
+
+  const ruleRow = await db.select().from(schema.modelForwardRules)
+    .where(eq(schema.modelForwardRules.id, rule.id))
+    .get();
+  if (!ruleRow?.enabled) {
+    return {
+      code: 'rule_disabled',
+      message: `模型 ${normalized} 的转发规则已停用，无法派发（重新启用后立即生效）`,
+    };
+  }
+
+  const targets = await db.select().from(schema.modelForwardTargets)
+    .where(eq(schema.modelForwardTargets.ruleId, rule.id))
+    .all();
+  if (targets.length === 0) {
+    return {
+      code: 'no_enabled_target',
+      message: `模型 ${normalized} 的转发规则没有配置目标（站点 + 上游模型 + 账号），无法派发`,
+    };
+  }
+  const enabledTargets = targets.filter((target) => target.enabled);
+  if (enabledTargets.length === 0) {
+    return {
+      code: 'no_enabled_target',
+      message: `模型 ${normalized} 的转发目标全部被停用，无法派发（在「模型转发」里启用一个目标）`,
+    };
+  }
+
+  return {
+    code: 'no_channel',
+    message: `模型 ${normalized} 的转发目标没有可用通道（转发通道被停用、或对应账号/站点被停用），无法派发`,
+  };
 }
 
 /** 站点下的账号与可用模型，供新页面下拉选择。 */

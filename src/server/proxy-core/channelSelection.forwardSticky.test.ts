@@ -128,23 +128,24 @@ describe('模型转发路由忽略会话粘滞', () => {
     expect(afterReorder?.channel.id).toBe(secondChannelId);
   });
 
-  it('普通（非转发）路由的会话粘滞仍然生效', async () => {
+  it('非转发路由（老路由）已经不参与派发：无论粘滞怎么绑都选不出通道', async () => {
     const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4o-mini',
       modelMapping: JSON.stringify({ 'gpt-4o-mini': 'gpt-4o-mini' }),
       enabled: true,
     }).returning().get();
-    const first = await db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: route.id, accountId, tokenId, priority: 0, weight: 10, enabled: true, manualOverride: true,
-    }).returning().get();
-    const second = await db.insert(schema.routeChannels).values({
-      routeId: route.id, accountId, tokenId, priority: 1, weight: 10, enabled: true, manualOverride: true,
-    }).returning().get();
+    }).run();
     (await import('../services/tokenRouter.js')).invalidateTokenRouterCache();
 
     const stickySessionKey = 'key:1|codex|/v1/chat/completions|gpt-4o-mini|session-2';
-    coordinator.bindStickyChannel(stickySessionKey, second.id, { extraConfig: JSON.stringify({ credentialMode: 'session' }) });
+    coordinator.bindStickyChannel(stickySessionKey, route.id, {
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    });
 
+    // 老路由（按 model_pattern 命中的自动路由）整体退出派发：这里只有一条启用中的老
+    // 路由，也必须选不出任何通道 —— 这正是「删了还能调」那个坑的根治。
     const selected = await channelSelection.selectProxyChannelForAttempt({
       requestedModel: 'gpt-4o-mini',
       downstreamPolicy: EMPTY_POLICY,
@@ -152,8 +153,7 @@ describe('模型转发路由忽略会话粘滞', () => {
       retryCount: 0,
       stickySessionKey,
     });
-    expect(selected?.channel.id).toBe(second.id);
-    expect(selected?.channel.id).not.toBe(first.id);
+    expect(selected).toBeNull();
   });
 
 });

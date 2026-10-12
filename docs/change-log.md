@@ -1,3 +1,124 @@
+### 98. Codex 打 `/v1/responses` 被上游 422（`tools[].type: custom`）：custom 工具声明默认降级为 function
+
+- **类型**：缺陷修复（服务端；与 new-api 的协议转换层对齐）
+- **需求来源**：本会话（用户贴出 422 日志，并问「是按 new api 源码写的吗？」）
+- **一、现象与根因**
+  - 现象：Codex 走 `/v1/responses`，`gpt-6-astra -> happycoding/deepseek-v4.1-flash`，1.2s 失败：
+    `Upstream returned HTTP 422: Provider returned error (... tools[0].type: unknown variant 'custom', expected 'function' ...)`。
+  - 复现（修复前的线上代码）：`POST http://127.0.0.1:81/v1/responses` 带 `tools:[{type:'custom',name:'apply_patch'}]` 稳定回同款 422；打开 `proxy_debug_traces` 看**只有一条 attempt**（`responses`），所以这不是端点回退/降级链的问题，而是**工具声明形状**的问题。
+  - 根因：我们「把 custom 声明降级成 function」的机制只挂在 host 白名单上（`agentrouter.org` 只认 `apply_patch`，见 `siteProfiles`），其它站点一律 `passthrough`。而 new-api / sub2api 这类转发站的 `/v1/responses` 只是薄壳：它把 `tools` 原样交给只认 Chat Completions 的上游，`type: "custom"` 就被上游 422 掉。
+- **二、对照 new-api 源码（回答「是不是按 new-api 写的」）**
+  - 拉了 new-api 最新源码（`Calcium-Ion/new-api`，HEAD `42e694e`，2026-10-11）核对协议转换层：`relaykit/relayconvert/internal/toolconv/encode.go`
+    里 `responsesCustomTools()` 在目标协议是 chat 时把 custom 工具改写成 function —— 参数 schema 就是单一的 `input` 字符串（`required:['input']` + `additionalProperties:false`）、format/grammar 说明拼进 description；`responsesCustomToolChoice()` 再把 `{type:'custom',name}` 的 `tool_choice` 改写成 `{type:'function',name}`。
+  - 我们的 `downgradeResponsesCustomToolDeclarations()` 与它逐条一致（含 description 拼接、回程按名字把 `function_call` 还原成 `custom_tool_call`），差的只是**启用范围**；按 new-api 的语义，custom 只对「原生 Responses 上游」原样透传（它的 `attachOpenAIResponsesRequest` 就是 `definition.Raw` 直接透传）。
+  - 所以本次不是重写，而是把这条已有降级链路的默认策略改对，并补上 tool_choice 改写。
+- **三、改动**
+  - `src/server/services/siteProfiles.ts`：新增 `resolveResponsesCustomToolPolicy(url, platform)`：host 白名单（agentrouter → `['apply_patch']`）→ 原生 Responses 平台（`openai` / `codex`）为 `passthrough` → 其余（new-api / sub2api / 未知）为空白名单，即「一个 custom 工具都不认，全部降级」；`resolveUnsupportedResponsesCustomToolNames()` 增加 `sitePlatform` 参数，返回的名单同时驱动「发请求时降级声明」和「回程还原 custom_tool_call」两侧。
+  - `src/server/services/upstreamRequestBuilder.ts`（responses 分支）与 `src/server/proxy-core/surfaces/openAiResponsesSurface.ts`（回程）把 `sitePlatform` 传进去。
+  - `src/server/transformers/openai/responses/customToolDowngrade.ts`：降级声明的同时把指向该工具的 `tool_choice` 从 `custom` 改写成 `function`，否则等于「强制调用一个我没声明过的 custom 工具」。
+- **四、验证**
+  - 直接打 happycoding 做 A/B（用站点自己的 key，走系统代理）：`type:"custom"` → 422（与用户日志同一条上游报错）；同一份声明改写成 function → 200。
+  - 端到端（我们的网关，`sk-metapi-local-dev`）：修复前 `POST /v1/responses` = 422；修复后 = 200，且流里是 `response.output_item.added(type=custom_tool_call)` + `response.custom_tool_call_input.delta/done`（**没有** `function_call`），第二轮回传 `custom_tool_call` + `custom_tool_call_output` 历史同样 200。
+  - agentrouter 分支行为不变（host 白名单仍只降级 `apply_patch` 之外的工具），实机用 tester 强制通道打了一次：请求形状被接受，返回的是站点自己的 `403 insufficient_user_quota`（和工具无关）。
+  - 单测：`siteProfiles.test.ts` / `customToolDowngrade.test.ts` / `upstreamRequestBuilder.test.ts` 增改 4 条（含 happycoding 全量降级 + tool_choice 改写 + 原生平台透传）；`npx vitest run src/server` = 2769 passed；`npx tsc --noEmit -p tsconfig.server.json` 通过；`npm run repo:drift-check` Violations: 0。
+- **主要文件**：`src/server/services/siteProfiles.ts`、`src/server/services/upstreamRequestBuilder.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`、`src/server/transformers/openai/responses/customToolDowngrade.ts`、`src/server/services/siteProfiles.test.ts`、`src/server/services/upstreamRequestBuilder.test.ts`、`src/server/transformers/openai/responses/customToolDowngrade.test.ts`
+- **备注**：exe 边缘版与服务器共用同一份 `src/server`，需要重新打包才会带上这个修复。另外顺手发现（与本次改动无关）：agentrouter 的 `github_99102` 账号现在回 `403 user quota is not enough`。
+- **状态**：已完成（未提交）
+
+### 97. 「模型转发」每条规则加「对话」：用对外模型名打一次真实网关，当场核对转发到了哪
+
+- **类型**：功能实现（前端；复用既有对话组件，后端零改动）
+- **需求来源**：本会话（用户：「模型转发那加个对话，这样我好知道调用的路由到底对不对」）
+- **一、复用 `ModelChatModal`，新增 `gateway` 模式**
+  - `src/web/components/ModelChatModal.tsx` 之前只有「直连站点」一种形态（模型监控页在用）。新增 `mode?: 'direct' | 'gateway'`，默认 `direct`，原有调用方 Zero-diff；`ModelChatTarget` 的 `siteId` / `siteName` 改成可选（网关模式只需要对外模型名）。
+  - 网关模式发请求走 `api.proxyTestStream({ method:'POST', path:'/v1/chat/completions', stream:true, jsonBody:{ model, messages, stream:true } })`。服务端 `sendStreamingEnvelope` 是拿 `http://127.0.0.1:${port}${path}` 真回打自己的网关，所以走的就是线上同一套派发链路（`findRoute` → 「模型转发」规则 → 顺序最靠前的启用目标），不是模拟；日志里由 `TESTER_REQUEST_HEADER` 标记为「模型测试」。
+  - 网关模式不需要凭据：打开时跳过 `api.getModelMonitorChatChannels`，也隐藏「直连凭据」下拉，发送按钮的可用性判定与「没有凭据」拦截都按 `isGateway` 分流。
+- **二、发之前先预告「本次会走哪个目标」，发完再对账一次**
+  - 用 `api.getRouteDecision(modelName)`（`GET /api/routes/decision` → `tokenRouter.explainSelection`）拿选路结果 —— 和真实派发同一套逻辑，所以这里显示的通道号就是请求实际会打的那条。打开弹窗时查一次、发完一轮再刷一次。
+  - 顶部条显示：`本次会走：<账号 @ 站点 / 令牌>`、`上游模型：<实际模型>`，右侧「刷新」按钮可手动重查；命中不了时直接显示服务端带回来的真实原因（`summary`），不是一句笼统的「不可用」。
+  - 折叠区「目标顺序（N）」逐条列出：`#位次 · 站点 · 上游模型 · 账号 · 100%/0% 或不合格原因`，和「永远用列表里顺序最靠前的启用目标，不做自动切换。」一并在界面上写明。
+  - 流式解析里新增 `responseModel`（上游自报的 `payload.model` = 实际被调用的模型），结束行显示成 `实际模型: xxx · 上游结束原因: stop`。这样「我以为走的 A、实际走的 B」在回复气泡里就能直接看到。
+- **三、入口**
+  - `src/web/pages/ModelForwarding.tsx`：每条规则的操作行加「对话」按钮（`data-testid="forward-rule-chat-<id>"`，title 写明用途），点击 `setChatModelName(rule.modelName)`；页面末尾挂 `<ModelChatModal mode="gateway" target={{ modelName }} />`。
+- **四、修掉「发送按钮被挡住」**
+  - 反馈：`经网关按「模型转发」规则派发；日志里标记为「模型测试」` 这句把发送按钮挡住了。
+  - 实测根因不在那句话本身，而是 `.model-chat` 的 `max-height: min(72vh, 640px)` + `overflow: hidden`：窗口一矮（笔记本 + 浏览器工具栏，或页面放大到 150%）内容超出上限，**输入区被整块裁掉**；而弹窗底部的 `modal-footer`（那句提示 + 「清空对话」）是 `.model-chat` 的兄弟节点，正好画在被裁掉的「发送」上面 —— 点发送命中的其实是 footer。1280×480 下 `elementFromPoint` 在发送按钮中心返回的就是 footer 里的按钮。
+  - 三处改动（`src/web/index.css`）：聊天窗从「裁切」改成 `overflow-y: auto`（最差情况能滚到按钮）；`.model-chat-target` / `.model-chat-route-note` / `.model-chat-composer` 一律 `flex-shrink: 0`，只让消息区被压扁；消息区去掉 `min-height: 120px` 的硬下限（改为 `min-height: 0`，空状态自己撑 `padding: 20px 0`），否则被挤出可视区的就是输入区。
+  - 另加 `@media (max-height: 560px)`：矮窗口下把输入框压到 46px、间距收紧，优先保证「发送」在可视范围内。
+  - 实测（Playwright，`elementFromPoint` 落在发送按钮中心）：1440×900、1280×640/600/560/480/420/360、1152×600、1024×600、900×560、640×900 全部命中发送按钮；1280×300 这种极端高度下聊天窗可滚动，滚到底后发送按钮同样可点。
+  - `modelMonitor.chat.test.ts` 增一条回归断言：`.model-chat` 必须是 `overflow-y: auto` 且不能有 `overflow: hidden`，输入区三个块必须 `flex-shrink: 0`，消息区必须 `min-height: 0`。
+- **五、验证**
+  - `tsc -p tsconfig.web.json` / `tsconfig.web.test.json` 通过；`npm run repo:drift-check` 违规 0。
+  - `modelForwarding.architecture.test.ts` 新增一条：断言页面的入口按钮 + `mode="gateway"` + 只传 `modelName`，模态框引用 `api.getRouteDecision` 并展示「本次会走 / 目标顺序 / 上游模型 / 实际模型」，且网关分支确实打 `/v1/chat/completions`。
+  - `modelMonitor.chat.test.ts` 里 3 条按新模式更新（渠道方法签名改 `siteId`、`credential!`、`isGateway` 分流、结束行多带 `responseModel`），保留「模型监控的对话仍然直连、不走网关」的原意。
+  - 实机（`build:server` + `vite build` + 重启 `metapi`）：`/api/routes/decision?model=gpt-6-astra` 返回 `selectedChannelId=3199`（`github_99102 @ agentrouter`，上游 `deepseek-v4-flash`），与规则里 `sortOrder=0` 的目标一致；`/api/test/proxy/stream` 真打一次返回流里 `model=deepseek-v4-flash`；浏览器点「对话」后界面显示「本次会走：github_99102 @ agentrouter / default · 上游模型：deepseek-v4-flash」，回复气泡显示「实际模型: deepseek-v4-flash · 上游结束原因: stop」。
+  - 新增 i18n 词条 14 条（网关模式与新按钮文案）。
+- **主要文件**：`src/web/components/ModelChatModal.tsx`、`src/web/pages/ModelForwarding.tsx`、`src/web/index.css`、`src/web/i18n.supplement.ts`、`src/web/pages/modelForwarding.architecture.test.ts`、`src/web/pages/modelMonitor.chat.test.ts`
+- **备注**：exe 边缘版与服务器共用同一份 `src/server`，但前端产物需重新 `vite build` / 重新打包才会带上这个按钮。
+- **状态**：已完成（未提交）
+
+### 96. 删除老路由页面（前端页面 + 专属接口 + 语义文案），派发只认「模型转发」
+
+- **类型**：重构（彻底移除老路由的用户可见面）
+- **需求来源**：本会话（用户：「老的路由页面还是存在的啊，我要的是完整的删除」）
+- **一、前端：整页删除**
+  - 删除页面 `src/web/pages/TokenRoutes.tsx` 与整个子目录 `src/web/pages/token-routes/`（`RouteCard` / `SortableChannelRow` / `AddChannelModal` / `ManualRoutePanel` / `RouteFilterBar` / `routePriorityBuckets` / `routingStrategy` / `useRouteChannels` 等 27 个文件）。
+  - 删除只服务该页的 helper：`routeListVisibility`、`routeModelCandidatesIndex`、`routeMissingTokenHints`、`zeroChannelRoutes`、`progressiveRender`（含各自单测）；顺带删掉早已无人引用的 `settings/RouteSelectorModal.tsx`。
+  - `src/web/App.tsx`：移除侧边栏「路由」菜单项、`TokenRoutes` 懒加载与 `/routes` 路由。老书签命中兜底路由 `*` → 自动回首页，不会白屏。
+  - 删除 7 个页面测试（`tokenRoutes.*.test.tsx`）与 `settings.route-selector-modal.architecture.test.ts`；`responsiveFilterPanel.architecture.test.ts` 的页面清单去掉 `TokenRoutes.tsx`。
+  - `src/web/api.ts`：删除只被该页使用的 `getRoutesSummary` / `getRouteChannels` / `batchAddChannels` / `addRoute` / `updateRoute` / `deleteRoute` / `clearRouteCooldown` / `batchUpdateRoutes` / `addChannel` / `updateChannel` / `batchUpdateChannels` / `deleteChannel` / `refreshRouteDecisionSnapshots` / `getRouteDecisionsBatch` / `getRouteDecisionsByRouteBatch` / `getRouteWideDecisionsBatch` / `rebuildRoutes`。
+- **二、后端：删掉只服务该页的接口**
+  - `src/server/routes/api/tokens.ts` 从 1407 行缩到 362 行：删除 `GET /api/routes/summary`、`GET/POST/DELETE /api/routes`、`PUT /api/routes/:id`、`POST /api/routes/batch`、`/api/routes/:id/channels`(+batch)、`/api/routes/:id/cooldown/clear`、`PUT /api/channels/batch`、`PUT/DELETE /api/channels/:channelId`、`POST /api/routes/decision/{batch,by-route/batch,route-wide/batch,refresh}`。
+  - 连带删除只被这些接口使用的辅助函数（显式群组来源校验/同步、批量通道优先级解析、批量决策解析、通道汇总、`getRouteWithSources` 等）与失效依赖导入。
+  - 保留：`GET /api/routes/lite`（下游密钥的模型/路由选择器）、`GET /api/routes` + `GET /api/routes/decision`（模型测试的模型列表与固定通道）、`POST /api/routes/rebuild`（运维排查入口，`TEST_ENVIRONMENT_SETUP.md` 里有用法）。
+  - 删除 6 个对应测试文件：`tokens.batch` / `tokens.cooldown-clear` / `tokens.route-decision-batch` / `tokens.route-decision-snapshot` / `tokens.route-decision-refresh-task` / `tokens.route-update-rebuild`。
+- **三、别处的「路由」残留一起收口**
+  - `Accounts.tsx` / `Sites.tsx` / `Settings.tsx` 保存禁用模型、品牌屏蔽、模型白名单后原本会调 `api.rebuildRoutes()` 并提示「路由已重建 / 路由重建失败」——老路由已退出派发，这个重建不再影响任何请求，已去掉调用与提示（保存本身照常成功）。
+  - `sharedSurface.test.ts` / `responses.codex-oauth.test.ts` 里断言「选不到通道就刷新模型并重建路由再试一次」的 4+1 条用例改写成新语义：第一跳选不到就如实失败，不再刷新、不再多打一次粘滞查询。
+  - `routeRefreshWorkflow.architecture.test.ts`：改成断言 `tokens.ts` 不再依赖 pattern 路由同步服务、`channelSelection.ts` 不再依赖 `routeRefreshWorkflow`。
+  - `docs/faq.md`、`docs/operations.md` 里「TokenRoutes → 重建路由」的指引改成 `POST /api/routes/rebuild`，并写明老路由已退出派发。
+- **四、顺带修掉一处会骗人的解释**
+  - `explainSelection` 对转发路由原本套用通用分支，摘要显示「路由策略：按权重随机」、最终选择按权重算 —— 和真实派发（永远取顺序最前）对不上。已加转发分支：摘要显示「路由策略：模型转发（永远用列表里顺序最靠前的启用目标）」，候选里只有第一个标 `100%`，其余标注「顺序排在后面，本次不会被选中」。
+- **五、验证**
+  - `tsc -p tsconfig.server.json` / `tsconfig.web.json` / `tsconfig.web.test.json` 全部通过；`npm run repo:drift-check` 违规 0（沿用既有 5 条跟踪债务）。
+  - 测试：`src/server` 354 文件 2766 例通过（3 个既有环境型失败：`db/index.default-path`、`factoryResetService`、`siteProxy`）；`src/web` 133 文件 461 例通过（1 个既有环境型失败：`accounts.rebind-panel-focus`）。
+  - 实机（`build:server` + `vite build` + 重启 `metapi`）：`gpt-6-astra` 转发 200（约 1.1s）；`/v1/models` 只列 `gpt-6-astra`；`/api/routes/summary`、`/api/routes/decision/batch` 返回 404；`/api/routes/lite`、`/api/routes`、`/api/routes/decision` 正常；`dist/web/assets` 里已无 `TokenRoutes` 产物。
+- **主要文件**：`src/web/App.tsx`、`src/web/api.ts`、`src/server/routes/api/tokens.ts`、`src/server/services/tokenRouter.ts`、`src/web/pages/{Accounts,Sites,Settings}.tsx`、`docs/{faq,operations}.md`
+- **备注**：老路由页面删除后，数据库里按 `model_pattern` 生成的历史路由行与内部重建流程（账号/站点变更时触发、边缘版同步时触发）仍然保留，它们不再参与派发；如需连这层一起清掉可以再单独做。
+- **状态**：已完成（未提交）
+### 95. 删除老路由 + 重做「模型转发」：只认规则，A 模型转发到 B 模型
+
+- **类型**：重构（派发链路收敛）+ 协议兼容修复
+- **需求来源**：本会话（用户：「帮我把整个老路由完全删除，模型转发也重做，参考 new api 源码重做，包括工具的处理等待，要的很简单，就是调用 A 模型，能转发到 B 模型」）
+- **一、老路由整体退出派发**
+  - `TokenRouter.findRoute()` 只解析「模型转发」生成的路由：`isForwardRoutePattern(route.modelPattern)` 且 `displayName` 命中请求模型名；命中不了直接 `return null`。
+  - **彻底删除**权重随机 / 轮询 / 稳定优先 / 会话粘滞 / 冷却让位 / 自动降级 / 分组路由（`explicit_group`）/ `model_pattern` 回落的整条老路由分支；连带删除只服务于它的 `loadDeclaredForwardModelNames()` 与快照缓存失效逻辑。
+  - `getAvailableModels()` 只列「有启用转发规则」的对外模型名，下游不会再看到一个「列得出来、调不通」的清单。
+  - `findRouteById()` 只保留给后台「解释选路 / 刷新定价」用，不参与请求派发。
+- **二、转发选路：永远用列表里第一个启用目标**
+  - 新增 `selectFirstForwardCandidate()`：按 `sort_order`（列表顺序）升序、`id` 兜底，取第一个；**不看冷却、不看失败次数、不看站点熔断**。
+  - 转发路由**不吃** `excludeChannelIds`（重试也不会偷偷换到第二个候选）、**不吃**「最近失败避让」、**不吃**会话粘滞（默认 30 分钟粘滞会让「置顶/上移/下移」看起来没生效）。
+  - 换源只有两种方式，都由人操作：停用当前这项，或把另一项移到最前面。
+- **三、失败原因说真话**
+  - 新增 `modelForwardService.describeForwardDispatchFailure()`，把「调不通」拆成 4 种真实原因并各自给出可执行文案：`no_rule` / `rule_disabled` / `no_enabled_target` / `no_channel`。
+  - 文案形如：`模型 gpt-5.5 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）`。
+  - `channelSelection.buildModelUnavailableMessage()` 改为 async，并**动态 `await import()`** 该服务——静态引入会在模块求值期形成循环依赖，导致 `schema.modelForwardRules` 为 `undefined`（已踩过）。所有调用点（chat / responses / gemini / rerank / search / images / embeddings / completions / videos）同步 await 并传入请求模型名。
+  - `channelSelection` 删掉「选不到通道就刷新模型、重建路由再重试」的老路由时代兜底：它只会让失败请求白等几十秒。
+- **四、工具处理与协议兼容（对齐 new api 行为）**
+  - `upstreamRequestBuilder.sanitizeResponsesFallbackChatBody()`：从 `/v1/responses` 请求体降级成 chat 请求体时，把只有 Responses 认识的字段（`reasoning` / `store` / `include` / `previous_response_id` / `truncation` / `max_tool_calls` / `background`）翻译或剔除，避免上游以 `Unknown parameter: 'reasoning'` 直接 400。
+  - 新增 `isGatewayServerError(status, text)`：上游 5xx **只在响应体不是 API 结构化错误信封时**才当作端点不兼容信号。结构化错误（模型不支持某能力、上游渠道报错）不再触发端点降级——降级只会把请求送进更窄的通道、制造更难读的报错。
+  - `isEndpointDowngradeError()`：`invalid_request_error` 是 OpenAI 通用客户端错误类型，不再单凭它降级，必须配合端点提示才算。
+- **五、测试与验证**
+  - 删除 5 个纯老路由语义测试文件（`tokenRouter.selection` / `.patterns` / `.oauth-route-units` / `.session-decoupling` / `tokens.route-decision-refresh-pricing`）；改造 15 个受影响的测试为「只有模型转发能派发」语义。
+  - `src/server/services/tokenRouter*` + `channelSelection.forwardSticky` + `proxy/models` + `proxy/chat.count-tokens` 共 **9 文件 62 例全绿**；`src/server` 全量 2797 passed（3 个既有环境型失败与本轮无关）。
+  - 门禁：`npx tsc --noEmit -p tsconfig.server.json` 通过；`npm run repo:drift-check` **违规 0**（沿用既有 5 条跟踪债务）。
+  - 实机（服务重启后）：
+    - `gpt-6-astra`（有规则 → agentrouter/deepseek-v4-flash）→ HTTP 200，1.09s。
+    - `gpt-5.5`（无规则）→ HTTP 503 + 真实原因文案，**0.004s 返回**（修复前曾挂 55s）。
+    - `/v1/models` → 只返回 `gpt-6-astra`。
+    - chat + tools：正常返回 `tool_calls`；`/v1/responses` + function tool 正常返回 `function_call`；`/v1/responses` + custom tool（Codex 的 `exec`）正常返回 `custom_tool_call`（上游 `Unsupported custom tool` 未复现）。
+- **主要文件**：`src/server/services/tokenRouter.ts`、`src/server/services/modelForwardService.ts`、`src/server/proxy-core/channelSelection.ts`、`src/server/proxy-core/surfaces/*`、`src/server/routes/proxy/{search,images,embeddings,completions,videos,models}.ts`、`src/server/services/upstreamRequestBuilder.ts`、`src/server/transformers/shared/endpointCompatibility.ts`
+- **状态**：已完成（未提交）
 ### 94. 验证码签到跑真机后修 3 个问题 + 更正 #93 里高估的识别率
 
 - **类型**：缺陷修复（判词优先级 / 重试判定）+ 数据与文档更正

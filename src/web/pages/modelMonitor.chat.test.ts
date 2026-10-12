@@ -18,20 +18,23 @@ describe('ModelMonitor 对话按钮', () => {
   });
 
   it('对话用站点自己的凭据直连上游，完全不走网关路由', () => {
-    expect(modal).toContain('api.getModelMonitorChatChannels(target.siteId, target.modelName)');
+    expect(modal).toContain('api.getModelMonitorChatChannels(siteId, target.modelName)');
     expect(modal).toContain('api.directChatStream(');
     expect(modal).toContain('siteId: target.siteId');
-    expect(modal).toContain('accountId: credential.accountId');
-    expect(modal).toContain('tokenId: credential.tokenId');
+    expect(modal).toContain('accountId: credential!.accountId');
+    expect(modal).toContain('tokenId: credential!.tokenId');
     expect(modal).toContain('model: target.modelName');
-    // 不再走测试代理 / 固定通道那条路：那样会依赖 route_channels 配置。
-    expect(modal).not.toContain('api.proxyTestStream(');
+    // 直连分支只在非网关模式下走；网关模式（模型转发页的「对话」）是另一条
+    // 显式分支，用测试代理打自己的网关，走的是「模型转发」规则而不是
+    // route_channels 固定通道。
+    expect(modal).toContain("const isGateway = mode === 'gateway';");
+    expect(modal).toContain(': await api.directChatStream(');
     expect(modal).not.toContain('forcedChannelId');
     expect(modal).not.toContain('forwardModel');
     expect(modal).not.toContain('<option value="__auto__">');
-    // 没有凭据时直接禁止发送。
-    expect(modal).toContain("if (!credential) {");
-    expect(modal).toContain('disabled={sending || !input.trim() || !activeCredential}');
+    // 直连模式没有凭据时直接禁止发送；网关模式不需要凭据。
+    expect(modal).toContain('if (!isGateway && !credential) {');
+    expect(modal).toContain('disabled={sending || !input.trim() || (!isGateway && !activeCredential)}');
     // 界面上要能看出来是直连。
     expect(modal).toContain("tr('直连凭据')");
     expect(modal).toContain("tr('直连目标站点')");
@@ -74,9 +77,23 @@ describe('ModelMonitor 对话按钮', () => {
     const footerRule = css.match(/\.model-chat-footer-btn \{[^}]*\}/)?.[0] ?? '';
     expect(footerRule).toContain('background: var(--color-bg-card);');
     expect(footerRule).toContain('border: 1px solid var(--color-border);');
-    // 聊天窗本身超高时内部裁切，不能溢出去压住底部的按钮。
-    const chatRule = css.match(/\.model-chat \{[^}]*\}/)?.[0] ?? '';
-    expect(chatRule).toContain('overflow: hidden;');
+  });
+
+  it('窗口矮时不会把输入区裁掉：发送按钮不能被弹窗底部的 footer 盖住', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/web/index.css'), 'utf8');
+    // 曾经的 `overflow: hidden` 在矮窗口下会把输入区整块裁掉，而 modal-footer
+    // （提示文字 + 清空对话）正好画在被裁掉的「发送」上面 → 发送按钮点不到。
+    // 现在聊天窗自己滚，最差情况也能滚到按钮。
+    const chatRule = css.match(/\n\.model-chat \{[^}]*\}/)?.[0] ?? '';
+    expect(chatRule).toContain('overflow-y: auto;');
+    expect(chatRule).not.toContain('overflow: hidden;');
+
+    // 收缩只允许发生在消息区，否则 flex 会先压扁输入区、把发送按钮挤出弹窗。
+    const noShrinkRule = css.match(/\.model-chat-target,\s*\.model-chat-route-note,\s*\.model-chat-composer \{[^}]*\}/)?.[0] ?? '';
+    expect(noShrinkRule).toContain('flex-shrink: 0;');
+    const messagesRule = css.match(/\n\.model-chat-messages-wrap \{[^}]*\}/)?.[0] ?? '';
+    // 消息区必须能被压到 0：给它固定下限的话，被挤出可视区的就是输入区。
+    expect(messagesRule).toContain('min-height: 0;');
   });
 
   it('对话结束后显示上游声明的结束原因与用量，便于分辨是上游截断还是我们断了', () => {
@@ -89,7 +106,7 @@ describe('ModelMonitor 对话按钮', () => {
     expect(modal).toContain("if (parsed.data === '[DONE]') {");
     expect(modal).toContain('if (finishChoice?.finish_reason) finishReason = String(finishChoice.finish_reason);');
     expect(modal).toContain("if (typeof payload?.usage?.completion_tokens === 'number')");
-    expect(modal).toContain('copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone };');
+    expect(modal).toContain('copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone, responseModel };');
     expect(modal).toContain("tr('上游结束原因')");
     expect(modal).toContain("tr('上游没有发送结束标记，这轮可能被中断')");
     expect(modal).toContain('model-chat-finish');

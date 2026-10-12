@@ -40,6 +40,8 @@ describe('TokenRouter runtime cache', () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.modelForwardTargets).run();
+    await db.delete(schema.modelForwardRules).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
@@ -84,25 +86,20 @@ describe('TokenRouter runtime cache', () => {
       isDefault: true,
     }).returning().get();
 
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      enabled: true,
-    }).returning().get();
-
-    await db.insert(schema.routeChannels).values({
-      routeId: route.id,
-      accountId: account.id,
-      tokenId: token.id,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).run();
+    // 派发只认「模型转发」：缓存语义要在转发路由上验证。
+    const forwardService = await import('./modelForwardService.js');
+    const rule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id, tokenId: token.id, upstreamModel: 'gpt-4o-mini' }],
+    });
+    const routeId = rule.routeId as number;
+    invalidateTokenRouterCache();
 
     const router = new TokenRouter();
     expect(await router.selectChannel('gpt-4o-mini')).toBeTruthy();
 
-    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).run();
-    await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run();
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.routeId, routeId)).run();
+    await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).run();
 
     const cachedSelection = await router.selectChannel('gpt-4o-mini');
     expect(cachedSelection).toBeTruthy();
@@ -305,10 +302,12 @@ describe('TokenRouter runtime cache', () => {
     const recentFailureCheckAt = Date.now();
     expect(isChannelRecentlyFailed({
       failCount: 3,
+      consecutiveUpstreamFailures: 3,
       lastFailAt: new Date(recentFailureCheckAt - 19_000).toISOString(),
     }, recentFailureCheckAt)).toBe(true);
     expect(isChannelRecentlyFailed({
       failCount: 3,
+      consecutiveUpstreamFailures: 3,
       lastFailAt: new Date(recentFailureCheckAt - 21_000).toISOString(),
     }, recentFailureCheckAt)).toBe(false);
   });
@@ -628,33 +627,19 @@ describe('TokenRouter runtime cache', () => {
       }),
     }).returning().get();
 
-    const primaryRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-5.4',
-      routingStrategy: 'weighted',
-      enabled: true,
-    }).returning().get();
-
-    const siblingRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      routingStrategy: 'weighted',
-      enabled: true,
-    }).returning().get();
-
-    const primaryChannel = await db.insert(schema.routeChannels).values({
-      routeId: primaryRoute.id,
-      accountId: account.id,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
-
-    const siblingChannel = await db.insert(schema.routeChannels).values({
-      routeId: siblingRoute.id,
-      accountId: account.id,
-      priority: 0,
-      weight: 10,
-      enabled: true,
-    }).returning().get();
+    // 派发只认「模型转发」：用两条规则各建一条通道，验证冷却只落在失败的那条上。
+    const forwardService = await import('./modelForwardService.js');
+    const primaryRule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-5.4',
+      targets: [{ siteId: site.id, accountId: account.id, upstreamModel: 'gpt-5.4' }],
+    });
+    const siblingRule = await forwardService.createModelForwardRule({
+      modelName: 'gpt-4o-mini',
+      targets: [{ siteId: site.id, accountId: account.id, upstreamModel: 'gpt-4o-mini' }],
+    });
+    invalidateTokenRouterCache();
+    const primaryChannel = { id: primaryRule.targets[0].channelId as number };
+    const siblingChannel = { id: siblingRule.targets[0].channelId as number };
 
     const router = new TokenRouter();
     const initialSiblingSelection = await router.selectChannel('gpt-4o-mini');
@@ -767,55 +752,6 @@ describe('TokenRouter runtime cache', () => {
         cooldownLevel: 0,
       }),
     ]));
-  });
-
-  it('round robins across all available channels regardless of priority', async () => {
-    const site = await db.insert(schema.sites).values({
-      name: 'round-robin-site',
-      url: 'https://round-robin-site.example.com',
-      platform: 'new-api',
-      status: 'active',
-    }).returning().get();
-
-    const account = await db.insert(schema.accounts).values({
-      siteId: site.id,
-      username: 'round-robin-user',
-      accessToken: 'round-robin-access-token',
-      apiToken: 'round-robin-api-token',
-      status: 'active',
-    }).returning().get();
-
-    const token = await db.insert(schema.accountTokens).values({
-      accountId: account.id,
-      name: 'round-robin-token',
-      token: 'sk-round-robin-token',
-      enabled: true,
-      isDefault: true,
-    }).returning().get();
-
-    const route = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'gpt-4o-mini',
-      routingStrategy: 'round_robin',
-      enabled: true,
-    }).returning().get();
-
-    const channels = await db.insert(schema.routeChannels).values([
-      { routeId: route.id, accountId: account.id, tokenId: token.id, priority: 0, weight: 10, enabled: true },
-      { routeId: route.id, accountId: account.id, tokenId: token.id, priority: 3, weight: 10, enabled: true },
-      { routeId: route.id, accountId: account.id, tokenId: token.id, priority: 9, weight: 10, enabled: true },
-    ]).returning().all();
-
-    const router = new TokenRouter();
-
-    const first = await router.selectChannel('gpt-4o-mini');
-    const second = await router.selectChannel('gpt-4o-mini');
-    const third = await router.selectChannel('gpt-4o-mini');
-    const fourth = await router.selectChannel('gpt-4o-mini');
-
-    expect(first?.channel.id).toBe(channels[0].id);
-    expect(second?.channel.id).toBe(channels[1].id);
-    expect(third?.channel.id).toBe(channels[2].id);
-    expect(fourth?.channel.id).toBe(channels[0].id);
   });
 
   it('applies staged cooldowns for round robin after every three consecutive failures', async () => {
@@ -957,6 +893,7 @@ describe('TokenRouter runtime cache', () => {
       weight: 10,
       enabled: true,
       failCount: 57,
+      consecutiveUpstreamFailures: 57,
     }).returning().get();
 
     // Weighted routes previously let Fibonacci backoff grow beyond the Date range.

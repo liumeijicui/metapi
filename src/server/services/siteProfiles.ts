@@ -120,10 +120,33 @@ export function resolveSiteInferenceUserAgent(
 }
 
 /**
- * Custom (freeform) tools a site's own Responses endpoint accepts.
+ * How a site's own `/v1/responses` treats Responses **custom** (freeform) tool
+ * declarations. Codex always sends `apply_patch` (and, in newer builds, `exec`)
+ * as custom tools, and a chat-only relay cannot accept that shape.
  *
- * These registries run their own Codex-compatible endpoint and validate the tool
- * list themselves. agentrouter answers
+ * - `passthrough`: the endpoint is a native Responses implementation, so the
+ *   declarations go out unchanged.
+ * - `allowlist`: only the listed custom tool names may be sent as `custom`; the
+ *   rest are rewritten as `function` (see `downgradeResponsesCustomToolDeclarations`).
+ *   An empty list therefore means "this endpoint takes no custom tool at all".
+ */
+export type ResponsesCustomToolPolicy =
+  | { mode: 'passthrough' }
+  | { mode: 'allowlist'; allowed: readonly string[] };
+
+/**
+ * Sites whose Responses endpoint we send custom tools to as-is.
+ *
+ * 只有原生 Responses 实现（OpenAI / Codex）才把 custom 声明原样透传。
+ */
+const RESPONSES_CUSTOM_TOOL_PASSTHROUGH_PLATFORMS: ReadonlySet<string> = new Set([
+  'openai',
+  'codex',
+]);
+
+/**
+ * Per-host overrides: registries that run their own Codex-compatible endpoint
+ * and validate the tool list themselves. agentrouter answers
  * `400 Unsupported custom tool: 'exec'. Only 'apply_patch' is supported.`
  * to anything but `apply_patch`, while the same payload sent to
  * `/v1/chat/completions` (where we declare the custom tools as functions) works.
@@ -135,37 +158,56 @@ const SITE_RESPONSES_CUSTOM_TOOL_ALLOWLISTS: ReadonlyArray<{ host: string; allow
 ];
 
 /**
- * The custom tool names a site's Responses endpoint accepts, or null when the
- * site does not restrict them (every custom tool may be sent as-is).
+ * The custom-tool policy of a site's Responses endpoint.
+ *
+ * 除显式声明的白名单站点和原生 Responses 平台外，默认「一个 custom 工具都不认」：
+ * 转发站（new-api / sub2api 这类）的 `/v1/responses` 是薄壳，把 `tools` 原样交给
+ * 只认 Chat Completions 的上游，实测 happycoding 直接回
+ * `422 Failed to deserialize the JSON body into the target type: tools[0].type:
+ * unknown variant 'custom', expected 'function'`，而同一份请求把 custom 改写成
+ * function 后回 200 —— new-api 自己的协议转换层（relaykit/relayconvert 的
+ * toolconv）也是这么做的。降级是无损的：回程按工具名把 function_call 还原成
+ * custom_tool_call，客户端仍然拿到自己声明的类型。
  */
-export function resolveResponsesCustomToolAllowlist(
+export function resolveResponsesCustomToolPolicy(
   rawUrl: string | null | undefined,
-): readonly string[] | null {
-  let parsed: URL;
+  sitePlatform?: string | null,
+): ResponsesCustomToolPolicy {
+  let parsed: URL | null = null;
   try {
     parsed = new URL(String(rawUrl || ''));
   } catch {
-    return null;
+    parsed = null;
   }
-  const host = normalizeHost(parsed.host);
-  const match = SITE_RESPONSES_CUSTOM_TOOL_ALLOWLISTS.find(
-    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
-  );
-  return match ? match.allowed : null;
+  if (parsed) {
+    const host = normalizeHost(parsed.host);
+    const match = SITE_RESPONSES_CUSTOM_TOOL_ALLOWLISTS.find(
+      (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+    );
+    if (match) return { mode: 'allowlist', allowed: match.allowed };
+  }
+
+  const platform = String(sitePlatform || '').trim().toLowerCase();
+  if (RESPONSES_CUSTOM_TOOL_PASSTHROUGH_PLATFORMS.has(platform)) {
+    return { mode: 'passthrough' };
+  }
+  return { mode: 'allowlist', allowed: [] };
 }
 
 /**
  * The declared custom tools this site's Responses endpoint would reject, in the
- * order they were declared. Empty when the site has no restriction (or accepts
- * everything that was declared).
+ * order they were declared. Empty when the endpoint takes custom tools as-is
+ * (or when nothing has to be downgraded).
  */
 export function resolveUnsupportedResponsesCustomToolNames(
   rawUrl: string | null | undefined,
   customToolNames: readonly string[],
+  sitePlatform?: string | null,
 ): string[] {
   if (customToolNames.length === 0) return [];
-  const allowed = resolveResponsesCustomToolAllowlist(rawUrl);
-  if (!allowed) return [];
+  const policy = resolveResponsesCustomToolPolicy(rawUrl, sitePlatform);
+  if (policy.mode === 'passthrough') return [];
+  const allowed = policy.allowed;
 
   const unsupported: string[] = [];
   for (const rawName of customToolNames) {

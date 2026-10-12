@@ -13,7 +13,7 @@ import {
 } from './sharedSurface.js';
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
 } from '../channelSelection.js';
@@ -67,7 +67,7 @@ export async function handleRerankSurfaceRequest(
       forcedChannelId,
     });
     if (!selected) {
-      const message = buildForcedChannelUnavailableMessage(forcedChannelId);
+      const message = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
       await reportProxyAllFailed({ model: requestedModel, reason: message });
       return reply.code(503).send({ error: { message, type: 'server_error' } });
     }

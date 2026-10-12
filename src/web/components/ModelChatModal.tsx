@@ -14,10 +14,20 @@ import { tr } from '../i18n.js';
 
 export type ModelChatTarget = {
   modelName: string;
-  siteName: string;
-  siteId: number;
+  /** 直连模式必填：要打的那个站点。网关模式不需要——路由由「模型转发」决定。 */
+  siteName?: string;
+  siteId?: number;
   siteUrl?: string;
 };
+
+/**
+ * 对话走哪条链路。
+ *
+ * - `direct`：「模型监控」用。站点 + 账号 + 凭据直接打上游，和路由配置无关。
+ * - `gateway`：「模型转发」用。用对外模型名打我们自己的网关，所以看到的就是真实
+ *   派发结果——到底命中了哪条转发规则、落到哪个站点的哪个账号、上游模型是哪个。
+ */
+export type ModelChatMode = 'direct' | 'gateway';
 
 export type ModelChatChannelOption = {
   channelId: number;
@@ -43,6 +53,8 @@ type ChatMessage = {
   completionTokens?: number | null;
   /** 有没有收到 `[DONE]`。没收到就说明这轮不是正常收尾。 */
   sawDone?: boolean;
+  /** 上游在响应里自报的模型名。网关模式下这是「实际转发到了哪个模型」的直接证据。 */
+  responseModel?: string | null;
 };
 
 /** 一条可按直连的凭据：站点账号自己的 JWT，或账号下的 sk- 令牌。 */
@@ -60,6 +72,24 @@ type PromptCaseOption = {
   title: string;
   prompt: string;
   answer: string | null;
+};
+
+/** 网关模式顶部那条「本次会走哪」的预览，来自 /api/routes/decision。 */
+type GatewayRoutePreview = {
+  matched: boolean;
+  actualModel: string | null;
+  selectedLabel: string | null;
+  summary: string[];
+  candidates: Array<{
+    channelId: number;
+    username: string;
+    siteName: string;
+    tokenName: string;
+    sourceModel: string | null;
+    eligible: boolean;
+    probability: number;
+    reason: string;
+  }>;
 };
 
 const parseSseBlock = (block: string): { event: string; data: string | null } => {
@@ -132,12 +162,15 @@ export default function ModelChatModal({
   open,
   target,
   onClose,
+  mode = 'direct',
 }: {
   open: boolean;
   target: ModelChatTarget | null;
   onClose: () => void;
+  mode?: ModelChatMode;
 }) {
   const toast = useToast();
+  const isGateway = mode === 'gateway';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -151,6 +184,11 @@ export default function ModelChatModal({
   const [promptCases, setPromptCases] = useState<PromptCaseOption[]>([]);
   const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [promptQuery, setPromptQuery] = useState('');
+  // 网关模式：这条对外模型名现在会派发到哪个目标。发之前先看一眼，发完再刷新一次，
+  // 「我以为走的是 A，实际走的是 B」这种事在这里当场就能看出来。
+  const [routePreview, setRoutePreview] = useState<GatewayRoutePreview | null>(null);
+  const [routePreviewError, setRoutePreviewError] = useState('');
+  const [routePreviewLoading, setRoutePreviewLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const reasoningScrollRef = useRef<HTMLPreElement | null>(null);
@@ -175,15 +213,17 @@ export default function ModelChatModal({
     setFollowingLatest(true);
     abortRef.current?.abort();
     abortRef.current = null;
-  }, [open, modelName, target?.siteId]);
+  }, [open, modelName, target?.siteId, mode]);
 
-  // 打开时拉这个站点可用于直连的凭据，默认选第一条。
+  // 打开时拉这个站点可用于直连的凭据，默认选第一条。（网关模式不需要凭据：走我们自己的网关）
   useEffect(() => {
-    if (!open || !target) return;
+    if (!open || !target || isGateway) return;
+    const siteId = target.siteId;
+    if (typeof siteId !== 'number' || siteId <= 0) return;
     let cancelled = false;
     setCredentials([]);
     setCredentialKey('');
-    void api.getModelMonitorChatChannels(target.siteId, target.modelName)
+    void api.getModelMonitorChatChannels(siteId, target.modelName)
       .then((res) => {
         if (cancelled) return;
         const list: DirectCredentialOption[] = (Array.isArray(res?.credentials) ? res.credentials : [])
@@ -206,7 +246,58 @@ export default function ModelChatModal({
         }
       });
     return () => { cancelled = true; };
-  }, [open, target?.siteId, target?.modelName, target]);
+  }, [open, isGateway, target?.siteId, target?.modelName, target]);
+
+  /**
+   * 网关模式：查一次「这条对外模型名现在会派发到哪」。
+   *
+   * 用 /api/routes/decision，也就是和真实派发同一套选路逻辑（转发规则 → 顺序最靠前
+   * 的启用目标），所以这里显示的通道号就是请求实际会打的那条。命中不了也让服务端把
+   * 真实原因（没配规则 / 规则停用 / 目标全停用）带回来，而不是只有一句「不可用」。
+   */
+  const loadRoutePreview = useCallback(async () => {
+    const modelName = (target?.modelName || '').trim();
+    if (!modelName) return;
+    setRoutePreviewLoading(true);
+    try {
+      const res: any = await api.getRouteDecision(modelName);
+      const decision = res?.decision || null;
+      if (!decision) {
+        setRoutePreview(null);
+        setRoutePreviewError(tr('没有拿到选路结果'));
+        return;
+      }
+      setRoutePreview({
+        matched: decision.matched === true,
+        actualModel: decision.actualModel == null ? null : String(decision.actualModel),
+        selectedLabel: decision.selectedLabel == null ? null : String(decision.selectedLabel),
+        summary: Array.isArray(decision.summary) ? decision.summary.map((line: unknown) => String(line)) : [],
+        candidates: (Array.isArray(decision.candidates) ? decision.candidates : []).map((item: any) => ({
+          channelId: Number(item?.channelId) || 0,
+          username: String(item?.username || ''),
+          siteName: String(item?.siteName || ''),
+          tokenName: String(item?.tokenName || ''),
+          sourceModel: item?.sourceModel == null ? null : String(item.sourceModel),
+          eligible: item?.eligible === true,
+          probability: Number(item?.probability) || 0,
+          reason: String(item?.reason || ''),
+        })),
+      });
+      setRoutePreviewError('');
+    } catch (error: any) {
+      setRoutePreview(null);
+      setRoutePreviewError(String(error?.message || tr('查询选路结果失败')));
+    } finally {
+      setRoutePreviewLoading(false);
+    }
+  }, [target?.modelName]);
+
+  useEffect(() => {
+    if (!open || !isGateway) return;
+    setRoutePreview(null);
+    setRoutePreviewError('');
+    void loadRoutePreview();
+  }, [open, isGateway, target?.modelName, loadRoutePreview]);
 
   // 快捷提示词：提示词管理里的题目（图名称 → 描述）。
   useEffect(() => {
@@ -335,8 +426,10 @@ export default function ModelChatModal({
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || sending || !target) return;
-    const credential = credentials.find((item) => buildCredentialKey(item) === credentialKey);
-    if (!credential) {
+    const credential = isGateway
+      ? null
+      : credentials.find((item) => buildCredentialKey(item) === credentialKey);
+    if (!isGateway && !credential) {
       toast.error(tr('该站点没有可用于直连的账号或密钥，无法发起对话'));
       return;
     }
@@ -368,19 +461,37 @@ export default function ModelChatModal({
     };
 
     try {
-      // 直连接口：站点 + 账号 + 凭据直接打上游，和路由配置无关；
-      // 模型名就是页面上点中的那个，不做任何改写。
-      const response = await api.directChatStream(
-        {
-          siteId: target.siteId,
-          accountId: credential.accountId,
-          tokenId: credential.tokenId,
-          model: target.modelName,
-          messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
-          ...(reasoningEffort ? { reasoningEffort } : {}),
-        },
-        controller.signal,
-      );
+      const history = nextMessages.map((item) => ({ role: item.role, content: item.content }));
+      // 直连模式：站点 + 账号 + 凭据直接打上游，和路由配置无关；
+      // 网关模式：用对外模型名打我们自己的网关（test 通道会标记「模型测试」），
+      // 所以这里看到的回复就是真实派发的结果。
+      const response = isGateway
+        ? await api.proxyTestStream(
+          {
+            method: 'POST',
+            path: '/v1/chat/completions',
+            requestKind: 'json',
+            stream: true,
+            jsonBody: {
+              model: target.modelName,
+              messages: history,
+              stream: true,
+              ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+            },
+          },
+          controller.signal,
+        )
+        : await api.directChatStream(
+          {
+            siteId: target.siteId as number,
+            accountId: credential!.accountId,
+            tokenId: credential!.tokenId,
+            model: target.modelName,
+            messages: history,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          },
+          controller.signal,
+        );
 
       if (!response.ok) throw new Error(await readStreamErrorText(response));
       if (!response.body) throw new Error(tr('流式响应体为空'));
@@ -393,6 +504,7 @@ export default function ModelChatModal({
       let finishReason: string | null = null;
       let completionTokens: number | null = null;
       let sawDone = false;
+      let responseModel: string | null = null;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -414,6 +526,10 @@ export default function ModelChatModal({
             continue;
           }
           if (payload?.error) throw new Error(String(payload.error?.message || payload.error));
+          // 上游自报的模型名 = 实际被调用的模型。网关模式下这是最直接的证据。
+          if (typeof payload?.model === 'string' && payload.model.trim()) {
+            responseModel = payload.model.trim();
+          }
           const finishChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
           if (finishChoice?.finish_reason) finishReason = String(finishChoice.finish_reason);
           if (typeof payload?.usage?.completion_tokens === 'number') {
@@ -427,10 +543,12 @@ export default function ModelChatModal({
         const copy = [...prev];
         const last = copy[copy.length - 1];
         if (last && last.role === 'assistant') {
-          copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone };
+          copy[copy.length - 1] = { ...last, finishReason, completionTokens, sawDone, responseModel };
         }
         return copy;
       });
+      // 发完再查一次：如果这一轮暴露了「顺序和预期不一样」，刷新后的预览就是当场对账。
+      if (isGateway) void loadRoutePreview();
     } catch (error: any) {
       const message = error?.name === 'AbortError'
         ? tr('已停止')
@@ -449,7 +567,7 @@ export default function ModelChatModal({
       abortRef.current = null;
       setSending(false);
     }
-  }, [input, sending, target, messages, credentials, credentialKey, toast]);
+  }, [input, sending, target, messages, credentials, credentialKey, toast, isGateway, reasoningEffort, loadRoutePreview]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -476,7 +594,9 @@ export default function ModelChatModal({
       footer={(
         <div className="model-chat-footer">
           <span style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
-            {tr('直连目标站点；日志里标记为「模型测试」')}
+            {isGateway
+              ? tr('经网关按「模型转发」规则派发；日志里标记为「模型测试」')
+              : tr('直连目标站点；日志里标记为「模型测试」')}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             {sending ? (
@@ -500,9 +620,13 @@ export default function ModelChatModal({
         <div className="model-chat-target">
           <div className="model-chat-target-main">
             <strong>{target?.modelName || ''}</strong>
-            <span className="model-chat-target-site">{target?.siteName || ''}</span>
+            {isGateway ? (
+              <span className="model-chat-target-site">{tr('经网关转发')}</span>
+            ) : (
+              <span className="model-chat-target-site">{target?.siteName || ''}</span>
+            )}
           </div>
-          {credentials.length ? (
+          {isGateway ? null : credentials.length ? (
             <label className="model-chat-route">
               <span>{tr('直连凭据')}</span>
               <select
@@ -538,13 +662,74 @@ export default function ModelChatModal({
           </label>
         </div>
 
-        <div className="model-chat-route-note">
-          {activeCredential ? (
-            <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}{reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}</>
-          ) : (
-            <>{tr('该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。')}</>
-          )}
-        </div>
+        {isGateway ? (
+          <div className="model-chat-route-note">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span>{tr('本次会走：')}</span>
+              {routePreviewLoading && !routePreview ? (
+                <span>{tr('查询中…')}</span>
+              ) : routePreviewError ? (
+                <span style={{ color: 'var(--color-danger)' }}>{routePreviewError}</span>
+              ) : routePreview?.selectedLabel ? (
+                <strong style={{ color: 'var(--color-text-primary)' }}>
+                  {routePreview.selectedLabel}
+                </strong>
+              ) : (
+                <strong style={{ color: 'var(--color-danger)' }}>{tr('当前调不通')}</strong>
+              )}
+              {routePreview?.actualModel ? (
+                <span>{tr('上游模型')}：{routePreview.actualModel}</span>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-link"
+                style={{ marginLeft: 'auto' }}
+                disabled={routePreviewLoading}
+                onClick={() => void loadRoutePreview()}
+              >
+                {routePreviewLoading ? tr('刷新中…') : tr('刷新')}
+              </button>
+            </div>
+            {!routePreviewLoading && routePreview && !routePreview.selectedLabel && routePreview.summary.length > 0 ? (
+              <div style={{ color: 'var(--color-danger)' }}>{routePreview.summary.join('；')}</div>
+            ) : null}
+            {routePreview && routePreview.candidates.length > 0 ? (
+              <details style={{ marginTop: 4 }}>
+                <summary style={{ cursor: 'pointer' }}>
+                  {tr('目标顺序')}（{routePreview.candidates.length}）
+                </summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+                  {routePreview.candidates.map((candidate, index) => (
+                    <div key={candidate.channelId} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ minWidth: 22, color: 'var(--color-text-muted)' }}>#{index + 1}</span>
+                      <span>{candidate.siteName || '—'}</span>
+                      <span style={{ color: 'var(--color-text-muted)' }}>·</span>
+                      <span>{candidate.sourceModel || '—'}</span>
+                      <span style={{ color: 'var(--color-text-muted)' }}>·</span>
+                      <span>{candidate.username || '—'}</span>
+                      <span style={{ color: 'var(--color-text-muted)' }}>·</span>
+                      <span style={{ color: candidate.eligible ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                        {candidate.eligible ? `${candidate.probability}%` : candidate.reason}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ) : null}
+            <div style={{ color: 'var(--color-text-muted)' }}>
+              {tr('永远用列表里顺序最靠前的启用目标，不做自动切换。')}
+              {reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}
+            </div>
+          </div>
+        ) : (
+          <div className="model-chat-route-note">
+            {activeCredential ? (
+              <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}{reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}</>
+            ) : (
+              <>{tr('该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。')}</>
+            )}
+          </div>
+        )}
 
         <div className="model-chat-messages-wrap">
           <div
@@ -558,7 +743,11 @@ export default function ModelChatModal({
             {messages.length === 0 ? (
               <div className="model-chat-empty">
                 {tr('发一条消息试试这个模型；也可以从下方快捷选一条测试提示词。')}
-                {activeCredential ? (
+                {isGateway ? (
+                  <div className="model-chat-empty-hint">
+                    {tr('走网关派发，回复里能看到实际命中的目标。')}
+                  </div>
+                ) : activeCredential ? (
                   <div className="model-chat-empty-hint">
                     {tr('直连')} {target?.siteName || ''} · {activeCredential.label}
                   </div>
@@ -579,6 +768,7 @@ export default function ModelChatModal({
                   </div>
                   {item.role === 'assistant' && item.finishReason !== undefined ? (
                     <div className="model-chat-finish">
+                      {item.responseModel ? `${tr('实际模型')}: ${item.responseModel} · ` : ''}
                       {item.sawDone
                         ? `${tr('上游结束原因')}: ${item.finishReason || tr('未声明')}${item.completionTokens == null ? '' : ` · ${tr('输出')} ${item.completionTokens} tokens`}`
                         : tr('上游没有发送结束标记，这轮可能被中断')}
@@ -625,7 +815,7 @@ export default function ModelChatModal({
               type="button"
               className="btn btn-primary"
               onClick={() => void send()}
-              disabled={sending || !input.trim() || !activeCredential}
+              disabled={sending || !input.trim() || (!isGateway && !activeCredential)}
             >
               {sending ? tr('生成中…') : tr('发送')}
             </button>

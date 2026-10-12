@@ -10,7 +10,6 @@ const pages = [
   'src/web/pages/ProgramLogs.tsx',
   'src/web/pages/ProxyLogs.tsx',
   'src/web/pages/Sites.tsx',
-  'src/web/pages/TokenRoutes.tsx',
   'src/web/pages/Tokens.tsx',
 ];
 

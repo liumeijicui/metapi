@@ -279,12 +279,14 @@ function formatLatency(ms: number) {
   return `${text}s`;
 }
 
-// 区分请求走的是「模型转发」新路由、老路由，还是「当时的路由现在已经不在了」。
+// 区分请求走的是「模型转发」、老路由，还是「当时的路由现在已经不在了」。
+// 老路由已经整体退出派发，所以这里的 legacy 只会出现在历史日志里，标签写成「老路由（已停用）」
+// 免得看日志的人以为它还能被选中。
 // 第三种不能当老路由显示：转发路由重建过，历史日志的 route_id 会指向已删除的行，
 // 一律算老路由会让人误以为请求走了老路由（exe 的日志是长期归档的，尤其明显）。
 function formatRouteKindLabel(kind: ProxyLogRouteKind | null | undefined) {
   if (kind === "forward") return "新路由";
-  if (kind === "legacy") return "老路由";
+  if (kind === "legacy") return "老路由（已停用）";
   if (kind === "deleted") return "路由已删除";
   return null;
 }

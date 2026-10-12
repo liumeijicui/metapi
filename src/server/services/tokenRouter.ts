@@ -74,6 +74,8 @@ interface SelectedChannel {
 type FailureAwareChannel = {
   failCount?: number | null;
   lastFailAt?: string | null;
+  consecutiveFailCount?: number | null;
+  consecutiveUpstreamFailures?: number | null;
 };
 
 type SiteRuntimeFailureContext = {
@@ -328,9 +330,12 @@ function fibonacciNumber(index: number): number {
 /**
  * Weighted-route failures use a Fibonacci backoff, but the resulting cooldown must stay
  * representable as a JavaScript Date for downstream `toISOString()` calls.
+ *
+ * The input is the *consecutive* failure count (清零于任意一次成功)，不是累计失败数，
+ * 否则老通道会因为历史累计失败被无限期打入长冷却。
  */
-function resolveFailureBackoffSec(failCount?: number | null): number {
-  const normalizedFailCount = Math.max(1, Math.trunc(failCount ?? 0));
+function resolveFailureBackoffSec(consecutiveFailureCount?: number | null): number {
+  const normalizedFailCount = Math.max(1, Math.trunc(consecutiveFailureCount ?? 0));
   return Math.min(FAILURE_BACKOFF_BASE_SEC * fibonacciNumber(normalizedFailCount), MAX_FAILURE_BACKOFF_SEC);
 }
 
@@ -345,8 +350,26 @@ function clampFailureCooldownMs(cooldownMs: number): number {
   return Math.min(normalized, resolveConfiguredFailureCooldownMaxMs());
 }
 
-function resolveEffectiveFailureCooldownMs(failCount?: number | null): number {
-  return clampFailureCooldownMs(resolveFailureBackoffSec(failCount) * 1000);
+function resolveEffectiveFailureCooldownMs(consecutiveFailureCount?: number | null): number {
+  return clampFailureCooldownMs(resolveFailureBackoffSec(consecutiveFailureCount) * 1000);
+}
+
+/**
+ * 用来算退避窗口的「连续失败次数」。
+ *
+ * 不能拿 `failCount`（只增不减的累计值）当输入：一条长期在用的通道哪怕累计失败过
+ * 几十次、中间成功过很多次，也会被算成需要躲避几周 —— 冷却期一压就是一个月，
+ * 表现就是「明明配了通道，却一直 No available channels」。
+ * route_channels 把连续次数记在 `consecutiveUpstreamFailures`，oauth 成员记在
+ * `consecutiveFailCount`，两者成功一次都会清零。
+ */
+function resolveConsecutiveFailureCount(channel: {
+  consecutiveUpstreamFailures?: number | null;
+  consecutiveFailCount?: number | null;
+}): number {
+  const raw = channel.consecutiveUpstreamFailures ?? channel.consecutiveFailCount ?? 0;
+  const normalized = Math.trunc(Number(raw));
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : 0;
 }
 
 /**
@@ -1114,15 +1137,6 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
   routes: [],
 };
 
-/**
- * 被「模型转发」规则声明过的对外模型名（含已停用的规则），小写归一化。
- * 派发时用它判断模型是否归新路由管辖：在名单里就绝不允许回落到老路由。
- */
-let declaredForwardModelsSnapshot: { loadedAt: number; modelNames: Set<string> } = {
-  loadedAt: 0,
-  modelNames: new Set(),
-};
-
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
 
 function resolveTokenRouterCacheTtlMs(): number {
@@ -1288,10 +1302,6 @@ export function invalidateTokenRouterCache(): void {
     loadedAt: 0,
     routes: [],
   };
-  declaredForwardModelsSnapshot = {
-    loadedAt: 0,
-    modelNames: new Set(),
-  };
   routeMatchCache.clear();
   stableFirstLastSelectedSiteByKey.clear();
   stableFirstObservationProgressByKey.clear();
@@ -1305,11 +1315,11 @@ function isSiteDisabled(status?: string | null): boolean {
 export function isChannelRecentlyFailed(
   channel: FailureAwareChannel,
   nowMs = Date.now(),
-  avoidSec = resolveFailureBackoffSec(channel.failCount),
+  avoidSec = resolveFailureBackoffSec(resolveConsecutiveFailureCount(channel)),
 ): boolean {
   const avoidMs = clampFailureCooldownMs(avoidSec * 1000);
   if (avoidMs <= 0) return false;
-  if ((channel.failCount ?? 0) <= 0) return false;
+  if (resolveConsecutiveFailureCount(channel) <= 0) return false;
   if (!channel.lastFailAt) return false;
 
   const failTs = Date.parse(channel.lastFailAt);
@@ -1396,31 +1406,6 @@ function normalizeRouteDisplayName(displayName: string | null | undefined): stri
 function isRouteDisplayNameMatch(model: string, displayName: string | null | undefined): boolean {
   const alias = normalizeRouteDisplayName(displayName);
   return !!alias && alias === model;
-}
-
-/**
- * 读取所有被「模型转发」规则声明过的对外模型名。
- *
- * 这是「新路由唯一派发」判定的依据：模型名一旦被规则声明（哪怕规则当下停用），
- * 派发就只认这条规则。规则没通道可用时如实失败，而不是回落到按 model_pattern
- * 命中的老路由 —— 那条回落会静默把请求打到没在规则里配置过的站点上。
- *
- * 与路由快照共用 TTL 和失效入口（invalidateTokenRouterCache）。
- */
-async function loadDeclaredForwardModelNames(nowMs = Date.now()): Promise<Set<string>> {
-  if (isCacheFresh(declaredForwardModelsSnapshot.loadedAt, nowMs)) {
-    return declaredForwardModelsSnapshot.modelNames;
-  }
-  const rows = await db.select({ modelName: schema.modelForwardRules.modelName })
-    .from(schema.modelForwardRules)
-    .all();
-  const modelNames = new Set<string>();
-  for (const row of rows) {
-    const normalized = (row.modelName || '').trim().toLowerCase();
-    if (normalized) modelNames.add(normalized);
-  }
-  declaredForwardModelsSnapshot = { loadedAt: nowMs, modelNames };
-  return modelNames;
 }
 
 function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
@@ -2080,9 +2065,11 @@ export class TokenRouter {
     const nowMs = Date.now();
     const summary: string[] = [
       `命中路由：${match.route.modelPattern}`,
-      routeStrategy === 'round_robin'
-        ? '路由策略：轮询'
-        : (routeStrategy === 'stable_first' ? '路由策略：稳定优先' : '路由策略：按权重随机'),
+      isManualForwardRoute(match.route)
+        ? '路由策略：模型转发（永远用列表里顺序最靠前的启用目标）'
+        : (routeStrategy === 'round_robin'
+          ? '路由策略：轮询'
+          : (routeStrategy === 'stable_first' ? '路由策略：稳定优先' : '路由策略：按权重随机')),
     ];
     if (requestedByDisplayName) {
       summary.push(`按显示名命中：${normalizeRouteDisplayName(match.route.displayName)}`);
@@ -2142,6 +2129,67 @@ export class TokenRouter {
         matched: true,
         routeId: match.route.id,
         modelPattern: match.route.modelPattern,
+        summary,
+        candidates,
+      };
+    }
+
+    // 人工维护的「模型转发」路由：解释必须和实际派发一致 —— 永远取列表里顺序最靠前的
+    // 那个启用目标，不做轮询 / 权重 / 避让，否则这里显示的可能和真正调用的不是同一条通道。
+    if (isManualForwardRoute(match.route)) {
+      const ordered = [...available].sort((left, right) => {
+        const priorityDelta = (left.channel.priority ?? 0) - (right.channel.priority ?? 0);
+        if (priorityDelta !== 0) return priorityDelta;
+        return left.channel.id - right.channel.id;
+      });
+      const forwardSelected = ordered[0] ?? null;
+      if (!forwardSelected) {
+        summary.push('本次未选出通道');
+        return {
+          requestedModel,
+          actualModel: mappedModel,
+          matched: true,
+          routeId: match.route.id,
+          modelPattern: match.route.modelPattern,
+          summary,
+          candidates,
+        };
+      }
+
+      for (const row of available) {
+        const target = candidateMap.get(row.channel.id);
+        if (!target) continue;
+        const isFirst = row.channel.id === forwardSelected.channel.id;
+        target.probability = isFirst ? 100 : 0;
+        target.reason = isFirst
+          ? '顺序最靠前的启用目标（转发只看顺序，不轮询、不避让）'
+          : '顺序排在后面，本次不会被选中';
+      }
+
+      const forwardSelectedCandidate = candidateMap.get(forwardSelected.channel.id);
+      const forwardSelectedLabel = forwardSelectedCandidate
+        ? `${forwardSelectedCandidate.username} @ ${forwardSelectedCandidate.siteName} / ${forwardSelectedCandidate.tokenName}`
+        : `channel-${forwardSelected.channel.id}`;
+      const forwardActualModel = resolveActualModelForSelectedChannel(
+        requestedModel,
+        match.route,
+        mappedModel,
+        forwardSelected.channel.sourceModel,
+      );
+      summary.push(`最终选择：${forwardSelectedLabel}`);
+      if (forwardActualModel !== mappedModel) {
+        summary.push(`实际转发模型：${forwardActualModel}`);
+      }
+
+      return {
+        requestedModel,
+        actualModel: forwardActualModel,
+        matched: true,
+        routeId: match.route.id,
+        modelPattern: match.route.modelPattern,
+        selectedChannelId: forwardSelected.channel.id,
+        selectedAccountId: forwardSelected.account.id,
+        selectedLabel: forwardSelectedLabel,
         summary,
         candidates,
       };
@@ -2848,7 +2896,7 @@ export class TokenRouter {
             consecutiveFailCount = 0;
           }
         } else {
-          cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+          cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(consecutiveFailCount)).toISOString();
           consecutiveFailCount = 0;
           cooldownLevel = 0;
         }
@@ -2917,7 +2965,7 @@ export class TokenRouter {
         consecutiveFailCount = 0;
       }
     } else {
-      cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(failCount)).toISOString();
+      cooldownUntil = new Date(nowMs + resolveEffectiveFailureCooldownMs(nextUpstreamFailures)).toISOString();
       consecutiveFailCount = 0;
       cooldownLevel = 0;
     }
@@ -2961,10 +3009,18 @@ export class TokenRouter {
   /**
    * Get all available models (aggregated from all routes).
    */
+  /**
+   * 对外可调用的模型名。
+   *
+   * 派发只认「模型转发」，所以这里也只能列出被转发规则声明、且规则启用的模型名 ——
+   * 老路由（token_routes 按 model_pattern 命中的自动路由）已经不再参与派发，把它们列
+   * 出来只会让下游看到一个「列得出来、调不通」的清单。
+   */
   async getAvailableModels(): Promise<string[]> {
     const routes = await loadEnabledRoutes();
     const exposed = buildVisibleEnabledRoutes(routes)
-      .map((route) => getExposedModelNameForRoute(route).trim())
+      .filter((route) => !isExplicitGroupRoute(route) && isForwardRoutePattern(route.modelPattern))
+      .map((route) => (route.displayName || '').trim())
       .filter((name) => name.length > 0);
     return Array.from(new Set(exposed));
   }
@@ -2999,6 +3055,36 @@ export class TokenRouter {
     ));
 
     if (available.length === 0) return null;
+
+    // 人工维护的「模型转发」路由：唯一的选路规则是
+    // 「永远用列表里的第一个启用项」，不做任何自动切换。
+    //
+    // 不走 round_robin / stable_first / weighted 那一整套启发式，也不参与粘滞、自动
+    // 降级、健康度避让、冷却让位 —— 这些机制全都会在用户不知情时把第一个候选换成
+    // 第二个，用户排好顺序却看不出为什么调用落到别处。换源只有两种方式，都由人操作：
+    // 停用当前这项，或者把另一项移到最前面。
+    //
+    // `excludeChannelIds`（请求重试时排除上一次的通道）同样不生效：它会让重试悄悄换
+    // 到第二个候选项，和「永远第一个」冲突。所以单次请求重试打的还是同一个候选，
+    // 失败信息会原样报给客户端。
+    if (isManualForwardRoute(match.route)) {
+      const selected = this.selectFirstForwardCandidate(available);
+      if (!selected) return null;
+      return await this.finalizeSelectedCandidateForDispatch(
+        selected,
+        match,
+        requestedModel,
+        mappedModel,
+        downstreamPolicy,
+        recordSelection,
+        nowIso,
+        nowMs,
+        undefined,
+        undefined,
+        false,
+        excludeChannelIds,
+      );
+    }
 
     if (routeStrategy === 'round_robin') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
@@ -3141,7 +3227,14 @@ export class TokenRouter {
 
     const selected = breakerFiltered.candidates.find((candidate) => candidate.channel.id === preferredChannelId);
     if (!selected) return null;
-    if (!isOauthRouteUnitCandidate(selected) && routeStrategy !== 'round_robin' && isChannelRecentlyFailed(selected.channel, nowMs)) {
+    // 转发路由不受「最近失败」影响：它的第一个候选项由人工排定，不该因为上一次失败
+    // 就被判成不可选（否则模型测试 / 固定通道模式会报「通道不可用」，而正常流量照走它）。
+    if (
+      !isOauthRouteUnitCandidate(selected)
+      && routeStrategy !== 'round_robin'
+      && !isManualForwardRoute(match.route)
+      && isChannelRecentlyFailed(selected.channel, nowMs)
+    ) {
       return null;
     }
     return await this.finalizeSelectedCandidateForDispatch(
@@ -3160,6 +3253,17 @@ export class TokenRouter {
     );
   }
 
+  /**
+   * 派发入口：只认「模型转发」。
+   *
+   * 老路由（token_routes 里按 model_pattern 命中的自动路由：权重 / 轮询 / 稳定优先 /
+   * 会话粘滞 / 冷却让位 / 自动降级 / 分组路由）已经整体退出派发。留着的那些行为看着像
+   * 容错，实际每个都会改道：明明配了 A→B，请求却因为「B 冷却中」被交给同名的另一条
+   * 路由，打到没配过的站点上。
+   *
+   * 现在只有一条规则：对外模型名 A 命中一条转发规则 → 用规则里顺序最前的启用目标
+   * （站点 + 账号 + 上游模型 B）转发。命中不了就如实失败，由上层给出可读原因。
+   */
   private async findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
     let routes = await loadEnabledRoutes();
 
@@ -3173,45 +3277,14 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    // 「模型转发」优先，且不回落。
-    //
-    // 曾经的「转发规则没有可派发通道就回落到同名老路由」看着像容错，实际是会
-    // 静默改道的陷阱：规则里的通道一旦不可用（账号会话过期、站点停用、通道被禁用
-    // 或冷却中），请求不会被判失败，而是被交给按 model_pattern 命中的老路由，
-    // 打到完全没在规则里配置过的站点上，调用方只看得到结果莫名变差。
-    //
-    // 现在：规则里没有可派发的通道就如实失败（上层会说明是哪条规则、什么原因），
-    // 由 operator 决定是修凭据还是改规则。
     const forwardRoute = routes.find((route) => (
       !isExplicitGroupRoute(route)
       && isForwardRoutePattern(route.modelPattern)
       && isRouteDisplayNameMatch(model, route.displayName)
     ));
-    if (forwardRoute) {
-      return await this.loadRouteMatch(forwardRoute);
-    }
+    if (!forwardRoute) return null;
 
-    // 规则已声明该模型、但路由不在启用列表里（规则被停用）→ 只走新路由，
-    // 命中不了就当作没有可用通道，同样不回落到老路由。
-    const declaredForwardModelNames = await loadDeclaredForwardModelNames();
-    if (declaredForwardModelNames.has(model.trim().toLowerCase())) {
-      return null;
-    }
-
-    const legacyRoutes = routes.filter((route) => !isForwardRoutePattern(route.modelPattern));
-
-    const matchedRoute = legacyRoutes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || legacyRoutes.find((route) => (
-        !isExplicitGroupRoute(route)
-        && isExactRouteModelPattern(route.modelPattern)
-        && (route.modelPattern || '').trim() === model
-      ))
-      || legacyRoutes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || legacyRoutes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
-
-    if (!matchedRoute) return null;
-
-    return await this.loadRouteMatch(matchedRoute);
+    return await this.loadRouteMatch(forwardRoute);
   }
 
   private async findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
@@ -3537,7 +3610,9 @@ export class TokenRouter {
       reasonParts.push(downstreamExclusionReason);
     }
 
-    if (excludeChannelIds.includes(candidate.channel.id)) {
+    // 转发路由不接受「重试时排除上一次的通道」：那等于让系统自己换源，而转发路由的
+    // 第一个候选项永远是唯一答案（要换源就人工停用它 / 把别的移到最前面）。
+    if (!candidate.isForwardChannel && excludeChannelIds.includes(candidate.channel.id)) {
       reasonParts.push('当前请求已尝试');
     }
 
@@ -3567,6 +3642,23 @@ export class TokenRouter {
   ): T[] {
     if (isManualForwardRoute(route)) return candidates;
     return filterRecentlyFailedCandidates(candidates, nowMs);
+  }
+
+  /**
+   * 模型转发路由的候选排序：严格按 priority（= 用户在列表里看到的顺序）从小到大，
+   * 同优先级用 id 兜底保证结果稳定。
+   *
+   * 不看冷却、不看失败次数、不看站点熔断 —— 这些都是「自动换源」，而转发路由的换源
+   * 由人来做。所以只要第一个候选还启用着，它就永远是每次请求被调用的那一个。
+   */
+  private selectFirstForwardCandidate(
+    candidates: RouteChannelCandidate[],
+  ): RouteChannelCandidate | undefined {
+    return [...candidates].sort((left, right) => {
+      const priorityDelta = (left.channel.priority ?? 0) - (right.channel.priority ?? 0);
+      if (priorityDelta !== 0) return priorityDelta;
+      return left.channel.id - right.channel.id;
+    })[0];
   }
 
   private getRoundRobinCandidates(candidates: RouteChannelCandidate[]): RouteChannelCandidate[] {
@@ -3999,4 +4091,3 @@ export const __tokenRouterTestUtils = {
   getStableFirstRotationCacheSize: () => stableFirstLastSelectedSiteByKey.size,
   rememberStableFirstSiteSelectionForKey,
 };
-

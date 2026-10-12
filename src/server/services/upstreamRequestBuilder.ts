@@ -106,6 +106,18 @@ const METAPI_INTERNAL_HEADER_BLOCKLIST = new Set([
 
 const ANTIGRAVITY_RUNTIME_USER_AGENT = 'antigravity/1.19.6 darwin/arm64';
 
+// 只有 /v1/responses 认识的字段。从 responses 请求体降级成 chat 请求体时要剔掉，
+// 否则严格的上游会以 `Unknown parameter: 'xxx'` 直接 400。
+const RESPONSES_ONLY_CHAT_FIELDS = [
+  'reasoning',
+  'store',
+  'include',
+  'previous_response_id',
+  'truncation',
+  'max_tool_calls',
+  'background',
+] as const;
+
 function shouldSkipPassthroughHeader(key: string): boolean {
   if (HOP_BY_HOP_HEADERS.has(key) || BLOCKED_PASSTHROUGH_HEADERS.has(key)) return true;
   if (METAPI_INTERNAL_HEADER_BLOCKLIST.has(key)) return true;
@@ -404,6 +416,19 @@ function sanitizeResponsesFallbackChatBody(
     next.tool_choice = normalizedToolChoice;
   } else {
     delete next.tool_choice;
+  }
+
+  // 这个 body 是从 /v1/responses 请求体转出来的，里面还留着只有 Responses
+  // 协议认识的字段（reasoning / store / include / previous_response_id 等）。
+  // 落到 /v1/chat/completions 时它们不是合法参数，严格的上游会直接 400
+  // （例如 `Unknown parameter: 'reasoning'`），所以在这里翻译/剔除干净。
+  const reasoning = isRecord(body.reasoning) ? body.reasoning : null;
+  const reasoningEffort = asTrimmedString(body.reasoning_effort ?? reasoning?.effort);
+  if (reasoningEffort && next.reasoning_effort === undefined) {
+    next.reasoning_effort = reasoningEffort;
+  }
+  for (const responsesOnlyField of RESPONSES_ONLY_CHAT_FIELDS) {
+    delete next[responsesOnlyField];
   }
 
   return next;
@@ -775,14 +800,17 @@ export function buildUpstreamEndpointRequest(input: {
       ),
       sitePlatform,
     );
-    // 站点自建的 Responses 接口只接受一部分自定义工具时（agentrouter 只认
-    // apply_patch），把其余 custom 声明降级成 function 再发，否则源站直接 400
-    // `Unsupported custom tool: ...`。回程那一侧由 customToolDowngrade 还原。
+    // 站点的 Responses 接口不接受 custom（freeform）工具声明时（agentrouter 只认
+    // apply_patch；new-api 这类转发站的薄壳端点一个都不认，会把 tools 原样交给
+    // 只认 Chat Completions 的上游），把这些声明降级成 function 再发，否则源站直接
+    // 400 `Unsupported custom tool: ...` / 422 `unknown variant 'custom'`。
+    // 回程那一侧由 customToolDowngrade 按工具名还原。
     const upstreamResponsesBody = downgradeResponsesCustomToolDeclarations(
       configuredResponsesBody,
       resolveUnsupportedResponsesCustomToolNames(
         input.siteUrl,
         collectResponsesCustomToolNames(configuredResponsesBody),
+        sitePlatform,
       ),
     );
 

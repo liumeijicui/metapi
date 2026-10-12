@@ -148,11 +148,8 @@ describe('selectSurfaceChannelForAttempt', () => {
     consoleErrorMock.mockClear();
   });
 
-  it('refreshes models and retries selectChannel on the first attempt when no channel is available', async () => {
-    const selected = { channel: { id: 11 } };
-    selectChannelMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(selected);
+  it('fails the first attempt when no channel is available, without refreshing routes', async () => {
+    selectChannelMock.mockResolvedValueOnce(null);
 
     const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
     const result = await selectSurfaceChannelForAttempt({
@@ -162,10 +159,11 @@ describe('selectSurfaceChannelForAttempt', () => {
       retryCount: 0,
     });
 
-    expect(result).toBe(selected);
-    expect(selectChannelMock).toHaveBeenCalledTimes(2);
+    expect(result).toBeNull();
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
     expect(selectNextChannelMock).not.toHaveBeenCalled();
-    expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
+    // 老路由已删除：模型刷新只会重建按 model_pattern 生成的老路由，救不回转发请求。
+    expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
   });
 
   it('uses selectNextChannel on retry attempts without refreshing models', async () => {
@@ -267,12 +265,10 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
   });
 
-  it('refreshes and retries the sticky preferred channel before clearing a stale binding', async () => {
+  it('falls back to normal selection when the sticky channel is not eligible, without refreshing routes', async () => {
     const selected = { channel: { id: 22 } };
     getStickyChannelIdMock.mockReturnValueOnce(55);
-    selectPreferredChannelMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null);
+    selectPreferredChannelMock.mockResolvedValueOnce(null);
     selectChannelMock.mockResolvedValueOnce(selected);
 
     const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
@@ -285,18 +281,15 @@ describe('selectSurfaceChannelForAttempt', () => {
     });
 
     expect(result).toBe(selected);
-    expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
-    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(2);
-    expect(clearStickyChannelMock).toHaveBeenCalledWith('sticky-session', 55);
+    expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
     expect(selectChannelMock).toHaveBeenCalledWith('gpt-5.2', EMPTY_DOWNSTREAM_ROUTING_POLICY);
   });
 
-  it('keeps the sticky binding when route refresh recovers the preferred channel', async () => {
+  it('keeps using the sticky preferred channel when it is still selectable', async () => {
     const selected = { channel: { id: 55 } };
     getStickyChannelIdMock.mockReturnValueOnce(55);
-    selectPreferredChannelMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(selected);
+    selectPreferredChannelMock.mockResolvedValueOnce(selected);
 
     const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
     const result = await selectSurfaceChannelForAttempt({
@@ -308,18 +301,14 @@ describe('selectSurfaceChannelForAttempt', () => {
     });
 
     expect(result).toBe(selected);
-    expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
-    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(2);
+    expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
     expect(clearStickyChannelMock).not.toHaveBeenCalled();
     expect(selectChannelMock).not.toHaveBeenCalled();
   });
 
-  it('logs refresh failures and still retries selection once on the first attempt', async () => {
-    const selected = { channel: { id: 33 } };
-    selectChannelMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(selected);
-    refreshModelsAndRebuildRoutesMock.mockRejectedValueOnce(new Error('refresh failed'));
+  it('reports a missing channel on the first attempt instead of refreshing and retrying', async () => {
+    selectChannelMock.mockResolvedValueOnce(null);
 
     const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
     const result = await selectSurfaceChannelForAttempt({
@@ -329,12 +318,9 @@ describe('selectSurfaceChannelForAttempt', () => {
       retryCount: 0,
     });
 
-    expect(result).toBe(selected);
-    expect(selectChannelMock).toHaveBeenCalledTimes(2);
-    expect(consoleWarnMock).toHaveBeenCalledWith(
-      '[proxy/surface] failed to refresh routes after empty selection',
-      expect.any(Error),
-    );
+    expect(result).toBeNull();
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
+    expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
   });
 
   it('writes proxy logs through the shared log formatter and store', async () => {

@@ -262,7 +262,7 @@ describe('Accounts edit panel', () => {
     }
   });
 
-  it('reports route rebuild failure without claiming success', async () => {
+  it('saves disabled models without triggering a route rebuild', async () => {
     apiMock.getAccountModels.mockResolvedValue({
       siteId: 1,
       siteName: 'Site A',
@@ -270,8 +270,6 @@ describe('Accounts edit panel', () => {
       totalCount: 1,
       disabledCount: 0,
     });
-    apiMock.rebuildRoutes.mockRejectedValue(new Error('rebuild failed'));
-
     let root!: WebTestRenderer;
     try {
       await act(async () => {
@@ -310,13 +308,12 @@ describe('Accounts edit panel', () => {
       await flushMicrotasks();
 
       expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, []);
-      expect(apiMock.rebuildRoutes).toHaveBeenCalledWith(false, false);
-      expect(toastMock.error).toHaveBeenCalledWith('模型禁用设置已保存，但路由重建失败，请手动刷新路由');
-      expect(toastMock.success).not.toHaveBeenCalledWith('模型禁用设置已保存，路由已重建');
+      // 老路由已删除：保存禁用模型不再触发路由重建。
+      expect(apiMock.rebuildRoutes).not.toHaveBeenCalled();
+      expect(toastMock.success).toHaveBeenCalledWith('模型禁用设置已保存');
     } finally {
       root?.unmount();
     }
   });
 });
-
 

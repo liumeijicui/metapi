@@ -97,9 +97,7 @@ describe('Sites disabled models save', () => {
     return root;
   }
 
-  it('reports route rebuild failure after saving disabled models from sites editor', async () => {
-    apiMock.rebuildRoutes.mockRejectedValue(new Error('rebuild failed'));
-
+  it('saves disabled models from sites editor without touching route rebuild', async () => {
     let root!: WebTestRenderer;
     try {
       root = await renderSitesEditor();
@@ -116,9 +114,9 @@ describe('Sites disabled models save', () => {
       await flushMicrotasks();
 
       expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, []);
-      expect(apiMock.rebuildRoutes).toHaveBeenCalledWith(false, false);
-      expect(toastMock.error).toHaveBeenCalledWith('禁用模型列表已保存，但路由重建失败，请手动刷新路由');
-      expect(toastMock.success).not.toHaveBeenCalledWith('禁用模型列表已保存，路由已重建');
+      // 老路由已删除：保存禁用模型不再触发路由重建。
+      expect(apiMock.rebuildRoutes).not.toHaveBeenCalled();
+      expect(toastMock.success).toHaveBeenCalledWith('禁用模型列表已保存');
     } finally {
       root?.unmount();
     }

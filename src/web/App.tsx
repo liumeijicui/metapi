@@ -38,7 +38,6 @@ const Sites = lazy(() => import('./pages/Sites.js'));
 const Accounts = lazy(() => import('./pages/Accounts.js'));
 const Tokens = lazy(() => import('./pages/Tokens.js'));
 const CheckinLog = lazy(() => import('./pages/CheckinLog.js'));
-const TokenRoutes = lazy(() => import('./pages/TokenRoutes.js'));
 const ProxyLogs = lazy(() => import('./pages/ProxyLogs.js'));
 const Settings = lazy(() => import('./pages/Settings.js'));
 const DownstreamKeys = lazy(() => import('./pages/DownstreamKeys.js'));
@@ -589,7 +588,6 @@ export const sidebarGroups = [
       { to: '/oauth', label: 'OAuth 管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a3 3 0 106 0 3 3 0 00-6 0zM3 17a3 3 0 106 0 3 3 0 00-6 0zM15 17a3 3 0 106 0 3 3 0 00-6 0zM6 14V10m0 0a3 3 0 113-3m-3 3a3 3 0 003 3h6" /></svg> },
       { to: '/downstream-keys', label: '下游密钥', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a4 4 0 11-8 0 4 4 0 018 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 21a6 6 0 0110.8-3.6M15.5 18.5l2-2m0 0l2 2m-2-2V21" /></svg> },
       { to: '/checkin', label: '签到记录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> },
-      { to: '/routes', label: '路由', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg> },
       { to: '/model-forwarding', label: '模型转发', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7h9a3 3 0 013 3v0a3 3 0 003 3h1" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 17h4a4 4 0 004-4v0a4 4 0 014-4h4" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M17 6l3 2-3 2M17 14l3 2-3 2" /></svg> },
       { to: '/logs', label: '使用日志', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg> },
       { to: '/monitor', label: '模型监控', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 5a2 2 0 012-2h14a2 2 0 012 2v11a2 2 0 01-2 2h-5l-2.5 3-2.5-3H5a2 2 0 01-2-2V5z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 10h3l1.5-2.5L14 13l1.5-3H17" /></svg> },
@@ -1146,7 +1144,6 @@ function AppShell() {
                 <Route path="/oauth" element={<OAuthManagement />} />
                 <Route path="/tokens" element={<Tokens />} />
                 <Route path="/checkin" element={<CheckinLog />} />
-                <Route path="/routes" element={<TokenRoutes />} />
                 <Route path="/model-forwarding" element={<ModelForwarding />} />
                 <Route path="/logs" element={<ProxyLogs />} />
                 <Route path="/monitor" element={<ModelMonitor />} />

@@ -6121,9 +6121,27 @@ a.model-monitor-site-name:hover {
   flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
-  /* 内容超出上限时在内部滚动 / 裁切，不能溢出去压住弹窗底部的按钮。 */
+  /*
+   * 窗口不够高时在内部滚动。
+   *
+   * 这里以前是不滚动的裁切：虽然挡住了「内容溢出到弹窗外」，但窗口一矮（笔记本
+   * + 浏览器工具栏，或放大到 150%）就会把整个输入区裁掉，而弹窗底部的
+   * `modal-footer`（提示文字 + 清空对话）恰好画在被裁掉的「发送」上面，结果就是
+   * 发送按钮被挡住、点不到。改成自动滚动后最差情况也能滚到按钮。
+   */
   max-height: min(72vh, 640px);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/*
+ * 收缩只允许发生在消息区：目标信息、路由说明、输入区都保持原高度。
+ * 否则 flex 会先压扁输入区，把发送按钮挤到弹窗外面去。
+ */
+.model-chat-target,
+.model-chat-route-note,
+.model-chat-composer {
+  flex-shrink: 0;
 }
 
 .model-chat-target {
@@ -6196,7 +6214,11 @@ a.model-monitor-site-name:hover {
 .model-chat-messages-wrap {
   position: relative;
   flex: 1 1 auto;
-  min-height: 120px;
+  /*
+   * 不给最小高度：窗口矮的时候要让消息区先被压扁，把输入区（含「发送」）完整留在
+   * 可视范围内。给它固定下限的话，被挤出去的就是输入区。
+   */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -6238,6 +6260,8 @@ a.model-monitor-site-name:hover {
   font-size: 12.5px;
   color: var(--color-text-muted);
   line-height: 1.7;
+  /* 消息区不再有最小高度，空状态自己撑一点，免得初始看着太扁。 */
+  padding: 20px 0;
 }
 
 .model-chat-empty-hint {
@@ -6461,6 +6485,22 @@ a.model-monitor-site-name:hover {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/*
+ * 窗口很矮时（笔记本 + 浏览器工具栏、或页面放大）把输入区整体压扁，
+ * 优先保证「发送」始终留在可视范围内，而不是把空间让给输入框本身。
+ */
+@media (max-height: 560px) {
+  .model-chat {
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .model-chat-composer textarea {
+    height: 46px;
+    min-height: 46px;
+  }
 }
 
 @media (max-width: 768px) {

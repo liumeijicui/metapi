@@ -716,12 +716,7 @@ export default function Sites() {
     setDisabledModelsSaving(true);
     try {
       await api.updateSiteDisabledModels(editor.editingSiteId, disabledModels);
-      try {
-        await api.rebuildRoutes(false, false);
-        toast.success('禁用模型列表已保存，路由已重建');
-      } catch {
-        toast.error('禁用模型列表已保存，但路由重建失败，请手动刷新路由');
-      }
+      toast.success('禁用模型列表已保存');
     } catch (e: any) {
       toast.error(e.message || '保存禁用模型失败');
     } finally {

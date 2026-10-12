@@ -71,18 +71,48 @@ describe('siteProfiles', () => {
   });
 
   it('agentrouter 的 Responses 接口只认 apply_patch，别的自定义工具要降级', () => {
-    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', [])).toEqual([]);
-    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch'])).toEqual([]);
+    const agentrouterUrl = 'https://agentrouter.org';
+    const agentrouterPlatform = 'agentroute';
+    expect(resolveUnsupportedResponsesCustomToolNames(agentrouterUrl, [], agentrouterPlatform)).toEqual([]);
     expect(
-      resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch', 'exec']),
+      resolveUnsupportedResponsesCustomToolNames(agentrouterUrl, ['apply_patch'], agentrouterPlatform),
+    ).toEqual([]);
+    expect(
+      resolveUnsupportedResponsesCustomToolNames(agentrouterUrl, ['apply_patch', 'exec'], agentrouterPlatform),
     ).toEqual(['exec']);
-    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['exec'])).toEqual(['exec']);
+    expect(
+      resolveUnsupportedResponsesCustomToolNames(agentrouterUrl, ['exec'], agentrouterPlatform),
+    ).toEqual(['exec']);
     // 重复的名字只报一次。
-    expect(resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['exec', 'exec'])).toEqual(['exec']);
+    expect(
+      resolveUnsupportedResponsesCustomToolNames(agentrouterUrl, ['exec', 'exec'], agentrouterPlatform),
+    ).toEqual(['exec']);
+  });
 
-    // 别的站点不做这个限制判断。
-    expect(resolveUnsupportedResponsesCustomToolNames('https://happycoding.xyz', ['exec'])).toEqual([]);
-    expect(resolveUnsupportedResponsesCustomToolNames('not-a-url', ['exec'])).toEqual([]);
+  it('转发站的 Responses 端点默认不认 custom 工具，全部降级；原生 Responses 平台才透传', () => {
+    // happycoding（new-api）实测把 tools 原样转给只认 Chat Completions 的上游，
+    // `type: "custom"` 会被上游 422（unknown variant `custom`, expected `function`），
+    // 改写成 function 后回 200 —— 所以这个平台上的 custom 声明一律降级。
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://happycoding.xyz', ['apply_patch', 'exec'], 'new-api'),
+    ).toEqual(['apply_patch', 'exec']);
+    // sub2api / 未知平台同样按「不认 custom」处理（安全默认）。
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://example.com', ['exec'], 'sub2api'),
+    ).toEqual(['exec']);
+    expect(resolveUnsupportedResponsesCustomToolNames('not-a-url', ['exec'])).toEqual(['exec']);
+
+    // 原生 Responses 实现原样透传。
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://api.openai.com', ['apply_patch', 'exec'], 'openai'),
+    ).toEqual([]);
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://chatgpt.com/backend-api/codex', ['exec'], 'codex'),
+    ).toEqual([]);
+    // host 白名单优先于平台判定：agentrouter 上的 apply_patch 仍然是自定义工具。
+    expect(
+      resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch'], 'new-api'),
+    ).toEqual([]);
   });
 
   it('anyrouter 的 messages 端点必须补上 1M 上下文的 opt-in beta', () => {

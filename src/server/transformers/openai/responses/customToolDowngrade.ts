@@ -48,7 +48,27 @@ export function downgradeResponsesCustomToolDeclarations(
     return replacement;
   });
 
-  return changed ? { ...body, tools } : body;
+  const nextBody = changed ? { ...body, tools } : body;
+  const nextToolChoice = downgradeResponsesCustomToolChoice(nextBody.tool_choice, targets);
+  return nextToolChoice ? { ...nextBody, tool_choice: nextToolChoice } : nextBody;
+}
+
+/**
+ * `tool_choice` 指向被降级的自定义工具时，选择项也要跟着改成 function。
+ *
+ * Responses 的两种选择项形状只差一个 `type`（`{type:'custom', name}` /
+ * `{type:'function', name}`）。留着 custom 的话，上游会当成「强制调用一个我没
+ * 声明过的 custom 工具」处理 —— new-api 的协议转换层同样会做这层改写。
+ */
+function downgradeResponsesCustomToolChoice(
+  toolChoice: unknown,
+  targets: Set<string>,
+): Record<string, unknown> | null {
+  if (!isRecord(toolChoice)) return null;
+  if (asTrimmedString(toolChoice.type).toLowerCase() !== 'custom') return null;
+  const name = asTrimmedString(toolChoice.name);
+  if (!name || !targets.has(name)) return null;
+  return { ...toolChoice, type: 'function' };
 }
 
 /**

@@ -1,4 +1,3 @@
-import * as routeRefreshWorkflow from '../services/routeRefreshWorkflow.js';
 import { proxyChannelCoordinator } from '../services/proxyChannelCoordinator.js';
 import { canRetryProxyChannel } from '../services/proxyChannelRetry.js';
 import type { DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
@@ -68,12 +67,31 @@ export function getTesterForcedChannelId(input?: TesterRequestInput): number | n
   return null;
 }
 
-export function buildForcedChannelUnavailableMessage(forcedChannelId?: number | null): string {
+/**
+ * 没有可用通道时的对外说明。
+ *
+ * 老路由退出派发之后，这句话必须说真话：以前不管什么原因都回
+ * `No available channels after retries`，用户看到的却是上游的 401 / 限流，对不上。
+ * 现在按真实原因给出「没配规则 / 规则停用 / 目标全停用 / 目标没可用通道」。
+ */
+export async function buildModelUnavailableMessage(
+  requestedModel: string,
+  forcedChannelId?: number | null,
+): Promise<string> {
   const normalizedForcedChannelId = normalizeForcedChannelId(forcedChannelId);
-  if (normalizedForcedChannelId === null) {
-    return 'No available channels for this model';
+  if (normalizedForcedChannelId !== null) {
+    return `指定通道 #${normalizedForcedChannelId} 当前不可用，固定通道模式不会自动切换其他通道`;
   }
-  return `指定通道 #${normalizedForcedChannelId} 当前不可用，固定通道模式不会自动切换其他通道`;
+  try {
+    // 动态引入：channelSelection 在代理热路径上被很早加载，而 modelForwardService 会
+    // 反查 tokenRouter，静态引入会形成「模块求值期」的循环依赖（schema 还没就位）。
+    // 这里只在「没有可用通道」这一条冷路径上用到，代价可以忽略。
+    const { describeForwardDispatchFailure } = await import('../services/modelForwardService.js');
+    return (await describeForwardDispatchFailure(requestedModel)).message;
+  } catch (error) {
+    console.warn('[channelSelection] 解析转发失败原因时出错', error);
+    return `模型 ${requestedModel} 没有可用的转发目标，无法派发`;
+  }
 }
 
 export function canRetryChannelSelection(retryCount: number, forcedChannelId?: number | null): boolean {
@@ -101,19 +119,6 @@ export async function selectProxyChannelForAttempt(input: {
   }
 
   let selected: SelectedChannel = null;
-  let refreshedRoutes = false;
-
-  const refreshRoutesForFirstAttempt = async (): Promise<boolean> => {
-    if (input.retryCount > 0 || refreshedRoutes) return false;
-    refreshedRoutes = true;
-    try {
-      await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
-      return true;
-    } catch (error) {
-      console.warn('[proxy/surface] failed to refresh routes after empty selection', error);
-      return false;
-    }
-  };
 
   if (input.retryCount === 0 && input.stickySessionKey) {
     const preferredChannelId = proxyChannelCoordinator.getStickyChannelId(input.stickySessionKey);
@@ -127,17 +132,10 @@ export async function selectProxyChannelForAttempt(input: {
         { ignoreOnManualForwardRoute: true },
       );
       if (!selected) {
-        const refreshSucceeded = await refreshRoutesForFirstAttempt();
-        selected = await tokenRouter.selectPreferredChannel(
-          input.requestedModel,
-          preferredChannelId,
-          input.downstreamPolicy,
-          input.excludeChannelIds,
-          { ignoreOnManualForwardRoute: true },
-        );
-        if (!selected && refreshSucceeded) {
-          proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
-        }
+        // 选不出来就换一次普通选路。以前这里还会「刷新模型并重建路由再试一次」，那是
+        // 老路由时代的兜底：模型刷新只影响按 model_pattern 自动生成的老路由，而老路由
+        // 已经不参与派发，刷新既救不回请求，又会让每次失败都拖上几十秒。
+        selected = await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy);
       }
     }
   }
@@ -150,11 +148,6 @@ export async function selectProxyChannelForAttempt(input: {
         input.excludeChannelIds,
         input.downstreamPolicy,
       );
-  }
-
-  if (!selected && input.retryCount === 0 && !refreshedRoutes) {
-    await refreshRoutesForFirstAttempt();
-    selected = await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy);
   }
 
   return selected;

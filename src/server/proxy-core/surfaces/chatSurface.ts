@@ -83,7 +83,7 @@ import {
   startSurfaceProxyDebugTrace,
 } from '../../services/proxyDebugTraceRuntime.js';
 import {
-  buildForcedChannelUnavailableMessage,
+  buildModelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
 } from '../channelSelection.js';
@@ -415,7 +415,7 @@ export async function handleChatSurfaceRequest(
     });
 
     if (!selected) {
-      const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
+      const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
       await reportProxyAllFailed({
         model: requestedModel,
         reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
@@ -1445,7 +1445,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
     });
 
     if (!selected) {
-      const noChannelMessage = buildForcedChannelUnavailableMessage(forcedChannelId);
+      const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
       await reportProxyAllFailed({
         model: requestedModel,
         reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',

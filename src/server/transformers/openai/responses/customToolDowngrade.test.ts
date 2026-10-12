@@ -43,6 +43,29 @@ describe('customToolDowngrade', () => {
     expect(downgradeResponsesCustomToolDeclarations(body, ['exec'])).toBe(body);
   });
 
+  it('强制指定被降级的自定义工具时，tool_choice 也跟着改成 function', () => {
+    const body = {
+      tools: [execCustomTool],
+      tool_choice: { type: 'custom', name: 'exec' },
+    };
+
+    const downgraded = downgradeResponsesCustomToolDeclarations(body, ['exec']) as any;
+
+    expect(downgraded.tool_choice).toEqual({ type: 'function', name: 'exec' });
+    // 没被降级的强制选择项不要动。
+    expect(
+      downgradeResponsesCustomToolDeclarations(
+        { tools: [execCustomTool], tool_choice: { type: 'custom', name: 'apply_patch' } },
+        ['exec'],
+      ),
+    ).toMatchObject({ tool_choice: { type: 'custom', name: 'apply_patch' } });
+    // auto / required 这类字符串选择项不受影响。
+    const autoBody = { tools: [execCustomTool], tool_choice: 'auto' };
+    expect(downgradeResponsesCustomToolDeclarations(autoBody, ['exec'])).toMatchObject({
+      tool_choice: 'auto',
+    });
+  });
+
   it('回程把降级过的 function_call 还原成 custom_tool_call 并拆出原始输入', () => {
     const item = {
       type: 'function_call',
