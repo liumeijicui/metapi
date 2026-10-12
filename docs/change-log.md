@@ -1,3 +1,20 @@
+### 102. 会话通道并发上限默认改为 0（不限制任何并发）
+
+- **类型**：默认值调整（服务端配置 + 设置页文案）
+- **需求来源**：本会话（用户：「帮我把默认值改成 0 吧，不限制任何并发」；起因是 happycoding 报 `Channel busy: waited 1500ms for an available session slot`，经确认是我们自己的会话级并发闸门）
+- **一、改了什么**
+  - `src/server/config.ts`：`proxySessionChannelConcurrencyLimit` 默认 `2` → `0`（环境变量 `PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT` 仍是最高优先级覆盖），并在该行补了 0 的语义注释。`0` 在协调器里走 `concurrencyLimit <= 0` 分支，直接发放 noop 租约 —— 不占槽位、不排队、不会再有本地 503。
+  - `src/web/pages/Settings.tsx`：`runtime` 初始占位值同步改 `0`；设置页顶部状态标签原来会把 0 渲染成「会话池 0 并发」，现在改成「会话池 不限制并发」；「会话通道并发上限」输入框下方提示补上「填 0 = 不限制并发（默认），请求直接放行、不排队」。
+  - 站点级闸门不用动：全部站点的 `sites.max_concurrency` 本来就是 0，链路里已无其它本地并发限制。
+- **二、验证**
+  - 新增回归用例 `proxyChannelCoordinator.test.ts` →「does not gate a session channel when the concurrency limit is zero」：上限 0 时对同一 session 通道并发取 5 个租约全部 `acquired`，且 `getChannelLoadSnapshot()` 报 `concurrencyLimit: 0 / saturated: false`。`proxyChannelCoordinator.test.ts`（13 tests）+ `channelRecoveryProbeService.test.ts` + `settings.events.test.ts` 共 53 passed。
+  - `settings.proxy-transport.test.tsx`、`config.test.ts`、`runtimeSettingsHydration.test.ts`、`desktop.test.ts` 共 15 passed；`tsc --noEmit -p tsconfig.server.json` 与 `-p tsconfig.web.json` 通过；`npm run build:server`、`npx vite build` 通过。
+  - 真机（服务已重启，设置项回灌后 `config` 为 0）：用下游密钥对 `gpt-6-astra` 打 6 并发与 10 并发，全部 HTTP 200、耗时 0.66~1.66s，`proxy_logs` 全 `success`；`Channel busy` 最后一条停在 `07:26:39`，之后未再出现。
+- **三、exe（边缘版）**
+  - 代码不用改，但**必须重新打包才能拿到新默认值**：这个默认写在 `src/server/config.ts`，会随 `dist/server`（打包复制 `dist/**/*`）进 exe。exe 本身还会从服务器同步 `proxy_session_channel_concurrency_limit`（该键不在 `EDGE_OVERRIDE_SETTINGS` / `EDGE_IGNORED_SETTING_KEYS` 里，见 `src/server/edge/localSettingsPolicy.ts`），所以就算不重新打包，点一次「立即同步」（或重启 exe）也会跟随服务器变成 0。
+- **主要文件**：`src/server/config.ts`、`src/web/pages/Settings.tsx`、`src/server/services/proxyChannelCoordinator.test.ts`
+- **状态**：已完成
+
 ### 101. 使用日志：查询条件与「代理调试追踪」默认收起，一进页面先看「全部 / 成功 / 失败」和调用记录
 
 - **类型**：界面调整（前端布局，无后端改动）

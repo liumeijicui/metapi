@@ -353,7 +353,7 @@ export default function Settings() {
     codexUpstreamWebsocketEnabled: false,
     responsesCompactFallbackToResponsesEnabled: false,
     disableCrossProtocolFallback: false,
-    proxySessionChannelConcurrencyLimit: 2,
+    proxySessionChannelConcurrencyLimit: 0,
     proxySessionChannelQueueWaitMs: 1500,
     routingFallbackUnitCost: 1,
     proxyFirstByteTimeoutSec: 0,
@@ -614,7 +614,9 @@ export default function Settings() {
   };
 
   const proxyTransportModeLabel = runtime.codexUpstreamWebsocketEnabled ? '上游 WebSocket 已启用' : 'HTTP 优先';
-  const proxyTransportQueueLabel = `会话池 ${runtime.proxySessionChannelConcurrencyLimit} 并发 / ${runtime.proxySessionChannelQueueWaitMs}ms`;
+  const proxyTransportQueueLabel = runtime.proxySessionChannelConcurrencyLimit > 0
+    ? `会话池 ${runtime.proxySessionChannelConcurrencyLimit} 并发 / ${runtime.proxySessionChannelQueueWaitMs}ms`
+    : '会话池 不限制并发';
   const modelAvailabilityProbeDirty = runtime.modelAvailabilityProbeEnabled !== savedModelAvailabilityProbeEnabled;
   const modelAvailabilityProbeStatusTone: SettingsPillTone = modelAvailabilityProbeDirty
     ? 'warning'
@@ -1828,7 +1830,7 @@ export default function Settings() {
                 style={inputStyle}
               />
               <div style={settingsModernFieldHintStyle}>
-                只作用于能识别稳定 `session_id` 的会话型请求；普通请求不会进入这组 lease 池。
+                只作用于能识别稳定 `session_id` 的会话型请求；普通请求不会进入这组 lease 池。填 0 = 不限制并发（默认），请求直接放行、不排队。
               </div>
             </div>
             <div style={settingsModernFieldCardStyle}>

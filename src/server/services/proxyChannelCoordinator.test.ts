@@ -282,4 +282,31 @@ describe('proxyChannelCoordinator', () => {
     expect(first.status).toBe('acquired');
     expect(second.status).toBe('acquired');
   });
+
+  it('does not gate a session channel when the concurrency limit is zero', async () => {
+    config.proxySessionChannelConcurrencyLimit = 0;
+
+    const leases = await Promise.all(
+      Array.from({ length: 5 }, () => proxyChannelCoordinator.acquireChannelLease({
+        channelId: 121,
+        accountExtraConfig: JSON.stringify({ credentialMode: 'session' }),
+      })),
+    );
+
+    for (const lease of leases) {
+      expect(lease.status).toBe('acquired');
+    }
+    expect(proxyChannelCoordinator.getChannelLoadSnapshot({
+      channelId: 121,
+      accountExtraConfig: JSON.stringify({ credentialMode: 'session' }),
+    })).toEqual({
+      channelId: 121,
+      sessionScoped: true,
+      concurrencyLimit: 0,
+      activeLeaseCount: 0,
+      waitingCount: 0,
+      loadRatio: 0,
+      saturated: false,
+    });
+  });
 });

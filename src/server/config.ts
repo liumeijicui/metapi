@@ -133,7 +133,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyAutoDemoteFailureThreshold: Math.max(0, Math.trunc(parseNumber(env.PROXY_AUTO_DEMOTE_FAILURE_THRESHOLD, 10))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),
     proxyStickySessionTtlMs: Math.max(30_000, Math.trunc(parseNumber(env.PROXY_STICKY_SESSION_TTL_MS, 30 * 60 * 1000))),
-    proxySessionChannelConcurrencyLimit: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT, 2))),
+    // 0 = 不限制会话通道并发（默认）。非 0 时同一通道最多放行这么多并发，
+    // 超出的请求进入排队池，排队超过 proxySessionChannelQueueWaitMs 仍未拿到槽位就返回 503。
+    proxySessionChannelConcurrencyLimit: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT, 0))),
     proxySessionChannelQueueWaitMs: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_QUEUE_WAIT_MS, 1_500))),
     proxySessionChannelLeaseTtlMs: Math.max(5_000, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_LEASE_TTL_MS, 90_000))),
     proxySessionChannelLeaseKeepaliveMs: Math.max(1_000, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_LEASE_KEEPALIVE_MS, 15_000))),
