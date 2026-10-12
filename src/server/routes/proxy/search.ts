@@ -93,7 +93,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
         const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
         await reportProxyAllFailed({
           model: requestedModel,
-          reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
+          reason: noChannelMessage,
         });
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },

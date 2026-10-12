@@ -416,9 +416,12 @@ export async function handleChatSurfaceRequest(
 
     if (!selected) {
       const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
+      // 通知里必须说真话：以前这里对普通请求固定回 `No available channels after
+      // retries`，用户看到的是「代理全部失败」却不知道到底缺什么（没配规则？规则
+      // 停用？目标全停用？）。buildModelUnavailableMessage 已经能分清楚，直接用它。
       await reportProxyAllFailed({
         model: requestedModel,
-        reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
+        reason: noChannelMessage,
       });
       const payload = {
         error: { message: noChannelMessage, type: 'server_error' as const },
@@ -1448,7 +1451,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
       await reportProxyAllFailed({
         model: requestedModel,
-        reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
+        reason: noChannelMessage,
       });
       await finalizeDebugFailure(503, {
         error: { message: noChannelMessage, type: 'server_error' },

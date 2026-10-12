@@ -1,3 +1,24 @@
+### 99. 「代理全部失败」通知改说真话：不再固定回 `No available channels after retries`
+
+- **类型**：缺陷修复（服务端告警文案）
+- **需求来源**：本会话（用户：「通知里一直报这个：代理全部失败 模型=gpt-6-luna, 原因=No available channels after retries ... 这是老路由的错吗？」）
+- **一、现象与根因**
+  - 通知/公告里 54 条同款告警（`模型=gpt-6-luna, 原因=No available channels after retries`），看不出到底缺什么；HTTP 响应体却已经是可读的真话（`buildModelUnavailableMessage`）。
+  - 根因在调用处：所有 `!selected` 分支都写的是
+    `reason: forcedChannelId ? noChannelMessage : 'No available channels after retries'`
+    —— 「没有可用通道」这句笼统文案被用在了**常规**路径上（`forcedChannelId` 为假的正常请求），而真正能分辨「没配规则 / 规则停用 / 目标全停用 / 目标没可用通道」的 `noChannelMessage` 只在固定通道模式下才被采用，正好反了。
+  - 顺带确认：这条告警**不是**老路由代码发的。老路由早已整体退出派发（`tokenRouter.findRoute` 只认 `model_pattern` 以 `forward:` 开头的「模型转发」路由），`gpt-6-luna` 只是过去由老路由的 pattern 路由 234 承载、现在没有任何「模型转发」规则，所以如实 503。
+- **二、改动**
+  - 9 处 `!selected` 分支统一改成 `reason: noChannelMessage`（`forcedChannelId` 的情形 `buildModelUnavailableMessage` 内部已经单独处理）：`chatSurface`（2 处）、`openAiResponsesSurface`、`search`、`images`（2 处）、`embeddings`、`completions`、`videos`。`rerankSurface` 本来就是对的。
+- **三、验证**
+  - `POST /v1/responses`（model `gpt-6-luna`）→ 503，body 与**新写入的 event** 同款真话：
+    `模型=gpt-6-luna, 原因=模型 gpt-6-luna 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）`（`events` 表 id 1246/1247 实测）。
+  - `chat.count-tokens.test.ts` 补一条断言：`reportProxyAllFailed` 收到的 `reason` 必须等于 HTTP body 里那句真话（原来只断言了 body，通知文案没人守着，所以漂了这么久）。
+  - `npx vitest run src/server/routes/proxy/chat.count-tokens.test.ts` 3 passed；`npm run build:server` 通过。
+  - 另外查了上游，`gpt-6-luna` 现在在 `luckyg.131518.xyz`、`api.fengshao1227.com` 仍是 200，`ultrarouter.org` 已下线该模型，`windhub.cc` / `new-api.pigeonw.com` 429（每日限额 / 限流）。
+- **主要文件**：`src/server/proxy-core/surfaces/chatSurface.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`、`src/server/routes/proxy/search.ts`、`src/server/routes/proxy/images.ts`、`src/server/routes/proxy/embeddings.ts`、`src/server/routes/proxy/completions.ts`、`src/server/routes/proxy/videos.ts`、`src/server/routes/proxy/chat.count-tokens.test.ts`
+- **状态**：已完成
+
 ### 98. Codex 打 `/v1/responses` 被上游 422（`tools[].type: custom`）：custom 工具声明默认降级为 function
 
 - **类型**：缺陷修复（服务端；与 new-api 的协议转换层对齐）

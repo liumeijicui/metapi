@@ -70,7 +70,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         const noChannelMessage = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
         await reportProxyAllFailed({
           model: requestedModel,
-          reason: forcedChannelId ? noChannelMessage : 'No available channels after retries',
+          reason: noChannelMessage,
         });
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },
@@ -444,4 +444,3 @@ async function recordTokenRouterEventBestEffort(
     console.warn(`[proxy/completions] failed to ${label}`, error);
   }
 }
-

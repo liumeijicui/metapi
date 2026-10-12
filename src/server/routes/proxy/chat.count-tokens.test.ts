@@ -326,6 +326,13 @@ describe('claude count_tokens proxy route', () => {
         type: 'server_error',
       },
     });
+    // 通知/公告里也必须是这句真话。以前这里固定写
+    // `No available channels after retries`，用户看到「代理全部失败」却不知道
+    // 到底是没配规则、规则停用还是没可用通道。
+    expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
+      model: 'gpt-5.4',
+      reason: '模型 gpt-5.4 没有配置「模型转发」规则，无法派发（老路由已停用，请在「模型转发」里加一条 A → B 的规则）',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
