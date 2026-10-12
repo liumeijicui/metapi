@@ -38,6 +38,32 @@ async function flushMicrotasks() {
   });
 }
 
+/**
+ * 查询条件区与调试追踪面板都默认收起，需要看内容的用例先点开。
+ * 两个开关都带 data-* 标记，避免按文案找按钮（文案会跟着状态变）。
+ */
+async function expandPanel(root: WebTestRenderer, panel: 'query' | 'debug') {
+  const marker = panel === 'query' ? 'data-proxy-logs-query-toggle' : 'data-debug-trace-panel-toggle';
+  const toggle = root.root.find((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && node.props[marker] === true
+  ));
+  await act(async () => {
+    toggle.props.onClick();
+  });
+  await flushMicrotasks();
+}
+
+function findPanelToggle(root: WebTestRenderer, panel: 'query' | 'debug') {
+  const marker = panel === 'query' ? 'data-proxy-logs-query-toggle' : 'data-debug-trace-panel-toggle';
+  return root.root.find((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && node.props[marker] === true
+  ));
+}
+
 function buildListResponse(overrides?: Partial<{
   items: any[];
   total: number;
@@ -365,6 +391,8 @@ describe('ProxyLogs server-driven page', () => {
 
       expect(apiMock.getRuntimeSettings).toHaveBeenCalled();
       expect(apiMock.getProxyDebugTraces).toHaveBeenCalled();
+      // 调试追踪整块默认收起：先展开才能看到追踪内容与面板操作。
+      await expandPanel(root, 'debug');
       expect(collectText(root.root)).toContain('最近调试追踪');
       expect(collectText(root.root)).toContain('sess-debug-1');
 
@@ -455,6 +483,7 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
+      await expandPanel(root, 'debug');
       expect(collectText(root.root)).toContain('显示第 1 - 5 条，共 7 条');
       expect(collectText(root.root)).toContain('sess-debug-1');
       expect(collectText(root.root)).not.toContain('sess-debug-6');
@@ -484,7 +513,7 @@ describe('ProxyLogs server-driven page', () => {
     }
   });
 
-  it('allows collapsing and expanding the debug trace panel to reduce page footprint', async () => {
+  it('collapses the query panel and the debug trace panel by default, and expands them on demand', async () => {
     let root!: WebTestRenderer;
 
     try {
@@ -499,60 +528,49 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
-      const toggleButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && node.props['data-debug-trace-panel-toggle'] === true
-      ));
-      const panelBody = root.root.find((node) => (
-        node.type === 'div'
-        && node.props['data-debug-trace-panel-body'] === true
-      ));
+      // 一进页面：状态标签在，调用记录在。
+      expect(collectText(root.root)).toContain('全部');
+      expect(collectText(root.root)).toContain('成功');
+      expect(collectText(root.root)).toContain('失败');
+      expect(collectText(root.root)).toContain('gpt-4o');
 
-      expect(toggleButton.props['aria-expanded']).toBe(true);
-      expect(String(panelBody.props.className || '')).toContain('is-open');
+      // 查询条件与调试追踪默认收起：控件和追踪内容都不渲染。
+      expect(findPanelToggle(root, 'query').props['aria-expanded']).toBe(false);
+      expect(findPanelToggle(root, 'debug').props['aria-expanded']).toBe(false);
+      expect(root.root.findAll((node) => node.props['data-proxy-logs-query-body'] === true)).toHaveLength(0);
+      expect(
+        root.root.findAllByType(ModernSelect).some((node) => node.props.placeholder === '全部客户端'),
+      ).toBe(false);
+      expect(collectText(root.root)).not.toContain('sess-debug-1');
+      expect(String(
+        root.root.find((node) => node.props['data-debug-trace-panel-body'] === true).props.className || '',
+      )).not.toContain('is-open');
 
-      await act(async () => {
-        toggleButton.props.onClick();
-      });
-      await flushMicrotasks();
+      // 点开查询条件才出现筛选控件。
+      await expandPanel(root, 'query');
+      expect(findPanelToggle(root, 'query').props['aria-expanded']).toBe(true);
+      expect(root.root.findAll((node) => node.props['data-proxy-logs-query-body'] === true)).toHaveLength(1);
+      expect(
+        root.root.findAllByType(ModernSelect).some((node) => node.props.placeholder === '全部客户端'),
+      ).toBe(true);
 
-      const collapsedToggleButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && node.props['data-debug-trace-panel-toggle'] === true
-      ));
-      const collapsedPanelBody = root.root.find((node) => (
-        node.type === 'div'
-        && node.props['data-debug-trace-panel-body'] === true
-      ));
+      // 再点一次收回。
+      await expandPanel(root, 'query');
+      expect(root.root.findAll((node) => node.props['data-proxy-logs-query-body'] === true)).toHaveLength(0);
 
-      expect(collapsedToggleButton.props['aria-expanded']).toBe(false);
-      expect(String(collapsedPanelBody.props.className || '')).not.toContain('is-open');
-
-      await act(async () => {
-        collapsedToggleButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      const expandedToggleButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && node.props['data-debug-trace-panel-toggle'] === true
-      ));
-      const expandedPanelBody = root.root.find((node) => (
-        node.type === 'div'
-        && node.props['data-debug-trace-panel-body'] === true
-      ));
-
-      expect(expandedToggleButton.props['aria-expanded']).toBe(true);
-      expect(String(expandedPanelBody.props.className || '')).toContain('is-open');
+      // 点开调试追踪才出现追踪列表。
+      await expandPanel(root, 'debug');
+      expect(findPanelToggle(root, 'debug').props['aria-expanded']).toBe(true);
+      expect(String(
+        root.root.find((node) => node.props['data-debug-trace-panel-body'] === true).props.className || '',
+      )).toContain('is-open');
+      expect(collectText(root.root)).toContain('sess-debug-1');
     } finally {
       root?.unmount();
     }
   });
 
-  it('remembers the collapsed debug trace panel state across remounts', async () => {
+  it('keeps both panels collapsed after a remount instead of restoring a stored preference', async () => {
     let root!: WebTestRenderer;
 
     try {
@@ -567,19 +585,7 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
-      const toggleButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && node.props['data-debug-trace-panel-toggle'] === true
-      ));
-
-      await act(async () => {
-        toggleButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(globalThis.localStorage.setItem).toHaveBeenCalledWith('metapi.proxyLogs.debugTracePanelExpanded', 'false');
-
+      await expandPanel(root, 'debug');
       await act(async () => {
         root.unmount();
       });
@@ -595,19 +601,11 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
-      const restoredToggleButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && node.props['data-debug-trace-panel-toggle'] === true
-      ));
-      const restoredPanelBody = root.root.find((node) => (
-        node.type === 'div'
-        && node.props['data-debug-trace-panel-body'] === true
-      ));
-
-      expect(globalThis.localStorage.getItem).toHaveBeenCalledWith('metapi.proxyLogs.debugTracePanelExpanded');
-      expect(restoredToggleButton.props['aria-expanded']).toBe(false);
-      expect(String(restoredPanelBody.props.className || '')).not.toContain('is-open');
+      // 不落 localStorage：重新进来仍是「一眼看到日志」的默认视图。
+      expect(globalThis.localStorage.getItem).not.toHaveBeenCalled();
+      expect(globalThis.localStorage.setItem).not.toHaveBeenCalled();
+      expect(findPanelToggle(root, 'debug').props['aria-expanded']).toBe(false);
+      expect(findPanelToggle(root, 'query').props['aria-expanded']).toBe(false);
     } finally {
       root?.unmount();
     }
@@ -630,6 +628,7 @@ describe('ProxyLogs server-driven page', () => {
 
       expect(apiMock.getProxyDebugTraceDetail).not.toHaveBeenCalled();
 
+      await expandPanel(root, 'debug');
       const viewDetailButton = root.root.find((node) => (
         node.type === 'button'
         && typeof node.props.onClick === 'function'
@@ -737,6 +736,7 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
+      await expandPanel(root, 'debug');
       const viewDetailButton = root.root.find((node) => (
         node.type === 'button'
         && typeof node.props.onClick === 'function'
@@ -798,6 +798,7 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
+      await expandPanel(root, 'debug');
       const viewDetailButton = root.root.find((node) => (
         node.type === 'button'
         && typeof node.props.onClick === 'function'
@@ -949,6 +950,7 @@ describe('ProxyLogs server-driven page', () => {
       });
       await flushMicrotasks();
 
+      await expandPanel(root, 'query');
       const selects = root!.root.findAllByType(ModernSelect);
       const clientSelect = selects.find((node) => node.props.placeholder === '全部客户端');
       expect(clientSelect).toBeDefined();

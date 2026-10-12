@@ -1006,4 +1006,12 @@ export const zhToEnSupplemental: Record<string, string> = {
   '实际模型': 'Actual model',
   '走网关派发，回复里能看到实际命中的目标。': 'Dispatched through the gateway — the reply shows which target actually served it.',
   '永远用列表里顺序最靠前的启用目标，不做自动切换。': 'Always uses the first enabled target in the list — no automatic failover.',
+  // ==== 使用日志：查询条件 / 调试追踪默认收起 ====
+  '查询条件': 'Filters',
+  '收起查询': 'Hide Filters',
+  '筛选日志': 'Filter logs',
+  '清空筛选': 'Clear Filters',
+  '当前已开启': 'Enabled',
+  '当前未开启': 'Disabled',
+  '最近追踪': 'Recent traces',
 };

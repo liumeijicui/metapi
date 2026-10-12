@@ -1,3 +1,25 @@
+### 101. 使用日志：查询条件与「代理调试追踪」默认收起，一进页面先看「全部 / 成功 / 失败」和调用记录
+
+- **类型**：界面调整（前端布局，无后端改动）
+- **需求来源**：本会话（用户：「使用日志的查询处和代理调试追踪处，默认都隐藏，点击展开才显示，让使用日志一进去就能显示全部、成功、失败那个，和下面的调用记录」）
+- **一、改了什么**
+  - 「查询条件」= 客户端下拉 + 站点下拉 + 开始/结束时间 + 搜索框（原来和状态标签挤在同一行 `toolbar` 里，占了整行高度）。现在只留「全部 / 成功 / 失败」三个状态标签，右侧一个 `查询条件` 按钮，点开才展开筛选字段，再点收起。按钮上带生效条件条数徽标（客户端、站点、起止时间、搜索各计一条），收起后也能看出「现在不是在看全量」。
+  - 「代理调试追踪」整块默认收起：收起时卡片只留标题 + 一行摘要（`当前已开启/未开启 · 最近追踪 N 条`）和一个「展开追踪面板」按钮；`开启调试 / 调试设置 / 刷新追踪` 三个按钮和「状态 / 最近追踪 / 最新时间」指标、追踪列表都只在展开后渲染，不再占首屏。
+  - 两个开关都**刻意不落 `localStorage`**：删掉原来的 `metapi.proxyLogs.debugTracePanelExpanded` 记忆逻辑，每次进页面都是同一个默认视图，不用猜上次留下了什么状态。
+  - 移动端：状态标签不再被塞进筛选抽屉，直接留在页面上；抽屉只放筛选字段，触发按钮同样带条件条数。
+- **二、验证**
+  - `ProxyLogs.server-driven.test.tsx`：原来断言「调试面板默认展开 + 记忆折叠状态」的两条用例已按新语义重写 —— 新增「两个面板默认收起、按需展开、再点收回」与「重新挂载后仍是收起、且未读写 localStorage」，并给需要看追踪内容的 4 条用例加了统一 `expandPanel()` 前置动作。16 passed。
+  - 真机（Playwright + 系统 chromium 打 `http://127.0.0.1:81/logs`，`auth_token` 走 localStorage）：默认视图只看到状态标签与调用记录；点 `查询条件` 出现客户端/站点/时间/搜索；点 `展开追踪面板` 出现追踪列表与面板操作 —— 中英两种语言都截图核对过。
+  - 补了英文词条（`查询条件`→Filters、`收起查询`→Hide Filters、`筛选日志`、`清空筛选`、`当前已开启/当前未开启`、`最近追踪`），并把这行摘要整句交给 `tr()`：拆成多个文本节点时英文模式会残留量词（实测出现过 `Recent traces 20Untranslated`）。
+  - `tsc -p tsconfig.web.json` 通过；`npx vitest run src/web` = 463 passed / 1 failed（`accounts.rebind-panel-focus` 是既有失败，与本改动无关）；`npx vite build` 通过；`repo:drift-check` Violations: 0。
+- **三、exe（边缘版）**
+  - 不用改代码：exe 的使用日志页就是同一份 `src/web/pages/ProxyLogs.tsx`（`App.tsx` 的边缘模式只是把侧边栏过滤成 `/model-forwarding` 与 `/logs` 两个页面，页面组件不分叉），打包时统一复制 `dist/**/*`；后端只读接口也复用主服务的 `proxyLogRoutes`（`src/server/edge/localApiRoutes.ts`），错误都是「无需改代码、重新打包即可」这一档。
+  - 本机实跑验证（Linux 上直接起边缘入口：`METAPI_EDGE_MODE=1 HOST=127.0.0.1 PORT=30099 DATA_DIR=/tmp/edge-verify-41 dist/server/edge/main.js`，Playwright 打 `http://127.0.0.1:30099/logs`，`/api/edge/status` 确认为 `edgeMode: true`）：默认 `data-proxy-logs-query-body` 数量 0、调试面板 `aria-expanded=false`，状态标签可见；点「查询条件」后 query-body 变 1；点「展开追踪面板」后 `aria-expanded=true`。测完进程与临时数据目录已清理。
+  - 顺带按 exe 窗口宽度核了布局（1480×960 桌面壳默认、980、420 移动断点）：`scrollWidth` 都等于视口宽，无横向溢出；移动端状态标签留在页面上、`查询条件` 按钮在右侧。
+  - Windows exe 要拿到这个界面调整需重新执行 `npm run dist:desktop:edge`（Windows 包只能在 Windows 上打）；完整版桌面壳同理走 `npm run dist:desktop`。
+- **主要文件**：`src/web/pages/ProxyLogs.tsx`、`src/web/pages/ProxyLogs.server-driven.test.tsx`、`src/web/i18n.supplement.ts`
+- **状态**：已完成（未提交）
+
 ### 100. 记账价与价目表不一致：happycoding 的 `deepseek-v4.1-flash` 记成 $75/M，实际 $0.3/M
 
 - **类型**：缺陷修复（服务端计费）

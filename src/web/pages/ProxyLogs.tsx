@@ -85,8 +85,6 @@ const PAGE_SIZES = [20, 50, 100];
 const DEFAULT_PAGE_SIZE = 50;
 const TRACE_TABLE_LIMIT = 20;
 const DEBUG_TRACE_PAGE_SIZE = 5;
-const PROXY_LOGS_DEBUG_TRACE_PANEL_STORAGE_KEY =
-  "metapi.proxyLogs.debugTracePanelExpanded";
 const PROXY_LOG_CLIENT_FAMILY_LABELS: Record<string, string> = {
   codex: "Codex",
   claude_code: "Claude Code",
@@ -791,29 +789,6 @@ function CompactSummaryMetric({
   );
 }
 
-function readStoredDebugTracePanelExpanded(): boolean {
-  try {
-    const stored = globalThis.localStorage?.getItem(
-      PROXY_LOGS_DEBUG_TRACE_PANEL_STORAGE_KEY,
-    );
-    if (stored == null) return true;
-    return stored !== "false";
-  } catch {
-    return true;
-  }
-}
-
-function persistDebugTracePanelExpanded(expanded: boolean) {
-  try {
-    globalThis.localStorage?.setItem(
-      PROXY_LOGS_DEBUG_TRACE_PANEL_STORAGE_KEY,
-      expanded ? "true" : "false",
-    );
-  } catch {
-    // Ignore storage write failures and keep UI responsive.
-  }
-}
-
 export default function ProxyLogs() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -843,6 +818,12 @@ export default function ProxyLogs() {
     Record<number, ProxyLogDetailState>
   >({});
   const [showFilters, setShowFilters] = useState(false);
+  /**
+   * 查询条件（客户端 / 站点 / 时间段 / 搜索）默认收起：一进页面先看到
+   * 「全部 / 成功 / 失败」和调用记录，要筛的时候再展开。
+   * 刻意不落 localStorage：每次进来都是同一个视图，不用猜上次留下了什么筛选。
+   */
+  const [showQueryPanel, setShowQueryPanel] = useState(false);
   const [sites, setSites] = useState<
     Array<{ id: number; name: string; status?: string | null }>
   >([]);
@@ -853,9 +834,8 @@ export default function ProxyLogs() {
   const [showDebugSettingsModal, setShowDebugSettingsModal] = useState(false);
   const [debugPanelLoading, setDebugPanelLoading] = useState(false);
   const [debugPanelSaving, setDebugPanelSaving] = useState(false);
-  const [debugTracePanelExpanded, setDebugTracePanelExpanded] = useState(() =>
-    readStoredDebugTracePanelExpanded(),
-  );
+  /** 代理调试追踪整块默认收起（同查询条件：不落 localStorage，始终默认收起）。 */
+  const [debugTracePanelExpanded, setDebugTracePanelExpanded] = useState(false);
   const [debugSettings, setDebugSettings] = useState<ProxyDebugSettingsState>(
     DEFAULT_PROXY_DEBUG_SETTINGS,
   );
@@ -1359,10 +1339,6 @@ export default function ProxyLogs() {
     return () => clearInterval(timer);
   }, [debugSettings.proxyDebugTraceEnabled, loadDebugTraceList]);
 
-  useEffect(() => {
-    persistDebugTracePanelExpanded(debugTracePanelExpanded);
-  }, [debugTracePanelExpanded]);
-
   const persistDebugSettings = useCallback(
     async (
       nextSettings: ProxyDebugSettingsState,
@@ -1705,9 +1681,20 @@ export default function ProxyLogs() {
     );
   }
 
-  const filterControls = (
-    <>
-      <div className="pill-tabs">
+  /**
+   * 生效中的查询条件条数：查询区收起时靠它提示「现在不是在看全量日志」，
+   * 避免筛选条件被折叠后悄悄生效却看不出来。
+   */
+  const activeQueryFilterCount = [
+    clientFilter,
+    siteFilter ? String(siteFilter) : "",
+    fromInput,
+    toInput,
+    searchInput.trim(),
+  ].filter((value) => value !== "").length;
+
+  const statusTabs = (
+    <div className="pill-tabs">
         {[
           {
             key: "all" as ProxyLogStatusFilter,
@@ -1740,6 +1727,10 @@ export default function ProxyLogs() {
           </button>
         ))}
       </div>
+  );
+
+  const queryFilterFields = (
+    <>
       <div className="proxy-logs-filter-select">
         <ModernSelect
           size="sm"
@@ -2168,11 +2159,94 @@ export default function ProxyLogs() {
         onMobileOpen={() => setShowFilters(true)}
         onMobileClose={() => setShowFilters(false)}
         mobileTitle={tr("筛选日志")}
-        mobileContent={filterControls}
-        desktopContent={
-          <div className="toolbar" style={{ marginBottom: 12 }}>
-            {filterControls}
+        mobileContent={queryFilterFields}
+        mobileTrigger={
+          <div
+            className="mobile-filter-row"
+            style={{
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            {statusTabs}
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: "1px solid var(--color-border)" }}
+              onClick={() => setShowFilters(true)}
+            >
+              {tr("查询条件")}
+              {activeQueryFilterCount > 0
+                ? ` · ${activeQueryFilterCount}`
+                : ""}
+            </button>
           </div>
+        }
+        desktopContent={
+          <>
+            <div
+              className="toolbar"
+              style={{ marginBottom: 12, alignItems: "center" }}
+            >
+              {statusTabs}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ border: "1px solid var(--color-border)" }}
+                data-proxy-logs-query-toggle
+                aria-expanded={showQueryPanel}
+                onClick={() => setShowQueryPanel((current) => !current)}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  style={{
+                    transform: showQueryPanel
+                      ? "rotate(180deg)"
+                      : "rotate(0deg)",
+                    transition: "transform 0.2s ease",
+                  }}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 9l-7 7-7-7"
+                  />
+                </svg>
+                {showQueryPanel ? tr("收起查询") : tr("查询条件")}
+                {activeQueryFilterCount > 0 ? (
+                  <span
+                    style={{
+                      marginLeft: 6,
+                      padding: "0 6px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      background: "var(--color-primary)",
+                      color: "#fff",
+                    }}
+                  >
+                    {activeQueryFilterCount}
+                  </span>
+                ) : null}
+              </button>
+            </div>
+            {showQueryPanel ? (
+              <div
+                className="toolbar"
+                data-proxy-logs-query-body
+                style={{ marginBottom: 12 }}
+              >
+                {queryFilterFields}
+              </div>
+            ) : null}
+          </>
         }
       />
 
@@ -2214,6 +2288,24 @@ export default function ProxyLogs() {
             >
               未开启时不记录新追踪；追踪详情通过弹窗按需查看。
             </div>
+            {debugTracePanelExpanded ? null : (
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "var(--color-text-muted)",
+                  marginTop: 4,
+                }}
+              >
+                {/* 整句交给 tr()：英文模式下量词不能拆成单独文本节点，否则会残留。 */}
+                {tr(
+                  `${
+                    debugSettings.proxyDebugTraceEnabled
+                      ? "当前已开启"
+                      : "当前未开启"
+                  } · 最近追踪 ${debugTraces.length} 条`,
+                )}
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
@@ -2246,6 +2338,8 @@ export default function ProxyLogs() {
               </svg>
               {debugTracePanelExpanded ? "收起追踪面板" : "展开追踪面板"}
             </button>
+            {debugTracePanelExpanded ? (
+              <>
             <button
               type="button"
               className={
@@ -2279,9 +2373,13 @@ export default function ProxyLogs() {
             >
               {debugPanelLoading ? "刷新中..." : "刷新追踪"}
             </button>
+              </>
+            ) : null}
           </div>
         </div>
 
+        {debugTracePanelExpanded ? (
+          <>
         <div
           style={{
             display: "flex",
@@ -2316,6 +2414,8 @@ export default function ProxyLogs() {
             过滤范围：{formatProxyDebugTargetSummary(debugSettings)}
           </div>
         </div>
+          </>
+        ) : null}
       </div>
 
       <div
@@ -2324,6 +2424,7 @@ export default function ProxyLogs() {
         style={{ marginBottom: debugTracePanelExpanded ? 12 : 0 }}
       >
         <div className="anim-collapse-inner">
+          {debugTracePanelExpanded ? (
           <div className="card" style={{ padding: 12, overflowX: "auto" }}>
             <div
               style={{
@@ -2568,6 +2669,7 @@ export default function ProxyLogs() {
               </div>
             ) : null}
           </div>
+          ) : null}
         </div>
       </div>
 
