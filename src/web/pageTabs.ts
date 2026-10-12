@@ -197,3 +197,69 @@ export function writeStoredPageTabs(storage: unknown, tabs: readonly string[]): 
     // 存不下就算了，下次进来只有首页
   }
 }
+
+/** 弹窗默认留出的视口边距与锚点间距。 */
+export const TAB_MENU_VIEWPORT_MARGIN = 8;
+export const TAB_MENU_ANCHOR_GAP = 6;
+/** 还没量到真实尺寸前先按这个宽度估位，避免第一帧从视口外飞进来。 */
+export const TAB_MENU_FALLBACK_WIDTH = 160;
+export const TAB_MENU_FALLBACK_HEIGHT = 180;
+
+export type TabMenuPlacementInput = {
+  /** 锚点左边缘（右键时就是光标 x）。 */
+  anchorLeft: number;
+  /** 锚点右边缘（右键时等于 anchorLeft）。 */
+  anchorRight: number;
+  /** 锚点下边缘。 */
+  anchorBottom: number;
+  menuWidth: number;
+  menuHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  margin?: number;
+  gap?: number;
+};
+
+export type TabMenuPlacement = { left: number; top: number };
+
+function toFiniteNumber(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+/**
+ * 计算页签弹窗的落点（视口坐标，配 `position: fixed` 用）。
+ *
+ * 默认从锚点右边缘向右展开；右边放不下就改成向左展开 ——
+ * 左展开时右边缘贴住锚点右边缘（尾部「⋯」按钮就落在这个分支），
+ * 这样弹窗不会顶出页面右侧。最后再按视口夹一次，保证四面都在视口内。
+ */
+export function placeTabMenu(input: TabMenuPlacementInput): TabMenuPlacement {
+  const margin = Math.max(0, toFiniteNumber(input.margin, TAB_MENU_VIEWPORT_MARGIN));
+  const gap = Math.max(0, toFiniteNumber(input.gap, TAB_MENU_ANCHOR_GAP));
+  const menuWidth = Math.max(0, toFiniteNumber(input.menuWidth, TAB_MENU_FALLBACK_WIDTH));
+  const menuHeight = Math.max(0, toFiniteNumber(input.menuHeight, TAB_MENU_FALLBACK_HEIGHT));
+  const viewportWidth = toFiniteNumber(input.viewportWidth, 0);
+  const viewportHeight = toFiniteNumber(input.viewportHeight, 0);
+  const anchorLeft = toFiniteNumber(input.anchorLeft, 0);
+  const anchorRight = Math.max(anchorLeft, toFiniteNumber(input.anchorRight, anchorLeft));
+  const anchorBottom = toFiniteNumber(input.anchorBottom, 0);
+
+  // 先假设向右展开
+  let left = anchorLeft;
+  if (viewportWidth > 0 && left + menuWidth > viewportWidth - margin) {
+    left = anchorRight - menuWidth;
+  }
+  if (viewportWidth > 0) {
+    const maxLeft = Math.max(margin, viewportWidth - margin - menuWidth);
+    left = Math.min(Math.max(left, margin), maxLeft);
+  }
+
+  let top = anchorBottom + gap;
+  if (viewportHeight > 0) {
+    const maxTop = Math.max(margin, viewportHeight - margin - menuHeight);
+    top = Math.min(Math.max(top, margin), maxTop);
+  }
+
+  return { left, top };
+}

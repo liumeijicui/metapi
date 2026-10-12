@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { HOME_TAB_PATH } from '../pageTabs.js';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  HOME_TAB_PATH,
+  TAB_MENU_ANCHOR_GAP,
+  TAB_MENU_FALLBACK_HEIGHT,
+  TAB_MENU_FALLBACK_WIDTH,
+  placeTabMenu,
+} from '../pageTabs.js';
 
 type PageTabsProps = {
   /** 已打开的菜单路径，第一个固定是首页。 */
@@ -19,9 +25,21 @@ type PageTabsProps = {
 
 type MenuState = {
   path: string;
-  left: number;
-  top: number;
+  /** 锚点左边缘（右键时就是光标 x）。 */
+  anchorLeft: number;
+  /** 锚点右边缘；右边放不下时用它改成向左展开。 */
+  anchorRight: number;
+  /** 锚点下边缘；弹窗默认贴在这里往下。 */
+  anchorBottom: number;
 };
+
+function readViewportSize(): { width: number; height: number } {
+  if (typeof window === 'undefined') return { width: 0, height: 0 };
+  return {
+    width: Number(window.innerWidth) || 0,
+    height: Number(window.innerHeight) || 0,
+  };
+}
 
 /**
  * 顶部多页签：菜单打开后在这里留一个标签。
@@ -41,9 +59,29 @@ export default function PageTabs({
   t,
 }: PageTabsProps) {
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [menuSize, setMenuSize] = useState<{ width: number; height: number } | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  /**
+   * 弹窗文案、字号都固定，宽度量一次就够；量到之后交给 placeTabMenu 算最终落点
+   * （右边放不下会改成向左展开）。尺寸没变时不更新 state，避免死循环。
+   */
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const element = menuRef.current as HTMLElement | null;
+    if (!element || typeof element.getBoundingClientRect !== 'function') return;
+
+    const rect = element.getBoundingClientRect();
+    setMenuSize((prev) => (
+      prev && prev.width === rect.width && prev.height === rect.height
+        ? prev
+        : { width: rect.width, height: rect.height }
+    ));
+  }, [menu]);
 
   useEffect(() => {
     if (!menu) return undefined;
@@ -57,12 +95,29 @@ export default function PageTabs({
     };
     document.addEventListener('mousedown', handlePointerDown);
     document.addEventListener('keydown', handleKeyDown);
-    // 页面滚走了菜单会跟内容错位，直接收起来
-    window.addEventListener('scroll', closeMenu, true);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('scroll', closeMenu, true);
+    };
+  }, [menu, closeMenu]);
+
+  /**
+   * 只在标签条自己横向滚动时收起菜单 —— 那时锚点会从弹窗底下滑走。
+   * 页面纵向滚动不收：标签栏是 sticky 的、弹窗是 fixed 的，两者一起走，不会错位；
+   * 而且点「⋯」时浏览器把按钮滚进视野也会发 document 级 scroll，按以前那样监听
+   * window 会把刚打开的菜单立刻关掉。
+   */
+  useEffect(() => {
+    if (!menu) return undefined;
+    const strip = stripRef.current;
+    if (!strip || typeof strip.addEventListener !== 'function') return undefined;
+
+    const handleStripScroll = () => closeMenu();
+    strip.addEventListener('scroll', handleStripScroll);
+    return () => {
+      if (typeof strip.removeEventListener === 'function') {
+        strip.removeEventListener('scroll', handleStripScroll);
+      }
     };
   }, [menu, closeMenu]);
 
@@ -74,20 +129,40 @@ export default function PageTabs({
   const openMenu = (path: string, event: { clientX?: number; clientY?: number; currentTarget?: unknown }) => {
     const barRect = barRef.current?.getBoundingClientRect?.();
     const targetRect = (event.currentTarget as HTMLElement | undefined)?.getBoundingClientRect?.();
-    const left = Number.isFinite(event.clientX)
+    const hasPointerX = Number.isFinite(event.clientX);
+    const hasPointerY = Number.isFinite(event.clientY);
+    const anchorLeft = hasPointerX
       ? Number(event.clientX)
       : (targetRect?.left ?? barRect?.left ?? 0);
-    const top = Number.isFinite(event.clientY)
+    const anchorRight = hasPointerX
+      ? Number(event.clientX)
+      : (targetRect?.right ?? anchorLeft);
+    const anchorBottom = hasPointerY
       ? Number(event.clientY)
       : (targetRect?.bottom ?? (barRect?.top ?? 0) + (barRect?.height ?? 0));
-    setMenu({ path, left, top });
+
+    setMenuSize(null);
+    setMenu({ path, anchorLeft, anchorRight, anchorBottom });
   };
 
+  const viewport = readViewportSize();
+  const placement = menu
+    ? placeTabMenu({
+      anchorLeft: menu.anchorLeft,
+      anchorRight: menu.anchorRight,
+      anchorBottom: menu.anchorBottom,
+      menuWidth: menuSize?.width ?? TAB_MENU_FALLBACK_WIDTH,
+      menuHeight: menuSize?.height ?? TAB_MENU_FALLBACK_HEIGHT,
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      gap: TAB_MENU_ANCHOR_GAP,
+    })
+    : null;
   const menuLabel = menu ? labelOf(menu.path) : '';
 
   return (
     <div className="page-tabs" ref={barRef} data-page-tabs>
-      <div className="page-tabs-scroll" role="tablist" aria-label={t('已打开的菜单')}>
+      <div className="page-tabs-scroll" ref={stripRef} role="tablist" aria-label={t('已打开的菜单')}>
         {tabs.map((path) => {
           const isActive = path === activePath;
           const label = labelOf(path);
@@ -151,10 +226,11 @@ export default function PageTabs({
 
       {menu ? (
         <div
+          ref={menuRef}
           className="page-tabs-menu"
           role="menu"
           data-page-tabs-menu
-          style={{ left: menu.left, top: menu.top + 6 }}
+          style={{ left: placement?.left, top: placement?.top }}
           onClick={(event) => event.stopPropagation()}
         >
           <div className="page-tabs-menu-title">{menuLabel}</div>

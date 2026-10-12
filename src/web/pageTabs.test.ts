@@ -10,6 +10,7 @@ import {
   normalizePageTabList,
   normalizeTabPath,
   openPageTab,
+  placeTabMenu,
   readStoredPageTabs,
   resolveActivePathAfterClose,
   resolvePageTabLabel,
@@ -165,6 +166,83 @@ describe('resolveActivePathAfterClose', () => {
 
   it('returns home when nothing is left', () => {
     expect(resolveActivePathAfterClose(['/', '/logs'], '/logs', '/logs')).toBe(HOME_TAB_PATH);
+  });
+});
+
+describe('placeTabMenu', () => {
+  const base = {
+    menuWidth: 148,
+    menuHeight: 150,
+    viewportWidth: 1440,
+    viewportHeight: 900,
+  };
+
+  it('opens to the right of the anchor when there is room', () => {
+    expect(placeTabMenu({ ...base, anchorLeft: 200, anchorRight: 240, anchorBottom: 60 }))
+      .toEqual({ left: 200, top: 66 });
+  });
+
+  it('flips left when the anchor sits near the right edge', () => {
+    // 尾部「⋯」按钮：右边缘 1420，向右展开会顶出页面 → 右边缘改为贴住锚点
+    expect(placeTabMenu({ ...base, anchorLeft: 1392, anchorRight: 1420, anchorBottom: 82 }))
+      .toEqual({ left: 1420 - 148, top: 88 });
+  });
+
+  it('uses the pointer position as the right edge when right clicking', () => {
+    // 视口 800 宽时右键在 780：向右放不下，改用光标当右边缘向左展开
+    expect(placeTabMenu({
+      ...base,
+      viewportWidth: 800,
+      anchorLeft: 780,
+      anchorRight: 780,
+      anchorBottom: 40,
+    }))
+      .toEqual({ left: 780 - 148, top: 46 });
+
+    // 视口够宽时不需要翻转，仍然从光标往右展开
+    expect(placeTabMenu({ ...base, anchorLeft: 780, anchorRight: 780, anchorBottom: 40 }))
+      .toEqual({ left: 780, top: 46 });
+  });
+
+  it('still clamps to the viewport when the menu is wider than the room left', () => {
+    // 视口很窄：左展开后仍越界，就夹到左边距
+    const placed = placeTabMenu({
+      menuWidth: 300,
+      menuHeight: 150,
+      viewportWidth: 320,
+      viewportHeight: 600,
+      anchorLeft: 300,
+      anchorRight: 310,
+      anchorBottom: 40,
+    });
+
+    // 完全放不下（弹窗比视口还宽）时夹到左边距内，至少保证左边缘可见
+    expect(placed.left).toBe(10);
+    expect(placed.left + 300).toBeLessThanOrEqual(320);
+  });
+
+  it('never lets the menu start outside the viewport on the left', () => {
+    expect(placeTabMenu({ ...base, anchorLeft: -50, anchorRight: -20, anchorBottom: 10 }).left).toBe(8);
+  });
+
+  it('pulls the menu up when it would overflow the bottom', () => {
+    expect(placeTabMenu({ ...base, anchorLeft: 100, anchorRight: 120, anchorBottom: 880 }))
+      .toEqual({ left: 100, top: 900 - 8 - 150 });
+  });
+
+  it('falls back to defaults when measurements are missing', () => {
+    const placed = placeTabMenu({
+      anchorLeft: 100,
+      anchorRight: 120,
+      anchorBottom: 40,
+      menuWidth: Number.NaN,
+      menuHeight: Number.NaN,
+      viewportWidth: 0,
+      viewportHeight: 0,
+    });
+
+    expect(placed.left).toBe(100);
+    expect(placed.top).toBe(46);
   });
 });
 

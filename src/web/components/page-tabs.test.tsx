@@ -3,16 +3,20 @@ import { act, create } from 'react-test-renderer';
 import PageTabs from './PageTabs.js';
 import { HOME_TAB_PATH, resolvePageTabLabel } from '../pageTabs.js';
 
-function stubRuntime() {
+function stubRuntime(viewport: { width: number; height: number } = { width: 1280, height: 800 }) {
   vi.stubGlobal('document', {
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });
   vi.stubGlobal('window', {
+    innerWidth: viewport.width,
+    innerHeight: viewport.height,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });
 }
+
+type MenuBox = { width: number; height: number };
 
 type Handlers = {
   onSelect: ReturnType<typeof vi.fn>;
@@ -22,7 +26,23 @@ type Handlers = {
   onCloseAll: ReturnType<typeof vi.fn>;
 };
 
-async function renderTabs(tabs: string[], activePath: string): Promise<{ root: WebTestRenderer; handlers: Handlers }> {
+type RenderOptions = {
+  /** 弹窗量出来的尺寸；react-test-renderer 不建真实 DOM，只能喂这个。 */
+  menuBox?: MenuBox;
+};
+
+/** createNodeMock 造出来的假节点收下的监听器，key 是事件名。 */
+const nodeListeners = new Map<string, Set<() => void>>();
+
+function emitNodeEvent(type: string) {
+  for (const handler of nodeListeners.get(type) ?? []) handler();
+}
+
+async function renderTabs(
+  tabs: string[],
+  activePath: string,
+  options: RenderOptions = {},
+): Promise<{ root: WebTestRenderer; handlers: Handlers }> {
   const handlers: Handlers = {
     onSelect: vi.fn(),
     onRefresh: vi.fn(),
@@ -30,6 +50,7 @@ async function renderTabs(tabs: string[], activePath: string): Promise<{ root: W
     onCloseOthers: vi.fn(),
     onCloseAll: vi.fn(),
   };
+  const menuBox: MenuBox = options.menuBox ?? { width: 148, height: 150 };
 
   let root!: WebTestRenderer;
   await act(async () => {
@@ -45,6 +66,30 @@ async function renderTabs(tabs: string[], activePath: string): Promise<{ root: W
         onCloseAll={handlers.onCloseAll}
         t={(text) => text}
       />,
+      {
+        createNodeMock: (element) => {
+          const props = element.props as { className?: string };
+          return {
+            getBoundingClientRect: () => ({
+              width: menuBox.width,
+              height: menuBox.height,
+              left: 0,
+              top: 0,
+              right: menuBox.width,
+              bottom: menuBox.height,
+            }),
+            className: String(props?.className ?? ''),
+            addEventListener: (type: string, handler: () => void) => {
+              const bucket = nodeListeners.get(type) ?? new Set<() => void>();
+              bucket.add(handler);
+              nodeListeners.set(type, bucket);
+            },
+            removeEventListener: (type: string, handler: () => void) => {
+              nodeListeners.get(type)?.delete(handler);
+            },
+          };
+        },
+      },
     );
   });
 
@@ -57,6 +102,7 @@ function findTab(root: WebTestRenderer, path: string) {
 
 describe('PageTabs', () => {
   beforeEach(() => {
+    nodeListeners.clear();
     stubRuntime();
   });
 
@@ -196,6 +242,128 @@ describe('PageTabs', () => {
     const closeItem = items.find((item) => item.children.join('') === '关闭该标签');
 
     expect(closeItem?.props.disabled).toBe(true);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('never listens for scroll on document or window', async () => {
+    // 点「⋯」时浏览器把按钮滚进视野也会发 document 级 scroll，
+    // 挂在 window 上会把刚打开的菜单立刻关掉 —— 所以只允许挂在标签条上。
+    const { root } = await renderTabs([HOME_TAB_PATH, '/logs'], '/logs');
+
+    await act(async () => {
+      root.root
+        .find((node) => String(node.props.className).includes('page-tabs-more'))
+        .props.onClick({ currentTarget: undefined, clientX: 700, clientY: 60 });
+    });
+
+    expect(document.addEventListener).not.toHaveBeenCalledWith('scroll', expect.any(Function), true);
+    expect(window.addEventListener).not.toHaveBeenCalledWith('scroll', expect.any(Function), true);
+    expect(nodeListeners.get('scroll')?.size).toBe(1);
+    expect(root.root.findAll((node) => node.props['data-page-tabs-menu'] === true)).toHaveLength(1);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('closes the menu when the tab strip scrolls horizontally', async () => {
+    const { root } = await renderTabs([HOME_TAB_PATH, '/logs'], '/logs');
+
+    await act(async () => {
+      root.root
+        .find((node) => String(node.props.className).includes('page-tabs-more'))
+        .props.onClick({ currentTarget: undefined, clientX: 700, clientY: 60 });
+    });
+
+    // 只给标签条挂了 scroll 监听，触发它就应该收起来
+    expect(nodeListeners.get('scroll')?.size).toBe(1);
+    await act(async () => {
+      emitNodeEvent('scroll');
+    });
+
+    expect(root.root.findAll((node) => node.props['data-page-tabs-menu'] === true)).toHaveLength(0);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('opens the menu leftwards when the anchor sits near the right edge', async () => {
+    // 视口 800 宽、弹窗 148 宽：锚点在 780 时右向展开必然溢出，应向左收回来。
+    stubRuntime({ width: 800, height: 600 });
+    const { root } = await renderTabs([HOME_TAB_PATH, '/logs'], '/logs', {
+      menuBox: { width: 148, height: 150 },
+    });
+
+    await act(async () => {
+      findTab(root, '/logs').props.onContextMenu({
+        preventDefault: vi.fn(),
+        clientX: 780,
+        clientY: 40,
+      });
+    });
+
+    const menu = root.root.find((node) => node.props['data-page-tabs-menu'] === true);
+    // 向右放不下，改成以光标为右边缘向左展开：780 - 148 = 632
+    expect(menu.props.style.left).toBe(632);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('opens leftwards from the trailing 「⋯」 button', async () => {
+    stubRuntime({ width: 800, height: 600 });
+    const { root } = await renderTabs([HOME_TAB_PATH, '/logs'], '/logs', {
+      menuBox: { width: 148, height: 150 },
+    });
+
+    await act(async () => {
+      root.root
+        .find((node) => String(node.props.className).includes('page-tabs-more'))
+        .props.onClick({
+          clientX: undefined,
+          clientY: undefined,
+          // 尾部按钮贴着右边缘：left 760 / right 788
+          currentTarget: {
+            getBoundingClientRect: () => ({ left: 760, right: 788, top: 56, bottom: 82, width: 28, height: 26 }),
+          },
+        });
+    });
+
+    const menu = root.root.find((node) => node.props['data-page-tabs-menu'] === true);
+    // 弹窗右边缘贴住「⋯」按钮右边缘 788：788 - 148 = 640
+    expect(menu.props.style.left).toBe(640);
+    // 顶部没有越界，还是贴着按钮下沿（82 + 6）
+    expect(menu.props.style.top).toBe(88);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it('lifts the menu when it would overflow the bottom edge', async () => {
+    stubRuntime({ width: 1280, height: 600 });
+    const { root } = await renderTabs([HOME_TAB_PATH, '/logs'], '/logs', {
+      menuBox: { width: 148, height: 150 },
+    });
+
+    await act(async () => {
+      findTab(root, '/logs').props.onContextMenu({
+        preventDefault: vi.fn(),
+        clientX: 200,
+        clientY: 580,
+      });
+    });
+
+    const menu = root.root.find((node) => node.props['data-page-tabs-menu'] === true);
+    // 下边放不下就夹回视口：600 - 8 - 150 = 442
+    expect(menu.props.style.top).toBe(442);
+    // 左侧本来就放得下，不动
+    expect(menu.props.style.left).toBe(200);
 
     await act(async () => {
       root.unmount();

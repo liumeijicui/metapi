@@ -1,3 +1,21 @@
+### 104. 页签弹窗超出右边界：右边放不下改成向左展开
+
+- **类型**：缺陷修复（前端交互）
+- **需求来源**：本会话（用户：「尾部常驻一个「⋯」这个弹窗超出右边的页面了，应该向左边弹窗」）
+- **一、现象与根因**
+  - 弹窗是 `position: fixed` + 锚点坐标定位，但**永远从锚点向右下展开**（第一版只在量到尺寸后往视口里夹一次）。锚点是尾部那个「⋯」按钮或最右侧标签右键时的光标，本身已经贴着右边缘，于是弹窗直接顶出视口右侧。
+  - 顺带发现第二个问题：修复前为了「页面滚动时菜单不会跟内容错位」监听了 `window` 的捕获阶段 `scroll`。实测点击「⋯」时浏览器会把按钮滚进视野，Chrome 会补发一次 document 级 `scroll`，于是**刚打开的菜单立刻被自己关掉**（真机上 `menu+` 之后 3ms 就出现 `menu-`）。第一版改成量尺寸重排后这个坑才暴露出来。
+- **二、改动**
+  - 新增纯函数 `placeTabMenu()`（`src/web/pageTabs.ts`）：右边放不下就翻转成**向左展开 —— 弹窗右边缘贴住锚点右边缘**（尾部「⋯」按钮正是这个分支），左侧再按 `margin` 夹一次；纵向默认贴锚点下方 `6px`，下边放不下就上抬。定位数学从组件里挪出来，可以直接单测。
+  - `components/PageTabs.tsx`：菜单状态改为记录锚点三边（`anchorLeft` / `anchorRight` / `anchorBottom`），弹窗挂载后量一次尺寸交给 `placeTabMenu()` 算最终落点（尺寸不变就不 setState，不会来回抖）；宽度量到前先用 `TAB_MENU_FALLBACK_WIDTH` 估位，避免第一帧从视口外飞进来。
+  - **滚动收起改成只监听标签条自己**（`stripRef` 上的 `scroll`）：标签栏是 sticky、弹窗是 fixed，页面纵向滚动时两者一起走不会错位，本来就不需要收起；而「点⋯时浏览器补发 document scroll」的误伤正好被这条去掉。标签条横向滚动时锚点确实会从弹窗底下滑走，仍然收起。
+- **三、验证**
+  - `placeTabMenu` 新增 7 条纯函数用例：放得下时向右、贴右边缘时左展开且右边缘对齐、右键用光标当右边缘、窄视口仍夹回边距、左越界夹回、下越界上抬、尺寸缺失时用兜底值。`page-tabs.test.tsx` 再加 3 条：**断言没有把 scroll 监听到 document / window 上**、标签条滚动才收起、贴右边缘时左展开（`createNodeMock` 喂弹窗尺寸）。
+  - 相关测试 `pageTabs.test.ts` / `components/page-tabs.test.tsx` / `pageTabs.registry.test.ts` / `App.page-tabs.test.tsx` = 53 passed；`npx vitest run src/web` = 516 passed / 1 failed（`accounts.rebind-panel-focus` 既有失败，与本改动无关）；`tsc --noEmit`（web / web-test）通过；`npx vite build` 通过；`repo:drift-check` Violations: 0。
+  - 真机（Playwright + 系统 chromium，服务已重启）：在 1440 / 1024 / 820 三种视口下用真实 `clientX = 视口宽 - 10` 触发右键，弹窗右边缘分别落在 1430 / 1014 / 810，**正好等于光标 x**，且四面都在视口内；尾部「⋯」在纵向滚动页面后再点也不被误关（修复前 3ms 内自杀）；菜单项「关闭全部标签」点击后只剩 `["/"]` 且回到首页。
+- **主要文件**：`src/web/pageTabs.ts`、`src/web/components/PageTabs.tsx`、`src/web/pageTabs.test.ts`、`src/web/components/page-tabs.test.tsx`
+- **状态**：已完成
+
 ### 103. 顶部多页签：菜单打开后留标签，双击刷新，可关闭当前 / 其他 / 全部
 
 - **类型**：界面功能（前端导航壳，无后端改动）
