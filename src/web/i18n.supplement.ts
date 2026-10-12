@@ -1014,4 +1014,13 @@ export const zhToEnSupplemental: Record<string, string> = {
   '当前已开启': 'Enabled',
   '当前未开启': 'Disabled',
   '最近追踪': 'Recent traces',
+  // ==== 顶部多页签 ====
+  '已打开的菜单': 'Open menus',
+  '单击切换，双击刷新': 'Click to switch, double-click to refresh',
+  '标签操作': 'Tab actions',
+  '刷新该标签': 'Refresh this tab',
+  '关闭该标签': 'Close this tab',
+  '关闭其他标签': 'Close other tabs',
+  '关闭全部标签': 'Close all tabs',
+  '已刷新该菜单': 'Menu refreshed',
 };

@@ -1,5 +1,5 @@
 ﻿import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
-import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ToastProvider, useToast } from './components/Toast.js';
 import SearchModal from './components/SearchModal.js';
 import NotificationPanel from './components/NotificationPanel.js';
@@ -18,6 +18,7 @@ import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
 import { MobileDrawer } from './components/MobileDrawer.js';
+import PageTabs from './components/PageTabs.js';
 import CenteredModal from './components/CenteredModal.js';
 import EdgeServerFields from './components/EdgeServerFields.js';
 import EdgeSyncSettingsModal from './components/EdgeSyncSettingsModal.js';
@@ -33,6 +34,18 @@ import {
   triggerEdgeSync,
   useEdgeStatus,
 } from './edgeMode.js';
+import {
+  HOME_TAB_PATH,
+  closeAllPageTabs,
+  closeOtherPageTabs,
+  closePageTab,
+  normalizeTabPath,
+  openPageTab,
+  readStoredPageTabs,
+  resolveActivePathAfterClose,
+  resolvePageTabLabel,
+  writeStoredPageTabs,
+} from './pageTabs.js';
 const Dashboard = lazy(() => import('./pages/Dashboard.js'));
 const Sites = lazy(() => import('./pages/Sites.js'));
 const Accounts = lazy(() => import('./pages/Accounts.js'));
@@ -617,9 +630,10 @@ const topNavItems = [
 /** 边缘版（exe）只保留这两个页面：模型转发与使用日志。 */
 const EDGE_MODE_NAV_PATHS = new Set(['/model-forwarding', '/logs']);
 
-function PageTransition({ children }: { children: React.ReactNode }) {
+function PageTransition({ children, refreshToken = 0 }: { children: React.ReactNode; refreshToken?: number }) {
   const location = useLocation();
-  return <div key={location.pathname} className="page-enter">{children}</div>;
+  // refreshToken 变了就换一个 key：整页重新挂载 = 菜单重新拉一次数据。
+  return <div key={`${location.pathname}#${refreshToken}`} className="page-enter">{children}</div>;
 }
 
 function RouteLoadingFallback() {
@@ -634,6 +648,7 @@ function RouteLoadingFallback() {
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
   const location = useLocation();
+  const navigate = useNavigate();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -659,6 +674,10 @@ function AppShell() {
   const [edgeSettingsOpen, setEdgeSettingsOpen] = useState(false);
   const [edgeSyncing, setEdgeSyncing] = useState(false);
   const edgeAutoSyncRef = useRef(false);
+  // 顶部页签：记录打开过哪些菜单；refreshTokens 记每个页签被「刷新」过几次。
+  const [pageTabs, setPageTabs] = useState<string[]>(() => readStoredPageTabs(localStorage));
+  const [pageTabRefreshTokens, setPageTabRefreshTokens] = useState<Record<string, number>>({});
+  const activeTabPath = normalizeTabPath(location.pathname);
   const resolvedTheme: 'light' | 'dark' = themeMode === 'system'
     ? (systemPrefersDark ? 'dark' : 'light')
     : themeMode;
@@ -694,6 +713,43 @@ function AppShell() {
   useEffect(() => {
     document.documentElement.setAttribute('data-layout', isMobile ? 'mobile' : 'desktop');
   }, [isMobile]);
+
+  // 顶部页签：进入一个菜单就把它记下来（已开过的不动顺序）。
+  useEffect(() => {
+    setPageTabs((prev) => openPageTab(prev, location.pathname));
+  }, [location.pathname]);
+
+  useEffect(() => {
+    writeStoredPageTabs(localStorage, pageTabs);
+  }, [pageTabs]);
+
+  const handleTabSelect = React.useCallback((path: string) => {
+    if (path === activeTabPath) return;
+    navigate(path);
+  }, [activeTabPath, navigate]);
+
+  // 双击页签 = 换一个 key 让该菜单重新挂载，等于重新拉一次数据。
+  const handleTabRefresh = React.useCallback((path: string) => {
+    setPageTabRefreshTokens((prev) => ({ ...prev, [path]: (prev[path] ?? 0) + 1 }));
+    if (path !== activeTabPath) navigate(path);
+    toast.success(t('已刷新该菜单'));
+  }, [activeTabPath, navigate, t, toast]);
+
+  const handleTabClose = React.useCallback((path: string) => {
+    const nextPath = resolveActivePathAfterClose(pageTabs, path, activeTabPath);
+    setPageTabs((prev) => closePageTab(prev, path));
+    if (path === activeTabPath) navigate(nextPath);
+  }, [activeTabPath, navigate, pageTabs]);
+
+  const handleTabCloseOthers = React.useCallback((path: string) => {
+    setPageTabs((prev) => closeOtherPageTabs(prev, path));
+    if (path !== activeTabPath) navigate(path);
+  }, [activeTabPath, navigate]);
+
+  const handleTabCloseAll = React.useCallback(() => {
+    setPageTabs((prev) => closeAllPageTabs());
+    navigate(HOME_TAB_PATH);
+  }, [navigate]);
 
   // 边缘版（exe）：探一次本机是不是「只转发」实例；不是就完全不显示边缘相关 UI。
   useEffect(() => {
@@ -1013,6 +1069,20 @@ function AppShell() {
         </div>
       </header>
 
+      {isMobile ? null : (
+        <PageTabs
+          tabs={pageTabs}
+          activePath={activeTabPath}
+          labelOf={(path) => resolvePageTabLabel(path) ?? path}
+          onSelect={handleTabSelect}
+          onRefresh={handleTabRefresh}
+          onClose={handleTabClose}
+          onCloseOthers={handleTabCloseOthers}
+          onCloseAll={handleTabCloseAll}
+          t={t}
+        />
+      )}
+
       <div className="app-layout">
         {isMobile ? (
           <MobileDrawer
@@ -1131,7 +1201,7 @@ function AppShell() {
         )}
 
         <main className="main-content">
-          <PageTransition>
+          <PageTransition refreshToken={pageTabRefreshTokens[activeTabPath] ?? 0}>
             <Suspense fallback={<RouteLoadingFallback />}>
               {edgeMode && !EDGE_MODE_NAV_PATHS.has(location.pathname) ? (
                 <Navigate to="/model-forwarding" replace />

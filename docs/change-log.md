@@ -1,3 +1,28 @@
+### 103. 顶部多页签：菜单打开后留标签，双击刷新，可关闭当前 / 其他 / 全部
+
+- **类型**：界面功能（前端导航壳，无后端改动）
+- **需求来源**：本会话（用户：「我想把菜单打开后顶部标签显示菜单的那种，双击标签能刷新菜单数据，可以关闭全部、关闭其他等功能」）
+- **一、做了什么**
+  - 顶部栏下方新增一条页签栏（`components/PageTabs.tsx`）：打开过哪个菜单就留一个标签，当前菜单高亮；标签过多时横向滚动，尾部固定一个「⋯」出菜单。
+  - **双击标签 = 刷新该菜单数据**：给该页签的刷新计数 +1，`PageTransition` 的 `key` 由 `路径#计数` 组成，key 一变整页重新挂载，页面自身的 `useEffect` 就会重新拉数据（不是浏览器 reload，不闪白、不丢登录态），并弹一条「已刷新该菜单」。
+  - **右键标签 / 点「⋯」出菜单**：刷新该标签、关闭该标签、关闭其他标签、关闭全部标签；首页标签固定，既不显示关闭按钮，菜单里的「关闭该标签」也是禁用态。
+  - 关闭后的落点：关的是当前标签就往右退，右边没有就往左退；「关闭其他标签」留在被点的那个，「关闭全部标签」回首页。
+  - 标签栏**只在桌面端显示**（`isMobile` 时不渲染，移动端继续用汉堡抽屉导航）；打开过哪些标签记在 `localStorage`（`metapi.pageTabs.v1`，只存路径、上限 20 个、自动跳过不认识的路径），刷新浏览器后标签还在。
+- **二、为什么这么实现**
+  - 逻辑与渲染分开：`pageTabs.ts` 只放纯函数（路径归一化、开关标签、关闭后落点、读写 localStorage），可以在 node 环境下直接单测；`components/PageTabs.tsx` 只管渲染与交互，路由与状态留在 `App.tsx`，没有引入新的状态库。
+  - 标签文案不落 localStorage，只存路径，渲染时按 `PAGE_TAB_LABELS` 现取 —— 以后改菜单文案不用迁移用户本地数据。
+  - 双击刷新用「换 key 重新挂载」而不是 `location.reload()`：前者只重跑该页面自己的取数逻辑，后者会把整个 SPA 重新加载一遍（侧边栏、通知轮询、边缘状态探测全部重来）。
+- **三、验证**
+  - 单测新增 3 个文件共 36 条：`pageTabs.test.ts`（27 条：路径归一化 / 关闭语义 / 上限裁剪 / 存储读写与异常兜底）、`pageTabs.registry.test.ts`（3 条：**注册表与 `App.tsx` 的侧边栏、顶部导航、`<Route>` 三处逐项比对**，以后加菜单忘了补页签标题会直接红）、`components/page-tabs.test.tsx`（6 条：渲染 / 单击切换 / 双击刷新 / X 关闭不触发切换 / 首页不可关 / 右键菜单四项）。
+  - 集成测试 `App.page-tabs.test.tsx`（5 条）：`MemoryRouter` 驱动真实 `App`，验证「打开菜单自动加标签 + 写入 localStorage」「按 localStorage 恢复标签」「关闭其他只留首页与被点项」「双击后子页面挂载次数 1→2（确实重新拉数据）」「移动端不渲染标签栏」。
+  - `npx vitest run src/web` = 504 passed / 1 failed（`accounts.rebind-panel-focus` 是既有失败，与本改动无关）；`tsc --noEmit` 三个 tsconfig 全通过；`npx vite build` 通过；`npm run repo:drift-check` Violations: 0。
+  - 真机（Playwright + 系统 chromium 打 `127.0.0.1:81`，服务已重启）：打开 `/logs`、`/monitor` 后标签依次变成 `["/","/logs","/monitor"]`；双击当前标签后观察到该页重新发了一次取数请求（`/api/model-monitor/overview`）并弹出刷新提示；单击标签切 URL；标签上的 X 关掉 `/logs` 后停在 `/monitor`；右键菜单四项齐全；「关闭其他标签」后只剩 `["/","/monitor"]`；「关闭全部标签」后回首页且 localStorage 变成 `["/"]`；首页标签没有关闭按钮；直接访问 `/sites`（模拟刷新）后标签恢复为 `["/","/logs","/monitor","/sites"]`；视口切到 520px 后标签栏消失。中英两种语言与截图都核对过。
+  - 补了英文词条（已打开的菜单、单击切换双击刷新、标签操作、刷新/关闭该标签、关闭其他/全部标签、已刷新该菜单）。
+- **四、exe（边缘版）**
+  - 不用改代码，**重新打包即可**：exe 的前端就是同一份 `dist/**/*`（`electron-builder.yml` 的 `files`），而 `App.tsx` 里 `isMobile` / 边缘模式都不影响这条页签栏（exe 只有「模型转发」「使用日志」两个菜单，标签数自然很少）。exe 要拿到新界面需重新执行 `npm run dist:desktop:edge`（Windows 包只能在 Windows 上打）。
+- **主要文件**：`src/web/pageTabs.ts`、`src/web/components/PageTabs.tsx`、`src/web/App.tsx`、`src/web/index.css`、`src/web/i18n.supplement.ts`、`src/web/pageTabs.test.ts`、`src/web/pageTabs.registry.test.ts`、`src/web/components/page-tabs.test.tsx`、`src/web/App.page-tabs.test.tsx`
+- **状态**：已完成
+
 ### 102. 会话通道并发上限默认改为 0（不限制任何并发）
 
 - **类型**：默认值调整（服务端配置 + 设置页文案）
