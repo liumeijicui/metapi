@@ -475,6 +475,9 @@ export type ProxyLogBillingDetails = {
     cacheRatio: number;
     cacheCreationRatio: number;
     groupRatio: number;
+    /** `tiered_expr` 表示价格来自 billing_expr，上面的倍率字段是站点价目表里的废字段。 */
+    billingMode?: string | null;
+    billingExpr?: string | null;
   };
   breakdown: {
     inputPerMillion: number;

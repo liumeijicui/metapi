@@ -137,6 +137,13 @@ export interface ProxyBillingDetails {
     cacheRatio: number;
     cacheCreationRatio: number;
     groupRatio: number;
+    /**
+     * 价格来源。`tiered_expr` 时上面的倍率字段是站点价目表里的废字段（很多站固定
+     * 37.5），真实价格来自 billing_expr，日志里要说明白，别让人照倍率去算。
+     */
+    billingMode?: string | null;
+    /** 表达式里的挂单价（美元 / 1M），仅 tiered_expr 时有值。 */
+    billingExpr?: string | null;
   };
   breakdown: {
     inputPerMillion: number;
@@ -694,6 +701,57 @@ function buildPricingOverrideModel(
   };
 }
 
+/**
+ * self-log 的「倍率覆盖」只带得回 `model_ratio` 这类倍率字段，而表达式计费
+ * （`tiered_expr`）的站点里那是废字段（happycoding 固定 37.5）。照着覆盖算，
+ * 挂单价 $0.3/M 的模型会被算成 $75/M。所以只要缓存里能读到该站该模型的
+ * `billing_expr`，就以价目表为准、忽略倍率覆盖。
+ *
+ * 只读缓存、不发网络请求：这是请求收尾时的记账路径，不值得为它多等一次往返；
+ * 缓存由模型监控的定时刷新和端点推导持续保温。
+ */
+function resolveExpressionPricedModelFromCache(
+  input: EstimateProxyCostInput,
+): { model: PricingModel; groupRatio: Record<string, number> } | null {
+  const data = peekPricingDataCache(input).data;
+  if (!data) return null;
+  const model = resolveModel(input.modelName, data);
+  if (!model || !resolveModelExpressionPricing(model)) return null;
+  return { model, groupRatio: data.groupRatio };
+}
+
+/**
+ * 只读缓存版本只够热路径用：进程刚启动、或者缓存条目刚好过期时 `peek` 是空的，
+ * 这时又会退回倍率覆盖（happycoding 那种固定 37.5 的废字段 → 记成 $75/M）。
+ * 记账收尾路径上补一次 `getPricingDataCached`（带 TTL 与并发去重），确认价目表里
+ * 该模型确实是表达式计费，才改用表达式价。
+ */
+async function resolveExpressionPricedModel(
+  input: EstimateProxyCostInput,
+): Promise<{ model: PricingModel; groupRatio: Record<string, number> } | null> {
+  const cached = resolveExpressionPricedModelFromCache(input);
+  if (cached) return cached;
+
+  const data = await getPricingDataCached(input);
+  if (!data) return null;
+  const model = resolveModel(input.modelName, data);
+  if (!model || !resolveModelExpressionPricing(model)) return null;
+  return { model, groupRatio: data.groupRatio };
+}
+
+/**
+ * 解析「有 self-log 倍率覆盖」时的记账模型。表达式计费的站点优先用价目表，
+ * 其余情况才用覆盖值。没有覆盖值时返回 null，交给普通路径。
+ */
+async function resolveOverriddenPricing(
+  input: EstimateProxyCostInput,
+): Promise<{ model: PricingModel; groupRatio: Record<string, number> } | null> {
+  if (!input.billingPricingOverride) return null;
+  const expressionPriced = await resolveExpressionPricedModel(input);
+  if (expressionPriced) return expressionPriced;
+  return buildPricingOverrideModel(input.modelName, input.billingPricingOverride);
+}
+
 function normalizeUsageBreakdownInput(usage: {
   promptTokens: number;
   completionTokens: number;
@@ -738,7 +796,8 @@ export function calculateModelUsageBreakdown(
   },
   groupRatio: Record<string, number>,
 ): ProxyBillingDetails | null {
-  if (model.quotaType === 1) {
+  // 按次计费（含 `fixed(x)` 表达式）没有 token 明细可言。
+  if (model.quotaType === 1 || isExpressionPerRequestModel(model)) {
     return null;
   }
 
@@ -746,15 +805,18 @@ export function calculateModelUsageBreakdown(
   const normalizedUsage = normalizeUsageBreakdownInput(usage);
   const cacheRatio = model.cacheRatio ?? 1;
   const cacheCreationRatio = model.cacheCreationRatio ?? 1;
-  const inputPerMillion = roundCost(model.modelRatio * 2 * multiplier);
-  const outputPerMillion = roundCost(model.modelRatio * model.completionRatio * 2 * multiplier);
-  const cacheReadPerMillion = roundCost(model.modelRatio * cacheRatio * 2 * multiplier);
-  const cacheCreationPerMillion = roundCost(model.modelRatio * cacheCreationRatio * 2 * multiplier);
+  // 表达式计费站点必须用 billing_expr 的价，不能用废掉的 model_ratio。
+  const rates = resolveEffectiveTokenRates(model, multiplier);
+  const inputPerMillion = rates.inputPerMillion;
+  const outputPerMillion = rates.outputPerMillion;
+  const cacheReadPerMillion = rates.cacheReadPerMillion;
+  const cacheCreationPerMillion = rates.cacheCreationPerMillion;
   const inputCost = roundCost((normalizedUsage.billablePromptTokens / 1_000_000) * inputPerMillion);
   const outputCost = roundCost((normalizedUsage.completionTokens / 1_000_000) * outputPerMillion);
   const cacheReadCost = roundCost((normalizedUsage.cacheReadTokens / 1_000_000) * cacheReadPerMillion);
   const cacheCreationCost = roundCost((normalizedUsage.cacheCreationTokens / 1_000_000) * cacheCreationPerMillion);
   const totalCost = roundCost(inputCost + outputCost + cacheReadCost + cacheCreationCost);
+  const metadata = resolvePricingMetadata(model);
 
   return {
     quotaType: model.quotaType,
@@ -765,6 +827,8 @@ export function calculateModelUsageBreakdown(
       cacheRatio,
       cacheCreationRatio,
       groupRatio: multiplier,
+      billingMode: metadata.billingMode,
+      billingExpr: metadata.billingExpr,
     },
     breakdown: {
       inputPerMillion,
@@ -794,8 +858,8 @@ export function calculateModelUsageCost(
 ): number {
   const multiplier = resolveGroupMultiplier(model, groupRatio);
 
-  if (model.quotaType === 1) {
-    return roundCost(calculatePerCallCost(model.modelPrice, multiplier));
+  if (model.quotaType === 1 || isExpressionPerRequestModel(model)) {
+    return resolveEffectivePerCallUsd(model, multiplier);
   }
 
   return calculateModelUsageBreakdown(model, usage, groupRatio)?.breakdown.totalCost ?? 0;
@@ -818,8 +882,74 @@ function resolveModelExpressionPricing(model: PricingModel): BillingExpressionPr
     unit: 'token',
     inputPerMillion: null,
     outputPerMillion: null,
+    cacheReadPerMillion: null,
+    cacheCreationPerMillion: null,
     perRequestUsd: null,
     matchedTier: null,
+  };
+}
+
+/**
+ * 一个模型的「每 1M tokens 单价」。
+ *
+ * 表达式计费（`billing_mode = tiered_expr`）的站点里 `model_ratio` 是废字段，
+ * 计费必须和价目表展示走同一份来源，否则会出现「监控页显示 $0.3、日志按 $75 计费」
+ * 这种自相矛盾（happycoding 的 deepseek-v4.1-flash 实测过）。
+ */
+function resolveEffectiveTokenRates(
+  model: PricingModel,
+  multiplier: number,
+): {
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cacheReadPerMillion: number;
+  cacheCreationPerMillion: number;
+  fromExpression: boolean;
+} {
+  const expressionPricing = resolveModelExpressionPricing(model);
+  if (expressionPricing && expressionPricing.unit === 'token') {
+    // 解析不出来时各项是 null：如实按 0 计，不用废掉的 model_ratio 编一个假价。
+    return {
+      inputPerMillion: roundCost((expressionPricing.inputPerMillion ?? 0) * multiplier),
+      outputPerMillion: roundCost((expressionPricing.outputPerMillion ?? 0) * multiplier),
+      cacheReadPerMillion: roundCost((expressionPricing.cacheReadPerMillion ?? 0) * multiplier),
+      cacheCreationPerMillion: roundCost((expressionPricing.cacheCreationPerMillion ?? 0) * multiplier),
+      fromExpression: true,
+    };
+  }
+
+  return {
+    inputPerMillion: roundCost(model.modelRatio * 2 * multiplier),
+    outputPerMillion: roundCost(model.modelRatio * model.completionRatio * 2 * multiplier),
+    cacheReadPerMillion: roundCost(model.modelRatio * (model.cacheRatio ?? 1) * 2 * multiplier),
+    cacheCreationPerMillion: roundCost(model.modelRatio * (model.cacheCreationRatio ?? 1) * 2 * multiplier),
+    fromExpression: false,
+  };
+}
+
+/**
+ * 每次请求的挂牌价（美元）。`fixed(x)` 表达式和 `quota_type=1` 的按次计费模型都走
+ * 这里；表达式计价时不再读可能为 0 的 `model_price`（否则按次模型会被算成免费）。
+ */
+function resolveEffectivePerCallUsd(model: PricingModel, multiplier: number): number {
+  const expressionPricing = resolveModelExpressionPricing(model);
+  if (expressionPricing && expressionPricing.unit === 'request') {
+    return roundCost((expressionPricing.perRequestUsd ?? 0) * multiplier);
+  }
+  return roundCost(calculatePerCallCost(model.modelPrice, multiplier));
+}
+
+/** 表达式计费且是「按次」单价时为 true。 */
+function isExpressionPerRequestModel(model: PricingModel): boolean {
+  const expressionPricing = resolveModelExpressionPricing(model);
+  return !!expressionPricing && expressionPricing.unit === 'request';
+}
+
+function resolvePricingMetadata(model: PricingModel): { billingMode: string | null; billingExpr: string | null } {
+  if (!resolveModelExpressionPricing(model)) return { billingMode: null, billingExpr: null };
+  return {
+    billingMode: model.billingMode?.trim() || 'tiered_expr',
+    billingExpr: model.billingExpr?.trim() || null,
   };
 }
 
@@ -844,6 +974,12 @@ function buildExpressionGroupPricing(
     outputPerMillion: pricing.outputPerMillion === null
       ? undefined
       : roundCost(pricing.outputPerMillion * multiplier),
+    cacheReadPerMillion: pricing.cacheReadPerMillion === null
+      ? undefined
+      : roundCost(pricing.cacheReadPerMillion * multiplier),
+    cacheCreationPerMillion: pricing.cacheCreationPerMillion === null
+      ? undefined
+      : roundCost(pricing.cacheCreationPerMillion * multiplier),
   };
 }
 
@@ -877,12 +1013,14 @@ function buildModelPricingCatalogFromData(pricingData: PricingData): ModelPricin
           return acc;
         }
 
+        // 走同一个价格解析：表达式计费在上面的分支处理，这里只是倍率路径。
+        const rates = resolveEffectiveTokenRates(model, multiplier);
         acc[group] = {
           quotaType: 0,
-          inputPerMillion: roundCost(model.modelRatio * 2 * multiplier),
-          outputPerMillion: roundCost(model.modelRatio * model.completionRatio * 2 * multiplier),
-          cacheReadPerMillion: roundCost(model.modelRatio * (model.cacheRatio ?? 1) * 2 * multiplier),
-          cacheCreationPerMillion: roundCost(model.modelRatio * (model.cacheCreationRatio ?? 1) * 2 * multiplier),
+          inputPerMillion: rates.inputPerMillion,
+          outputPerMillion: rates.outputPerMillion,
+          cacheReadPerMillion: rates.cacheReadPerMillion,
+          cacheCreationPerMillion: rates.cacheCreationPerMillion,
         };
         return acc;
       }, {});
@@ -967,8 +1105,10 @@ export async function estimateProxyCost(input: EstimateProxyCostInput): Promise<
 
   try {
     if (input.billingPricingOverride) {
-      const pricingOverride = buildPricingOverrideModel(input.modelName, input.billingPricingOverride);
-      return calculateModelUsageCost(pricingOverride.model, usage, pricingOverride.groupRatio);
+      const overridden = await resolveOverriddenPricing(input);
+      if (overridden) {
+        return calculateModelUsageCost(overridden.model, usage, overridden.groupRatio);
+      }
     }
 
     const pricingData = await getPricingDataCached(input);
@@ -1013,8 +1153,10 @@ export async function buildProxyBillingDetails(input: EstimateProxyCostInput): P
 
   try {
     if (input.billingPricingOverride) {
-      const pricingOverride = buildPricingOverrideModel(input.modelName, input.billingPricingOverride);
-      return calculateModelUsageBreakdown(pricingOverride.model, usage, pricingOverride.groupRatio);
+      const overridden = await resolveOverriddenPricing(input);
+      if (overridden) {
+        return calculateModelUsageBreakdown(overridden.model, usage, overridden.groupRatio);
+      }
     }
 
     const pricingData = await getPricingDataCached(input);

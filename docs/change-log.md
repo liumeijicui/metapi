@@ -1,3 +1,26 @@
+### 100. 记账价与价目表不一致：happycoding 的 `deepseek-v4.1-flash` 记成 $75/M，实际 $0.3/M
+
+- **类型**：缺陷修复（服务端计费）
+- **需求来源**：本会话（用户贴出「`229 tokens / 1M * $75 + 缓存 89,600 tokens / 1M * $75 + 补全 184 tokens / 1M * $75 = $6.750975`」，指出该站该模型是 $0.3/M）
+- **一、现象与根因（两层，都在记账侧）**
+  - happycoding（site 19）价目表里 `deepseek-v4.1-flash` 是表达式计费：`billing_mode=tiered_expr`、`billing_expr=tier("base", p * 0.3 + c * 1.2 + cr * 0.006)`；同条目的 `model_ratio` 是废字段（一律 37.5）。
+  - 第一层：`calculateModelUsageCost` / `calculateModelUsageBreakdown` / `buildModelPricingCatalogFromData` 的倍率分支**从不看 `billing_expr`**。于是模型监控页（走 `resolveModelExpressionPricing()`）显示 $0.3/M，真正记账却按 `37.5 * 2 = $75/M`。
+  - 第二层（本轮实测新发现）：self-log 回传的「倍率覆盖」只带得回 `model_ratio` 这类废字段，会把表达式价顶掉；而设计上用来「以价目表为准」的 `resolveExpressionPricedModelFromCache()` **只读进程内缓存**，进程刚启动或条目过期时读空，于是又退回 $75。实测 `buildProxyBillingDetails({ billingPricingOverride: { modelRatio: 37.5, ... } })` 在冷缓存下原样复现用户的 $6.750975。
+  - 另有固有别名坑：happycoding 同时存在 `deepseek-v4.1-flash`（带表达式、$0.3/M）和 `deepseek-v4-1-flash`（连字符、无表达式、$75/M），解析到后者就会算贵。
+- **二、改动**
+  - `billingExpression.ts`：`BillingExpressionPricing` 增加 `cacheReadPerMillion` / `cacheCreationPerMillion`（可为 `null`），用差分从表达式还原缓存读写单价；按次（`fixed()`）分支补两个 `null`。
+  - `modelPricingService.ts`：新增 `resolveEffectiveTokenRates()`（表达式计费必须走表达式价 × 分组倍率；解析失败按 0，不编假价）、`resolveEffectivePerCallUsd()`、`isExpressionPerRequestModel()`、`resolvePricingMetadata()`；倍率分支全部改走它；按次表达式按 `quotaType=1` 处理（顺带修掉 `fixed()` 被算成 $0）。
+  - 本轮补丁：新增 `resolveExpressionPricedModel()`（冷缓存时补一次 `getPricingDataCached()`，自带 TTL 与并发去重）与 `resolveOverriddenPricing()`；`estimateProxyCost` / `buildProxyBillingDetails` 的 override 分支统一走它 —— 只要价目表里该模型是表达式计费就以价目表为准，否则才用 self-log 倍率。
+  - `ProxyBillingDetails.pricing` 增加 `billingMode` / `billingExpr`，`src/web/api.ts` 同步类型；日志详情页加一行「计费方式：表达式计费（billing_expr: …）」，并隐藏对表达式计费毫无意义的「缓存倍率 / 缓存创建倍率」。
+- **三、验证**
+  - 单测新增「冷缓存 + self-log 倍率覆盖也不该退回 $75」（用没被访问过的站点 23 保证缓存为空，并断言确实发生了价目表请求）：用户那笔用量 229 / 89600 / 184 现在得 0.000828（旧逻辑 $6.750975）。`modelPricingService.tieredExpr.test.ts` 5 passed。
+  - 真机端到端（临时把 happycoding 的 `route_channels.priority` 提到第一位以强制走该站，测完已把 `route_channels` 与 `model_forward_targets.sort_order` 全部还原）：把 `metapi` 重启成冷缓存后立刻打 `POST /v1/chat/completions`（`gpt-6-astra`），新日志 `proxy_logs` id 4626 记 `billingMode=tiered_expr`、`inputPerMillion=0.3`、`outputPerMillion=1.2`、`cacheReadPerMillion=0.006`、`totalCost=0.000033`；同笔上游自报 `cost=0.0000321`，两边对上。热缓存那笔（id 4622）同为 0.3 / 1.2 / 0.006。
+  - `npx tsc --noEmit -p tsconfig.server.json` 与 `-p tsconfig.web.json` 通过；`npm run build:server`、`npx vite build` 通过；`npx vitest run src/server src/web` = 3235 passed / 4 failed，4 条（`db/index.default-path`、`factoryResetService`、`siteProxy`、`accounts.rebind-panel-focus`）已用 `git stash` 在干净 HEAD 上复跑确认为既有失败；`npm run repo:drift-check` Violations: 0。
+  - 已清理调试脚本 `tmp/probe-price.ts`、`tmp/probe-price2.ts`。
+- **主要文件**：`src/server/services/modelPricingService.ts`、`src/server/services/billingExpression.ts`、`src/server/services/modelPricingService.tieredExpr.test.ts`、`src/web/api.ts`、`src/web/pages/ProxyLogs.tsx`
+- **备注**：历史日志（如 id 4582/4583 那种 $7 量级）不会自动重算；要修正得写一次性脚本按 `billing_details.usage` + 站点 `billing_expr` 回填，本次未做。
+- **状态**：已完成（未提交）
+
 ### 99. 「代理全部失败」通知改说真话：不再固定回 `No available channels after retries`
 
 - **类型**：缺陷修复（服务端告警文案）

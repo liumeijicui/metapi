@@ -412,20 +412,30 @@ function buildBillingProcessLines(log: ProxyLogRenderItem) {
   const detail = log.billingDetails;
   if (!detail) return [];
 
+  // 表达式计费站点的「倍率」是价目表里的废字段（很多站固定 37.5），照它算会得出
+  // 一个和实际账单无关的数（$0.3 的模型显示成 $75）。这时只报公式还原出的价格。
+  const byExpression = detail.pricing.billingMode === "tiered_expr";
   const lines = [
+    byExpression
+      ? `计费方式：表达式计费（billing_expr${detail.pricing.billingExpr ? `: ${detail.pricing.billingExpr}` : ""}）`
+      : null,
     `提示价格：${formatPerMillionPrice(detail.breakdown.inputPerMillion)}`,
     `补全价格：${formatPerMillionPrice(detail.breakdown.outputPerMillion)}`,
-  ];
+  ].filter((line): line is string => !!line);
 
   if (detail.usage.cacheReadTokens > 0) {
     lines.push(
-      `缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion)} (缓存倍率: ${formatCompactNumber(detail.pricing.cacheRatio)})`,
+      byExpression
+        ? `缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion)}`
+        : `缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion)} (缓存倍率: ${formatCompactNumber(detail.pricing.cacheRatio)})`,
     );
   }
 
   if (detail.usage.cacheCreationTokens > 0) {
     lines.push(
-      `缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion)} (缓存创建倍率: ${formatCompactNumber(detail.pricing.cacheCreationRatio)})`,
+      byExpression
+        ? `缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion)}`
+        : `缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion)} (缓存创建倍率: ${formatCompactNumber(detail.pricing.cacheCreationRatio)})`,
     );
   }
 

@@ -57,6 +57,9 @@ export interface BillingExpressionPricing {
   unit: BillingExpressionBillingUnit;
   inputPerMillion: number | null;
   outputPerMillion: number | null;
+  /** 缓存读取 / 缓存创建的单价（美元 / 1M），表达式里没有对应项时为 null。 */
+  cacheReadPerMillion: number | null;
+  cacheCreationPerMillion: number | null;
   /** `unit === 'request'` 时的每次请求价（美元）。 */
   perRequestUsd: number | null;
   matchedTier: string | null;
@@ -606,6 +609,8 @@ export function resolveBillingExpressionPricing(
       unit: 'request',
       inputPerMillion: null,
       outputPerMillion: null,
+      cacheReadPerMillion: null,
+      cacheCreationPerMillion: null,
       perRequestUsd: low.fixedPriceUsd ?? low.costUsd,
       matchedTier: low.matchedTier,
     };
@@ -640,11 +645,39 @@ export function resolveBillingExpressionPricing(
   const output = Number.isFinite(outputPerMillion) && outputPerMillion >= 0 ? roundPrice(outputPerMillion) : null;
   if (input === null && output === null) return null;
 
+  // 缓存价同样用差分还原：`cr`（缓存读取）/ `cc`（缓存创建）各抬高一档取样。
+  // 表达式里没写这两项的站点，差分为 0，如实返回 0 而不是编一个倍数价。
+  const cacheReadPerMillion = differentiateTokenCoef(expression, base, 'cr', now);
+  const cacheCreationPerMillion = differentiateTokenCoef(expression, base, 'cc', now);
+
   return {
     unit: 'token',
     inputPerMillion: input,
     outputPerMillion: output,
+    cacheReadPerMillion,
+    cacheCreationPerMillion,
     perRequestUsd: null,
     matchedTier: low.matchedTier,
   };
+}
+
+/**
+ * 用差分还原某个 token 变量的单价（美元 / 1M）。
+ *
+ * 只在 `p`/`c` 固定在取样值时抬高一档，所以表达式里的固定项、阶梯、`min`/`max`
+ * 都会被消掉，剩下的就是该变量的线性系数。求值失败时返回 0（宁可显示 0 也不要
+ * 退回废掉的 model_ratio 编一个假价）。
+ */
+function differentiateTokenCoef(
+  expression: string,
+  base: BillingExpressionTokenEnv,
+  key: 'cr' | 'cc' | 'cc1h',
+  now: Date,
+): number {
+  const lowValue = evaluateBillingExpression(expression, { ...base, [key]: SAMPLE_BASE_TOKENS }, now);
+  const highValue = evaluateBillingExpression(expression, { ...base, [key]: SAMPLE_HIGH_TOKENS }, now);
+  if (!lowValue || !highValue) return 0;
+  const perMillion = (highValue.costUsd - lowValue.costUsd) / (SAMPLE_HIGH_TOKENS - SAMPLE_BASE_TOKENS) * 1_000_000;
+  if (!Number.isFinite(perMillion) || perMillion < 0) return 0;
+  return roundPrice(perMillion);
 }
