@@ -1253,6 +1253,18 @@ export const api = {
       body: JSON.stringify(data),
     }),
   getUpdateCenterStatus: () => request("/api/update-center/status"),
+  // 桌面端安装包列表（需要登录）：返回的 url 带短期签名，可以直接挂到 <a href> 上。
+  getDesktopReleases: () =>
+    request<{
+      releases: Array<{
+        name: string;
+        size: number;
+        updatedAt: string;
+        platform: 'windows' | 'macos' | 'linux' | 'unknown';
+        variant: 'desktop' | 'edge';
+        url: string;
+      }>;
+    }>("/api/desktop/releases"),
   saveUpdateCenterConfig: (data: any) =>
     request("/api/update-center/config", {
       method: "PUT",

@@ -34,10 +34,42 @@ const LINKS = [
   { label: '站点文档', href: SITE_DOCS_URL, icon: '📚' },
 ];
 
+type DesktopRelease = {
+  name: string;
+  size: number;
+  updatedAt: string;
+  platform: 'windows' | 'macos' | 'linux' | 'unknown';
+  variant: 'desktop' | 'edge';
+  url: string;
+};
+
+const RELEASE_PLATFORM_LABELS: Record<DesktopRelease['platform'], string> = {
+  windows: 'Windows',
+  macos: 'macOS',
+  linux: 'Linux',
+  unknown: '未知平台',
+};
+
+function formatReleaseSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '-';
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+function formatReleaseTime(iso: string): string {
+  const time = new Date(iso);
+  if (Number.isNaN(time.getTime())) return '-';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`;
+}
+
 export default function About() {
   const [currentVersion, setCurrentVersion] = useState(`v${VERSION}`);
   const [latestGitHubVersion, setLatestGitHubVersion] = useState('');
   const [latestDockerHubVersion, setLatestDockerHubVersion] = useState('');
+  const [releases, setReleases] = useState<DesktopRelease[] | null>(null);
+  const [releasesError, setReleasesError] = useState('');
   const [updateReminder, setUpdateReminder] = useState(() => buildUpdateReminder({
     currentVersion: VERSION,
     helper: null,
@@ -78,6 +110,27 @@ export default function About() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadReleases = async () => {
+      try {
+        const data = await api.getDesktopReleases();
+        if (cancelled) return;
+        setReleases(Array.isArray(data?.releases) ? data.releases : []);
+      } catch (error) {
+        if (cancelled) return;
+        setReleases([]);
+        setReleasesError((error as Error)?.message || '获取安装包列表失败');
+      }
+    };
+
+    void loadReleases();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="animate-fade-in" style={{ maxWidth: 860 }}>
       {/* Header */}
@@ -101,6 +154,64 @@ export default function About() {
         <div style={{ fontSize: 14, color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>
           {tr('中转站的中转站 — 将你在各处注册的 New API / One API / OneHub 等 AI 中转站聚合为一个统一网关。一个 API Key、一个入口，自动发现模型、智能路由、成本最优。')}
         </div>
+      </div>
+
+      {/* Desktop releases */}
+      <div className="card animate-slide-up stagger-1" style={{ padding: 22, marginBottom: 14 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{tr('桌面端安装包')}</h3>
+        <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)', lineHeight: 1.7, marginBottom: 12 }}>
+          {tr('边缘版（Metapi Edge）只做模型转发和使用日志，装在自己的电脑上，转发走本机网络，不占用服务器带宽。下载需要先登录本站。')}
+        </div>
+        {releases === null ? (
+          <div style={{ fontSize: 13, color: 'var(--color-text-tertiary)' }}>{tr('正在读取安装包列表…')}</div>
+        ) : releases.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--color-text-tertiary)', lineHeight: 1.7 }}>
+            {releasesError || tr('服务器上还没有构建好的安装包。在仓库根目录执行 npm run dist:desktop:edge:win 即可生成到 release/edge/。')}
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {releases.map((release) => (
+              <div
+                key={release.name}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                  padding: '10px 14px', borderRadius: 8,
+                  border: '1px solid var(--color-border-light)',
+                  background: 'var(--color-bg-secondary)',
+                }}
+              >
+                <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>{release.name}</div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)', marginTop: 2 }}>
+                    {tr(RELEASE_PLATFORM_LABELS[release.platform])}
+                    {' · '}
+                    {release.variant === 'edge' ? tr('边缘版') : tr('完整版')}
+                    {' · '}
+                    {formatReleaseSize(release.size)}
+                    {' · '}
+                    {formatReleaseTime(release.updatedAt)}
+                  </div>
+                </div>
+                <a
+                  href={release.url}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '7px 16px', borderRadius: 8,
+                    border: '1px solid var(--color-border-light)',
+                    background: 'var(--color-bg)',
+                    color: 'var(--color-text-primary)',
+                    textDecoration: 'none', fontSize: 13, fontWeight: 600,
+                    transition: 'border-color 0.15s',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--color-primary)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--color-border-light)')}
+                >
+                  ⬇ {tr('下载')}
+                </a>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card animate-slide-up stagger-1" style={{ padding: 22, marginBottom: 14 }}>

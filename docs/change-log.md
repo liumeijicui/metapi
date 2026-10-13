@@ -1,3 +1,47 @@
+### 106. 左侧菜单过长时无法滚动：补上滚动条并修正侧边栏高度
+
+- **类型**：缺陷修复（前端布局）
+- **需求来源**：本会话（用户：「左侧的菜单太多，但是又没有滚轴向下拉，这个能帮我加下滚轴」）
+- **一、现象与根因**
+  - 两个问题叠在一起，所以看起来「没有滚动条、底部菜单直接消失」：
+    1. `.sidebar` 的高度只减了顶栏（`calc(100vh - var(--topbar-height))`），**没减页签栏**。页签栏是后来加的（`--page-tabs-height: 40px`，`.app-layout` 的 `min-height` 里减了，侧边栏没跟上），于是侧边栏比可用高度高 40px，最后一项本来就顶出视口。
+    2. `.sidebar` 是 `overflow: hidden`，超出的部分既不滚动也不显示，等于被静默切掉。
+- **二、改动**
+  - `src/web/index.css`：`.sidebar` 高度与 `top` 都补上 `var(--page-tabs-height)`（移动端该变量为 0，不受影响）；新增 `.sidebar-scroll` 作为**独立滚动区**（`flex: 1 1 auto; min-height: 0; overflow-y: auto`），4px 悬浮式细滚动条，深色主题沿用变量。
+  - `src/web/App.tsx`：把菜单分组包进 `<nav className="sidebar-scroll">`。之所以不是直接给 `.sidebar` 加 `overflow-y: auto` —— 那样底部的「收起侧边栏」会跟着菜单一起滚走；现在它是 `margin-top: auto` 的兄弟节点，**永远钉在底部**，只有菜单区滚动。
+- **三、验证**
+  - `tsc -p tsconfig.web.json` 通过；`vitest run src/web/App.sidebar-mobile.test.tsx` 通过；`vite build` 通过；服务已重启。
+  - 真机（Playwright + 系统 chromium）：**矮视口 1280×620** 下 `.sidebar-scroll` 可滚距离 224px（内容 689 / 可视 465），滚到底后最后一项「通知设置」完全进入视口并可点击（URL 变为 `/settings/notify`），「收起侧边栏」始终可见且未被切（bottom 609 < 620）；**常规视口 1366×900** 下内容不超高、可滚距离为 0（不出现多余滚动条，也没有出现滚动条占位导致的抖动）。
+- **主要文件**：`src/web/App.tsx`、`src/web/index.css`
+- **状态**：已完成
+
+### 105. Linux 上交叉打 Windows 边缘版安装包 + 关于页下载入口（需登录）
+
+- **类型**：新增能力（打包链路 + 后端接口 + 前端入口）
+- **需求来源**：本会话（用户：「我们这个 exe 版本，能在 linux 打包出个 exe 的文件，然后 页面有个位置能下载这个 exe 吗？注意登录的才能下载」）
+- **一、Linux 上怎么把 Windows exe 打出来**
+  - 原来的 `scripts/desktop/packEdgeDesktop.mjs` 只会打本机平台，且开头必须启动本机 Electron 才能读到 ABI，而 CI 设了 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`（`node_modules/electron/dist/` 不存在），Linux 上根本跑不起来。现在：
+    - 新增 `--platform=` / `--arch=` / `--target=`；**ABI 改成直接读 `node_modules/electron/abi_version`**（读不到才回退启动 Electron），交叉打包时不再依赖本机 exe。
+    - 交叉打包时按目标平台下载 Electron 运行时 zip，并用 `-c.electronDist=<zip>` 传给 electron-builder；`better-sqlite3` 换成目标平台那份预编译包，本机加载不了就退化成**校验文件头**（PE `MZ` / ELF `\x7fELF`）。
+    - 默认镜像改走 npmmirror（`ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`），实测 GitHub 直连在这里只有 ~100KB/s 还会断流，镜像 12.9MB/s。
+  - 踩到并绕过的三个 Linux 特有坑，都写进了脚本注释：
+    1. **rcedit 用不了 32 位**：electron-builder 在非 Windows 上跑 wine 调 rcedit 时是「32 位优先」，而 EPEL7 只提供 64 位 wine（没有 `wine-core.i686`），`wine: Bad EXE format`。rcedit 改的是 PE 资源、与自身位数无关，脚本自动准备一份 64 位 rcedit 顶掉两个入口，交给 `ELECTRON_BUILDER_RCEDIT_PATH`。
+    2. **makensis 要 GLIBCXX_3.4.21**：CentOS 7 的 `/usr/lib64/libstdc++.so.6` 只到 3.4.19，makensis 直接退出，外层只看到一句 `Error: write EPIPE`，极难定位。脚本自动在候选目录里找带 3.4.21 的 libstdc++ 并通过 `LD_LIBRARY_PATH` 递出去（也可用 `METAPI_EDGE_LIBSTDCXX_DIR` 指定）。
+    3. **`nsis` 在 Linux 上确实打不了**：它要先生成临时安装器、再在本机把它跑起来导出 `uninstaller.exe`，那临时安装器是 32 位的，64 位 wine 做不到（`NsisTarget.computeScriptAndSignUninstaller`）。所以 `--target=zip` / `--target=portable` 可以，安装包请在 Windows 上出。
+- **二、产物与命令**
+  - `npm run dist:desktop:edge:win` → `release/edge/metapi-edge-1.3.0-win-x64.exe`（**portable 单文件，可直接下载运行**）；`npm run dist:desktop:edge:win:installer` 走原 nsis+zip（在 Windows 上执行或装了 32 位 wine 时用）。
+- **三、关于页下载入口（必须登录）**
+  - 新增 `GET /api/desktop/releases`（走全局 auth 中间件，**未登录 401**）返回 `release/` 与 `release/edge/` 下的安装包列表（文件名 / 大小 / 更新时间 / 平台 / 完整版-边缘版），并给每个包**签发一条 10 分钟有效期、带 HMAC-SHA256 签名的下载链接**。
+  - 新增 `GET /api/desktop/releases/download?file=&expires=&sig=`：把签名校验放在路由内，所以这条路径从全局 auth 中间件放行 —— 这样浏览器点 `<a href>` 就是原生下载，能带进度、不用把上百 MB 读进内存（移动端尤其重要），而「链接」本身只有登录后才拿得到。目录里列不出来的文件名一律 404，天然挡掉路径穿越。
+  - 关于页（`src/web/pages/About.tsx`）在 Hero 卡下面加了「桌面端安装包」卡片：一行一个包，显示平台 · 完整版/边缘版 · 大小 · 时间 + 下载按钮；还没打过包时显示提示与打包命令。
+- **四、验证**
+  - 单测 `src/server/desktop.releases.test.ts` 3 条：公开路由白名单（带 query 的下载地址放行、列表接口不放行）、票据的过期/换密钥/换文件名/非法 hex 全部拒绝、只扫描 `release`+`release/edge` 且只认安装包后缀。
+  - `tsc -p tsconfig.server.json` / `tsconfig.web.json` 通过；`vitest run src/web/i18n.test.ts src/server/desktop.releases.test.ts` = 8 passed；`vite build` 通过。
+  - 真机接口验证（服务已重启）：未登录 `GET /api/desktop/releases` → 401；带 token → 返回 `metapi-edge-1.3.0-win-x64.exe`（111,989,116 字节）与签名链接；该链接 `Range: 0-99` → 200 且 `content-length` / `content-disposition` 正确；篡改签名 → 403，过期 → 403，`file=../../etc/passwd` → 404，不存在的文件 → 404。
+  - 真机页面验证（Playwright + 系统 chromium）：中文/英文两种语言下卡片、文件名、元信息与「下载」按钮都正常（无 Untranslated），点「下载」触发浏览器下载且建议文件名为 `metapi-edge-1.3.0-win-x64.exe`。
+- **主要文件**：`scripts/desktop/packEdgeDesktop.mjs`、`package.json`、`src/server/desktop.ts`、`src/server/desktop.releases.test.ts`、`src/web/api.ts`、`src/web/pages/About.tsx`、`src/web/i18n.supplement.ts`
+- **状态**：已完成
+
 ### 104. 页签弹窗超出右边界：右边放不下改成向左展开
 
 - **类型**：缺陷修复（前端交互）

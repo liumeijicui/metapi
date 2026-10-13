@@ -646,13 +646,43 @@ body {
   padding: 12px 10px;
   transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
-  height: calc(100vh - var(--topbar-height));
+  /* 页签栏夹在顶栏和内容之间，高度必须一起减掉，否则底部会伸到视口外被切掉。 */
+  height: calc(100vh - var(--topbar-height) - var(--page-tabs-height));
   position: sticky;
-  top: var(--topbar-height);
+  top: calc(var(--topbar-height) + var(--page-tabs-height));
 }
 
 .sidebar.collapsed {
   width: var(--sidebar-collapsed-width);
+}
+
+/* 菜单滚动区：菜单比屏幕长时在这里滚，底部的「收起侧边栏」留在外面不跟着滚。 */
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  /* 滚动条别贴着菜单文字：往右借 4px 的内边距，菜单本身视觉宽度不变。 */
+  margin-right: -4px;
+  padding-right: 4px;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 2px;
+}
+
+.sidebar-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--color-text-muted);
 }
 
 .sidebar-group {

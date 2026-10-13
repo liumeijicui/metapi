@@ -1132,65 +1132,68 @@ function AppShell() {
           </MobileDrawer>
         ) : (
           <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-            {visibleSidebarGroups.map((group) => (
-              <div key={group.label} className="sidebar-group">
-                {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
-                {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.to === '/' || item.to === '/settings'}
-                    className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
-                    data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
-                    aria-label={sidebarCollapsed ? t(item.label) : undefined}
-                  >
-                    {item.icon}
-                    {!sidebarCollapsed && <span>{t(item.label)}</span>}
-                  </NavLink>
-                ))}
-              </div>
-            ))}
-            {edgeMode && !sidebarCollapsed ? (
-              <div className="edge-sidebar-panel">
-                {/* 对外发布的就是登录页里配的那台服务器：这里只显示 IP:端口，完整地址放 title。 */}
-                <div className="edge-sidebar-source" title={edgeStatus?.configSource.url || undefined}>
-                  {t('对外发布')}: {formatServerHostPort(edgeStatus?.configSource.url || '') || t('未配置')}
+            {/* 菜单项比屏幕高度长：这里单独做滚动区，底部的「收起侧边栏」固定在外面不跟着滚。 */}
+            <nav className="sidebar-scroll">
+              {visibleSidebarGroups.map((group) => (
+                <div key={group.label} className="sidebar-group">
+                  {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
+                  {group.items.map((item) => (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.to === '/' || item.to === '/settings'}
+                      className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                      data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
+                      aria-label={sidebarCollapsed ? t(item.label) : undefined}
+                    >
+                      {item.icon}
+                      {!sidebarCollapsed && <span>{t(item.label)}</span>}
+                    </NavLink>
+                  ))}
                 </div>
-                {edgeStatus?.port ? (
-                  // 本机这台的转发入口：客户端的 API 地址就填它（+ /v1）。
-                  <div className="edge-sidebar-source" title={`http://127.0.0.1:${edgeStatus.port}/v1`}>
-                    {t('本地转发')}: 127.0.0.1:{edgeStatus.port}
+              ))}
+              {edgeMode && !sidebarCollapsed ? (
+                <div className="edge-sidebar-panel">
+                  {/* 对外发布的就是登录页里配的那台服务器：这里只显示 IP:端口，完整地址放 title。 */}
+                  <div className="edge-sidebar-source" title={edgeStatus?.configSource.url || undefined}>
+                    {t('对外发布')}: {formatServerHostPort(edgeStatus?.configSource.url || '') || t('未配置')}
                   </div>
-                ) : null}
-                <div className="edge-sidebar-source">
-                  {t('上次同步')}: {formatEdgeSyncTime(edgeStatus?.lastSyncAt) || t('尚未同步')}
-                </div>
-                {edgeStatus?.lastSyncError ? (
-                  <div className="edge-sidebar-source" style={{ color: 'var(--color-danger)' }}>
-                    {edgeStatus.lastSyncError}
+                  {edgeStatus?.port ? (
+                    // 本机这台的转发入口：客户端的 API 地址就填它（+ /v1）。
+                    <div className="edge-sidebar-source" title={`http://127.0.0.1:${edgeStatus.port}/v1`}>
+                      {t('本地转发')}: 127.0.0.1:{edgeStatus.port}
+                    </div>
+                  ) : null}
+                  <div className="edge-sidebar-source">
+                    {t('上次同步')}: {formatEdgeSyncTime(edgeStatus?.lastSyncAt) || t('尚未同步')}
                   </div>
-                ) : null}
-                <div className="edge-sidebar-actions">
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    style={{ fontSize: 12 }}
-                    disabled={edgeSyncing}
-                    onClick={() => void runEdgeSync()}
-                  >
-                    {edgeSyncing ? t('同步中…') : t('立即同步')}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setEdgeSettingsOpen(true)}
-                  >
-                    {t('同步设置')}
-                  </button>
+                  {edgeStatus?.lastSyncError ? (
+                    <div className="edge-sidebar-source" style={{ color: 'var(--color-danger)' }}>
+                      {edgeStatus.lastSyncError}
+                    </div>
+                  ) : null}
+                  <div className="edge-sidebar-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12 }}
+                      disabled={edgeSyncing}
+                      onClick={() => void runEdgeSync()}
+                    >
+                      {edgeSyncing ? t('同步中…') : t('立即同步')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12 }}
+                      onClick={() => setEdgeSettingsOpen(true)}
+                    >
+                      {t('同步设置')}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ) : null}
+              ) : null}
+            </nav>
             <button className="sidebar-collapse-btn" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.3s ease', flexShrink: 0 }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />

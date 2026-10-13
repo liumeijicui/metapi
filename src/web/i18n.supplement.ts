@@ -1023,4 +1023,13 @@ export const zhToEnSupplemental: Record<string, string> = {
   '关闭其他标签': 'Close other tabs',
   '关闭全部标签': 'Close all tabs',
   '已刷新该菜单': 'Menu refreshed',
+  // ==== 桌面端安装包下载（关于页）====
+  '桌面端安装包': 'Desktop installers',
+  '边缘版（Metapi Edge）只做模型转发和使用日志，装在自己的电脑上，转发走本机网络，不占用服务器带宽。下载需要先登录本站。': 'Metapi Edge only handles model forwarding and usage logs. Install it on your own computer so forwarding goes through your local network instead of the server bandwidth. Sign in to download.',
+  '正在读取安装包列表…': 'Loading installers…',
+  '服务器上还没有构建好的安装包。在仓库根目录执行 npm run dist:desktop:edge:win 即可生成到 release/edge/。': 'No installer has been built on this server yet. Run npm run dist:desktop:edge:win in the repo root to generate one under release/edge/.',
+  '边缘版': 'Edge',
+  '完整版': 'Full',
+  '未知平台': 'Unknown platform',
+  '下载': 'Download',
 };
