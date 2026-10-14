@@ -1,3 +1,24 @@
+### 109. 去掉顶部页签栏（回退 #103 / #104）：菜单回到「点一个看一个」
+
+- **类型**：功能删除（前端导航壳；无后端改动）
+- **需求来源**：本会话（用户：「页签栏加之后感觉更难用了，帮我去掉吧，可以看 git 改动的代码」）
+- **一、去掉了什么**
+  - 删除文件：`src/web/components/PageTabs.tsx`、`src/web/pageTabs.ts`，以及随附的 4 个测试（`App.page-tabs.test.tsx`、`components/page-tabs.test.tsx`、`pageTabs.registry.test.ts`、`pageTabs.test.ts`）。
+  - `src/web/App.tsx`：摘掉 `PageTabs` 与 `pageTabs.js` 的 import、`pageTabs` / `pageTabRefreshTokens` 两个 state、`activeTabPath`、四个 `handleTab*` 回调、`<PageTabs />` 渲染块，以及**只为页签而引入的 `useNavigate`**；`PageTransition` 的 `refreshToken` 参数一并去掉，`key` 回到 `location.pathname`（#103 之前的行为）。
+  - `src/web/index.css`：删除 `--page-tabs-height` 变量、768px 媒体查询里的 `0px` 覆盖，以及整块 `.page-tabs*` 样式（约 170 行）；`.sidebar` 的 `height` / `top`、`.app-layout` 的 `min-height` 恢复成只减顶栏的算式，#105 之前的样子。
+  - `src/web/i18n.supplement.ts`：删掉 8 条页签专用英文词条（已打开的菜单 / 单击切换，双击刷新 / 标签操作 / 刷新该标签 / 关闭该标签 / 关闭其他标签 / 关闭全部标签 / 已刷新该菜单）。
+  - 变更记录里删掉 #103、#104 两条（条目编号保留空洞，不重排，避免以后对不上号）。
+- **二、为什么手工摘除，没有 `git revert`**
+  - 页签两笔提交之后还有 #105（桌面端安装包下载 + 侧边栏滚动，改了 `App.tsx` / `index.css`）和 #106~#108（一直在 `docs/change-log.md` 顶部追加条目）。`git revert 9903122` 一上来就在变更记录上冲突（要删的 #104 已被后加的 #105~#108 顶开），而 `App.tsx` / `index.css` 两处也必须和 #105 的改动共存。
+  - 手工摘除能把「与页签无关的改动原样保留」这件事说清楚：**只删页签自己的代码，不碰 #105 的桌面端下载入口，也不碰 #106 的侧边栏滚动修复**。改动历史仍完整（`1b28ad8` / `9903122` 在案，想恢复直接 revert 这两笔即可）。
+- **三、遗留与兼容**
+  - 浏览器 `localStorage` 里可能残留 `metapi.pageTabs.v1`（旧版本写入的已打开路径，≤20 条）。现在已无任何代码读写这个键，属于无害死数据；不清除也不影响渲染，所以不做迁移。旧 exe（边缘版）内嵌的前端仍是带页签的版本，需要**重新打包才会去掉**。
+- **四、验证**
+  - 全仓 grep 确认无残留引用：`PageTabs` / `pageTabs` / `page-tabs` / `--page-tabs-height` 在源码、脚本、配置里 0 命中（仅 `release/`、`dist/` 里的旧构建产物还有效，属重打包产物）。
+  - `npx vitest run src/web`、`tsc -p tsconfig.web.json --noEmit`、`npx vite build` 通过；服务重启后 Playwright 真机确认顶部不再有标签栏、内容区没有 40px 空隙、侧边栏「收起侧边栏」仍钉在底部。
+- **主要文件**：`src/web/App.tsx`、`src/web/index.css`、`src/web/i18n.supplement.ts`（删除：`src/web/components/PageTabs.tsx`、`src/web/pageTabs.ts` 及 4 个测试）
+- **状态**：已完成
+
 ### 108. 模型监控筛选框改成「在页面上直接打字就能搜」的可输入下拉
 
 - **类型**：交互改进 + 缺陷修复（模型监控 → 筛选栏）
@@ -54,7 +75,7 @@
 - **需求来源**：本会话（用户：「左侧的菜单太多，但是又没有滚轴向下拉，这个能帮我加下滚轴」）
 - **一、现象与根因**
   - 两个问题叠在一起，所以看起来「没有滚动条、底部菜单直接消失」：
-    1. `.sidebar` 的高度只减了顶栏（`calc(100vh - var(--topbar-height))`），**没减页签栏**。页签栏是后来加的（`--page-tabs-height: 40px`，`.app-layout` 的 `min-height` 里减了，侧边栏没跟上），于是侧边栏比可用高度高 40px，最后一项本来就顶出视口。
+    1. `.sidebar` 的高度只减了顶栏（`calc(100vh - var(--topbar-height))`），**没减页签栏**。页签栏是后来加的（`--page-tabs-height: 40px`，`.app-layout` 的 `min-height` 里减了，侧边栏没跟上），于是侧边栏比可用高度高 40px，最后一项本来就顶出视口。（页签栏已在 #109 整体移除，这里的高度算式随之回到只减顶栏；`.sidebar-scroll` 这个独立滚动区不受影响。）
     2. `.sidebar` 是 `overflow: hidden`，超出的部分既不滚动也不显示，等于被静默切掉。
 - **二、改动**
   - `src/web/index.css`：`.sidebar` 高度与 `top` 都补上 `var(--page-tabs-height)`（移动端该变量为 0，不受影响）；新增 `.sidebar-scroll` 作为**独立滚动区**（`flex: 1 1 auto; min-height: 0; overflow-y: auto`），4px 悬浮式细滚动条，深色主题沿用变量。
@@ -90,49 +111,6 @@
   - 真机接口验证（服务已重启）：未登录 `GET /api/desktop/releases` → 401；带 token → 返回 `metapi-edge-1.3.0-win-x64.exe`（111,989,116 字节）与签名链接；该链接 `Range: 0-99` → 200 且 `content-length` / `content-disposition` 正确；篡改签名 → 403，过期 → 403，`file=../../etc/passwd` → 404，不存在的文件 → 404。
   - 真机页面验证（Playwright + 系统 chromium）：中文/英文两种语言下卡片、文件名、元信息与「下载」按钮都正常（无 Untranslated），点「下载」触发浏览器下载且建议文件名为 `metapi-edge-1.3.0-win-x64.exe`。
 - **主要文件**：`scripts/desktop/packEdgeDesktop.mjs`、`package.json`、`src/server/desktop.ts`、`src/server/desktop.releases.test.ts`、`src/web/api.ts`、`src/web/pages/About.tsx`、`src/web/i18n.supplement.ts`
-- **状态**：已完成
-
-### 104. 页签弹窗超出右边界：右边放不下改成向左展开
-
-- **类型**：缺陷修复（前端交互）
-- **需求来源**：本会话（用户：「尾部常驻一个「⋯」这个弹窗超出右边的页面了，应该向左边弹窗」）
-- **一、现象与根因**
-  - 弹窗是 `position: fixed` + 锚点坐标定位，但**永远从锚点向右下展开**（第一版只在量到尺寸后往视口里夹一次）。锚点是尾部那个「⋯」按钮或最右侧标签右键时的光标，本身已经贴着右边缘，于是弹窗直接顶出视口右侧。
-  - 顺带发现第二个问题：修复前为了「页面滚动时菜单不会跟内容错位」监听了 `window` 的捕获阶段 `scroll`。实测点击「⋯」时浏览器会把按钮滚进视野，Chrome 会补发一次 document 级 `scroll`，于是**刚打开的菜单立刻被自己关掉**（真机上 `menu+` 之后 3ms 就出现 `menu-`）。第一版改成量尺寸重排后这个坑才暴露出来。
-- **二、改动**
-  - 新增纯函数 `placeTabMenu()`（`src/web/pageTabs.ts`）：右边放不下就翻转成**向左展开 —— 弹窗右边缘贴住锚点右边缘**（尾部「⋯」按钮正是这个分支），左侧再按 `margin` 夹一次；纵向默认贴锚点下方 `6px`，下边放不下就上抬。定位数学从组件里挪出来，可以直接单测。
-  - `components/PageTabs.tsx`：菜单状态改为记录锚点三边（`anchorLeft` / `anchorRight` / `anchorBottom`），弹窗挂载后量一次尺寸交给 `placeTabMenu()` 算最终落点（尺寸不变就不 setState，不会来回抖）；宽度量到前先用 `TAB_MENU_FALLBACK_WIDTH` 估位，避免第一帧从视口外飞进来。
-  - **滚动收起改成只监听标签条自己**（`stripRef` 上的 `scroll`）：标签栏是 sticky、弹窗是 fixed，页面纵向滚动时两者一起走不会错位，本来就不需要收起；而「点⋯时浏览器补发 document scroll」的误伤正好被这条去掉。标签条横向滚动时锚点确实会从弹窗底下滑走，仍然收起。
-- **三、验证**
-  - `placeTabMenu` 新增 7 条纯函数用例：放得下时向右、贴右边缘时左展开且右边缘对齐、右键用光标当右边缘、窄视口仍夹回边距、左越界夹回、下越界上抬、尺寸缺失时用兜底值。`page-tabs.test.tsx` 再加 3 条：**断言没有把 scroll 监听到 document / window 上**、标签条滚动才收起、贴右边缘时左展开（`createNodeMock` 喂弹窗尺寸）。
-  - 相关测试 `pageTabs.test.ts` / `components/page-tabs.test.tsx` / `pageTabs.registry.test.ts` / `App.page-tabs.test.tsx` = 53 passed；`npx vitest run src/web` = 516 passed / 1 failed（`accounts.rebind-panel-focus` 既有失败，与本改动无关）；`tsc --noEmit`（web / web-test）通过；`npx vite build` 通过；`repo:drift-check` Violations: 0。
-  - 真机（Playwright + 系统 chromium，服务已重启）：在 1440 / 1024 / 820 三种视口下用真实 `clientX = 视口宽 - 10` 触发右键，弹窗右边缘分别落在 1430 / 1014 / 810，**正好等于光标 x**，且四面都在视口内；尾部「⋯」在纵向滚动页面后再点也不被误关（修复前 3ms 内自杀）；菜单项「关闭全部标签」点击后只剩 `["/"]` 且回到首页。
-- **主要文件**：`src/web/pageTabs.ts`、`src/web/components/PageTabs.tsx`、`src/web/pageTabs.test.ts`、`src/web/components/page-tabs.test.tsx`
-- **状态**：已完成
-
-### 103. 顶部多页签：菜单打开后留标签，双击刷新，可关闭当前 / 其他 / 全部
-
-- **类型**：界面功能（前端导航壳，无后端改动）
-- **需求来源**：本会话（用户：「我想把菜单打开后顶部标签显示菜单的那种，双击标签能刷新菜单数据，可以关闭全部、关闭其他等功能」）
-- **一、做了什么**
-  - 顶部栏下方新增一条页签栏（`components/PageTabs.tsx`）：打开过哪个菜单就留一个标签，当前菜单高亮；标签过多时横向滚动，尾部固定一个「⋯」出菜单。
-  - **双击标签 = 刷新该菜单数据**：给该页签的刷新计数 +1，`PageTransition` 的 `key` 由 `路径#计数` 组成，key 一变整页重新挂载，页面自身的 `useEffect` 就会重新拉数据（不是浏览器 reload，不闪白、不丢登录态），并弹一条「已刷新该菜单」。
-  - **右键标签 / 点「⋯」出菜单**：刷新该标签、关闭该标签、关闭其他标签、关闭全部标签；首页标签固定，既不显示关闭按钮，菜单里的「关闭该标签」也是禁用态。
-  - 关闭后的落点：关的是当前标签就往右退，右边没有就往左退；「关闭其他标签」留在被点的那个，「关闭全部标签」回首页。
-  - 标签栏**只在桌面端显示**（`isMobile` 时不渲染，移动端继续用汉堡抽屉导航）；打开过哪些标签记在 `localStorage`（`metapi.pageTabs.v1`，只存路径、上限 20 个、自动跳过不认识的路径），刷新浏览器后标签还在。
-- **二、为什么这么实现**
-  - 逻辑与渲染分开：`pageTabs.ts` 只放纯函数（路径归一化、开关标签、关闭后落点、读写 localStorage），可以在 node 环境下直接单测；`components/PageTabs.tsx` 只管渲染与交互，路由与状态留在 `App.tsx`，没有引入新的状态库。
-  - 标签文案不落 localStorage，只存路径，渲染时按 `PAGE_TAB_LABELS` 现取 —— 以后改菜单文案不用迁移用户本地数据。
-  - 双击刷新用「换 key 重新挂载」而不是 `location.reload()`：前者只重跑该页面自己的取数逻辑，后者会把整个 SPA 重新加载一遍（侧边栏、通知轮询、边缘状态探测全部重来）。
-- **三、验证**
-  - 单测新增 3 个文件共 36 条：`pageTabs.test.ts`（27 条：路径归一化 / 关闭语义 / 上限裁剪 / 存储读写与异常兜底）、`pageTabs.registry.test.ts`（3 条：**注册表与 `App.tsx` 的侧边栏、顶部导航、`<Route>` 三处逐项比对**，以后加菜单忘了补页签标题会直接红）、`components/page-tabs.test.tsx`（6 条：渲染 / 单击切换 / 双击刷新 / X 关闭不触发切换 / 首页不可关 / 右键菜单四项）。
-  - 集成测试 `App.page-tabs.test.tsx`（5 条）：`MemoryRouter` 驱动真实 `App`，验证「打开菜单自动加标签 + 写入 localStorage」「按 localStorage 恢复标签」「关闭其他只留首页与被点项」「双击后子页面挂载次数 1→2（确实重新拉数据）」「移动端不渲染标签栏」。
-  - `npx vitest run src/web` = 504 passed / 1 failed（`accounts.rebind-panel-focus` 是既有失败，与本改动无关）；`tsc --noEmit` 三个 tsconfig 全通过；`npx vite build` 通过；`npm run repo:drift-check` Violations: 0。
-  - 真机（Playwright + 系统 chromium 打 `127.0.0.1:81`，服务已重启）：打开 `/logs`、`/monitor` 后标签依次变成 `["/","/logs","/monitor"]`；双击当前标签后观察到该页重新发了一次取数请求（`/api/model-monitor/overview`）并弹出刷新提示；单击标签切 URL；标签上的 X 关掉 `/logs` 后停在 `/monitor`；右键菜单四项齐全；「关闭其他标签」后只剩 `["/","/monitor"]`；「关闭全部标签」后回首页且 localStorage 变成 `["/"]`；首页标签没有关闭按钮；直接访问 `/sites`（模拟刷新）后标签恢复为 `["/","/logs","/monitor","/sites"]`；视口切到 520px 后标签栏消失。中英两种语言与截图都核对过。
-  - 补了英文词条（已打开的菜单、单击切换双击刷新、标签操作、刷新/关闭该标签、关闭其他/全部标签、已刷新该菜单）。
-- **四、exe（边缘版）**
-  - 不用改代码，**重新打包即可**：exe 的前端就是同一份 `dist/**/*`（`electron-builder.yml` 的 `files`），而 `App.tsx` 里 `isMobile` / 边缘模式都不影响这条页签栏（exe 只有「模型转发」「使用日志」两个菜单，标签数自然很少）。exe 要拿到新界面需重新执行 `npm run dist:desktop:edge`（Windows 包只能在 Windows 上打）。
-- **主要文件**：`src/web/pageTabs.ts`、`src/web/components/PageTabs.tsx`、`src/web/App.tsx`、`src/web/index.css`、`src/web/i18n.supplement.ts`、`src/web/pageTabs.test.ts`、`src/web/pageTabs.registry.test.ts`、`src/web/components/page-tabs.test.tsx`、`src/web/App.page-tabs.test.tsx`
 - **状态**：已完成
 
 ### 102. 会话通道并发上限默认改为 0（不限制任何并发）

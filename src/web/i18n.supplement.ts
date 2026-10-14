@@ -1017,15 +1017,6 @@ export const zhToEnSupplemental: Record<string, string> = {
   '当前已开启': 'Enabled',
   '当前未开启': 'Disabled',
   '最近追踪': 'Recent traces',
-  // ==== 顶部多页签 ====
-  '已打开的菜单': 'Open menus',
-  '单击切换，双击刷新': 'Click to switch, double-click to refresh',
-  '标签操作': 'Tab actions',
-  '刷新该标签': 'Refresh this tab',
-  '关闭该标签': 'Close this tab',
-  '关闭其他标签': 'Close other tabs',
-  '关闭全部标签': 'Close all tabs',
-  '已刷新该菜单': 'Menu refreshed',
   // ==== 桌面端安装包下载（关于页）====
   '桌面端安装包': 'Desktop installers',
   '边缘版（Metapi Edge）只做模型转发和使用日志，装在自己的电脑上，转发走本机网络，不占用服务器带宽。下载需要先登录本站。': 'Metapi Edge only handles model forwarding and usage logs. Install it on your own computer so forwarding goes through your local network instead of the server bandwidth. Sign in to download.',
