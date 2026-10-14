@@ -1,3 +1,25 @@
+### 111. 修「真实 codex 走 /responses 回 400 invalid_request」：历史里的 custom_tool_call 也要降级
+
+- **类型**：缺陷修复（Responses 转发；服务端 + 桌面边缘版共用同一份 `src/server`）
+- **需求来源**：本会话（用户：「对话测试可以，为啥真实使用会报这个 400 错误……站点: 君の公益 / 上游 /v1/responses / Upstream returned HTTP 400: invalid_request」）
+- **一、为什么「对话测试能过、真实使用 400」**
+  - 对话测试发的是「一句话 + 少量字段」的新会话；真实 codex 每一轮都会把**上一轮的助手输出整段回放**（`input` 数组里带 `custom_tool_call` / `custom_tool_call_output`）。
+  - #98 只降级了 **tools 声明**（custom → function），没有管 `input` 里的历史 item，于是薄壳站点的 `/v1/responses` 一见到 `custom_tool_call` 就 400。
+  - 直连君の公益（muyuan.do，账号 3145215575 / `deepseek-v4.1-flash`）逐项实测出的规则：
+    - 历史带 `custom_tool_call` → **400 `{"error":{"message":"invalid_request","type":"upstream_error"}}`**；id 用 `fc_` 还是 `ctc_`、字段用 `input` 还是 `arguments`、tools 里有没有对应声明，全都一样 400（同一个「invalid_request」就是用户看到的那条）。
+    - 同一段历史换成 `function_call` / `function_call_output` → **200**。
+    - 顺带确认：`reasoning`、assistant `output_text`、`client_metadata`、`prompt_cache_key`、`text.verbosity`、`truncation` 这些都不触发，只是历史 item 类型的问题。
+- **二、修复**
+  - `downgradeResponsesCustomToolDeclarations` 现在同时降级**声明和历史**：新增 `downgradeResponsesCustomToolCallHistory`，把 `input` 里「被降级的工具名」对应的 `custom_tool_call` 改成 `function_call`（freeform `input` 用 `wrapCustomToolCallArguments` 包成声明里那唯一的 `input` 字符串参数），配套的 `custom_tool_call_output` 改成 `function_call_output`（按 `call_id` 配对，只改真正降级过的那些）。回程 `convertDowngradedFunctionCallItem` 按工具名还原，客户端拿到的仍是它自己声明的 `custom_tool_call`，行为不变。
+  - 因为「前缀按 item 类型校验」是两个方向都成立的，换类型时 id 前缀要一起换：新增 `toResponsesFunctionCallItemId`（`ctc_`/`ct_`/`call_`/`toolu_` → `fc_`），与 #110 的 `toResponsesCustomToolCallItemId` 对称；引用被改名 item 的 `item_reference` / `reference.id` 一并跟着改。写完历史降级后才跑 #110 的前缀归一，两处不会互相打架。
+  - 只在「该站点不认 custom 工具」（`resolveUnsupportedResponsesCustomToolNames` 非空）时才降级，原生 Responses 站点（openai / codex 平台）走的 `passthrough` 分支完全不受影响。
+- **三、验证**
+  - 单测新增 3 例（历史降级后类型/`arguments`/id 前缀都对且原对象不被改坏、站点认的 `apply_patch` 历史不动、`item_reference` 跟着改名、无匹配时不做无谓拷贝）。`src/server/transformers/openai/responses` + `upstreamRequestBuilder.test.ts` 共 185 例全绿；`tsc -p tsconfig.server.json` 通过。
+  - 端到端（小请求省额度）：把「`message` + `custom_tool_call(id=ctc_tmp_1)` + `custom_tool_call_output`」这段历史经本网关分别强制打到君の公益（channel 3798）与冰山（channel 3797）——**两边都 200**（此前分别是 400 `invalid_request` / 400 `invalid_id_prefix`），日志落 `status=success`。
+  - 全量 `src/server`：仅剩 3 条与本次无关的既有失败（`db/index.default-path`、`factoryResetService`、`siteProxy`，还原本次改动后同样失败）。
+- **主要文件**：`src/server/transformers/openai/responses/customToolDowngrade.ts`、`src/server/transformers/openai/responses/customToolDowngrade.test.ts`
+- **状态**：已完成（exe 边缘版需重新打包才带上）
+
 ### 110. 修 `custom_tool_call` 的 item id 前缀（回放历史被上游 400 `invalid_id_prefix`）
 
 - **类型**：缺陷修复（Responses 转发；服务端 + 桌面边缘版共用同一份 `src/server`）

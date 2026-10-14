@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   convertDowngradedFunctionCallItem,
   convertDowngradedFunctionCallsInResponsesPayload,
+  downgradeResponsesCustomToolCallHistory,
   downgradeResponsesCustomToolDeclarations,
   normalizeResponsesCustomToolCallItemIds,
+  toResponsesFunctionCallItemId,
   toResponsesCustomToolCallItemId,
 } from './customToolDowngrade.js';
 
@@ -179,5 +181,77 @@ describe('customToolDowngrade', () => {
       id: 'fc_tmp_ukxb1i9c3k',
       call_id: 'call_1',
     });
+  });
+
+  it('声明降级时，历史里的 custom_tool_call / output 一起降级成 function（君の公益 400 那条）', () => {
+    const body = {
+      model: 'deepseek-v4.1-flash',
+      tools: [execCustomTool, applyPatchCustomTool],
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        { type: 'custom_tool_call', id: 'ctc_tmp_1', call_id: 'call_1', name: 'exec', input: 'ls -la' },
+        { type: 'custom_tool_call_output', call_id: 'call_1', output: 'ok' },
+        { type: 'custom_tool_call', id: 'ctc_2', call_id: 'call_2', name: 'apply_patch', input: 'PATCH' },
+        { type: 'custom_tool_call_output', call_id: 'call_2', output: 'done' },
+      ],
+    };
+
+    const downgraded = downgradeResponsesCustomToolDeclarations(body, ['exec']) as any;
+
+    // exec 被降级：调用变成 function_call，freeform input 包进唯一的 input 参数。
+    expect(downgraded.input[1]).toMatchObject({
+      type: 'function_call',
+      name: 'exec',
+      call_id: 'call_1',
+      arguments: '{"input":"ls -la"}',
+    });
+    // 类型换成 function_call，id 前缀也要跟着从 ctc_ 换成 fc_（上游按类型校验前缀，
+    // 配错会回 `Expected an ID that begins with 'fc'`）。
+    expect(downgraded.input[1].id).toBe('fc_tmp_1');
+    expect(downgraded.input[1].input).toBeUndefined();
+    expect(downgraded.input[2]).toMatchObject({ type: 'function_call_output', call_id: 'call_1' });
+    // 站点认的 apply_patch 不降级，它的调用和输出都别动。
+    expect(downgraded.input[3]).toMatchObject({ type: 'custom_tool_call', name: 'apply_patch' });
+    expect(downgraded.input[4]).toMatchObject({ type: 'custom_tool_call_output' });
+    // 原对象不能被改坏。
+    expect(body.input[1]).toMatchObject({ type: 'custom_tool_call', input: 'ls -la' });
+  });
+
+  it('历史降级时 function_call 的 id 前缀归一到 fc_，item_reference 跟着改', () => {
+    expect(toResponsesFunctionCallItemId('ctc_tmp_1')).toBe('fc_tmp_1');
+    expect(toResponsesFunctionCallItemId('fc_1')).toBe('fc_1');
+    expect(toResponsesFunctionCallItemId('call_1')).toBe('fc_1');
+    expect(toResponsesFunctionCallItemId('whatever')).toBe('fc_whatever');
+
+    const body = {
+      tools: [execCustomTool],
+      input: [
+        { type: 'custom_tool_call', id: 'ctc_1', call_id: 'call_1', name: 'exec', input: 'ls' },
+        { type: 'custom_tool_call_output', call_id: 'call_1', item_reference: 'ctc_1', output: 'ok' },
+      ],
+    };
+    const downgraded = downgradeResponsesCustomToolDeclarations(body, ['exec']) as any;
+
+    expect(downgraded.input[0]).toMatchObject({ type: 'function_call', id: 'fc_1', call_id: 'call_1' });
+    expect(downgraded.input[1]).toMatchObject({
+      type: 'function_call_output',
+      call_id: 'call_1',
+      item_reference: 'fc_1',
+    });
+  });
+
+  it('历史降级只认名字：没有匹配调用时不动 output，没有历史时也不拷贝', () => {
+    // output 的 call_id 对不上任何被降级的调用 → 保持 custom_tool_call_output。
+    const stray = {
+      input: [{ type: 'custom_tool_call_output', call_id: 'other', output: 'ok' }],
+    };
+    expect(downgradeResponsesCustomToolCallHistory(stray, ['exec'])).toBe(stray);
+
+    // 没有 input / 没有要降级的工具时原样返回。
+    const noInput = { tools: [] };
+    expect(downgradeResponsesCustomToolCallHistory(noInput, ['exec'])).toBe(noInput);
+    const untouched = { input: [{ type: 'message', role: 'user', content: 'hi' }] };
+    expect(downgradeResponsesCustomToolCallHistory(untouched, ['exec'])).toBe(untouched);
+    expect(downgradeResponsesCustomToolCallHistory(untouched, [])).toBe(untouched);
   });
 });
