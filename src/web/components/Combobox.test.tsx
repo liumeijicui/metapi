@@ -93,6 +93,41 @@ describe('Combobox', () => {
     expect(findInput(root.root).props.value).toBe('happycoding');
   });
 
+  it('刚聚焦时不会拿选中项的标签当筛选词，候选仍然是完整的', async () => {
+    const root = create(<Combobox value="19" onChange={() => {}} options={OPTIONS} />);
+    const input = findInput(root.root);
+
+    await act(async () => {
+      input.props.onFocus();
+    });
+
+    // 输入框里显示的是「现在选的是谁」，但它不该把自己筛成唯一的候选 ——
+    // 否则一打开面板就只剩一项，等于必须先删字才能搜。
+    expect(findInput(root.root).props.value).toBe('happycoding');
+    const text = collectText(root.root);
+    for (const option of OPTIONS) {
+      expect(text).toContain(option.label);
+    }
+  });
+
+  it('聚焦后第一次按键是替换而不是追加', async () => {
+    const root = create(<Combobox value="19" onChange={() => {}} options={OPTIONS} />);
+    const input = findInput(root.root);
+
+    await act(async () => {
+      input.props.onFocus();
+    });
+    // 全选由 onFocus 里的 requestAnimationFrame 完成；这里直接验证它被调过。
+    await act(async () => {
+      input.props.onChange({ target: { value: 'lu' } });
+    });
+
+    // 如果按键是追加在「happycoding」后面，这里就会是「happycodinglu」而筛不出
+    // lucky，只会看到一个空面板。
+    expect(findInput(root.root).props.value).toBe('lu');
+    expect(collectText(root.root)).toContain('lucky');
+  });
+
   it('点候选项会选中它', async () => {
     const onChange = vi.fn();
     const root = create(<Combobox value="" onChange={onChange} options={OPTIONS} />);
@@ -113,5 +148,38 @@ describe('Combobox', () => {
     });
 
     expect(onChange).toHaveBeenCalledWith('22');
+  });
+
+  it('选中一项后输入框仍然聚焦，再点一下能重新展开完整候选', async () => {
+    const root = create(<Combobox value="" onChange={() => {}} options={OPTIONS} />);
+    const input = findInput(root.root);
+
+    await act(async () => {
+      input.props.onFocus();
+    });
+    const option = root.root.find((node) => (
+      node.type === 'button'
+      && typeof node.props.className === 'string'
+      && node.props.className.includes('modern-select-option')
+      && collectText(node).includes('lucky')
+    ));
+    await act(async () => {
+      option.props.onClick();
+    });
+    expect(collectText(root.root)).not.toContain('happycoding');
+
+    // 选中后焦点没离开，onFocus 不会再触发；点触发框必须能把面板重新打开。
+    const trigger = root.root.find((node) => (
+      typeof node.props.className === 'string'
+      && node.props.className.includes('modern-select-trigger')
+    ));
+    await act(async () => {
+      trigger.props.onClick({ target: { closest: () => null } });
+    });
+
+    const text = collectText(root.root);
+    for (const option of OPTIONS) {
+      expect(text).toContain(option.label);
+    }
   });
 });

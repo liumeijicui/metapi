@@ -33,9 +33,23 @@ function normalize(value: string): string {
   return value.trim().toLowerCase();
 }
 
+// 测试环境（react-test-renderer）和 SSR 下没有 requestAnimationFrame，
+// 用 setTimeout 兜底，语义一致：把回调推迟到当前这一帧之后。
+const scheduleFrame: (callback: () => void) => void =
+  typeof requestAnimationFrame === 'function'
+    ? (callback) => requestAnimationFrame(callback)
+    : (callback) => {
+        setTimeout(callback, 0);
+      };
+
 /**
  * 可搜索 + 可直接输入的下拉框（combobox）。
- * 相比 ModernSelect：触发器本身就是一个输入框，既能下拉搜索，也能敲字填充。
+ * 相比 ModernSelect：触发器本身就是一个输入框，聚焦后当前页直接打字就能筛，
+ * 不用「先点开面板、再点进面板里的搜索框」。
+ *
+ * 聚焦时输入框显示的是选中项标签（保持「现在选的是谁」可见），但那只是展示，
+ * **不算筛选词** —— 只有用户真的敲了字才开始过滤，否则一打开就会被自己的标签
+ * 筛成只剩一项。同时聚焦会把已有文字全选，第一次按键直接替换掉。
  */
 export default function Combobox({
   value,
@@ -53,10 +67,14 @@ export default function Combobox({
 }: ComboboxProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  // 面板里显示的文字到底是「用户敲的」还是「选中项的标签」。两者的区别很关键：
+  // 展示标签时不能拿它当筛选词，否则一打开就被自己的标签过滤成只剩一项。
+  const [edited, setEdited] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const latestRef = useRef({ displayText: '', query: '' });
+  const justFocusedRef = useRef(false);
 
   const selected = useMemo(
     () => options.find((item) => item.value === value),
@@ -69,7 +87,7 @@ export default function Combobox({
     : (selected ? selected.label : (allowCustom ? value : ''));
 
   const visibleOptions = useMemo(() => {
-    const keyword = normalize(open ? query : '');
+    const keyword = normalize(open && edited ? query : '');
     if (!keyword) return options;
     return options.filter((item) => (
       [item.label, item.description, item.value]
@@ -78,7 +96,7 @@ export default function Combobox({
         .toLowerCase()
         .includes(keyword)
     ));
-  }, [open, options, query]);
+  }, [edited, open, options, query]);
 
   latestRef.current = { displayText, query };
 
@@ -104,6 +122,7 @@ export default function Combobox({
   /** 输入框里的文字落定成 value：优先精确匹配选项，其次（allowCustom）原样采用。 */
   const commit = (text: string) => {
     const trimmed = text.trim();
+    setEdited(false);
     const exact = options.find((item) => normalize(item.label) === normalize(trimmed)
       || normalize(item.value) === normalize(trimmed));
     if (exact) {
@@ -142,6 +161,7 @@ export default function Combobox({
     if (option.disabled) return;
     onChange(option.value);
     setQuery(option.label);
+    setEdited(false);
     setOpen(false);
   };
 
@@ -171,6 +191,7 @@ export default function Combobox({
     }
     if (event.key === 'Escape') {
       setQuery(selected ? selected.label : (allowCustom ? value : ''));
+      setEdited(false);
       setOpen(false);
     }
   };
@@ -181,7 +202,22 @@ export default function Combobox({
       className={`modern-select combobox ${open ? 'is-open' : ''} ${disabled ? 'is-disabled' : ''} ${size === 'sm' ? 'is-sm' : ''} ${className}`.trim()}
       data-testid={dataTestId}
     >
-      <div className="modern-select-trigger" style={{ cursor: disabled ? 'not-allowed' : 'text' }}>
+      <div
+        className="modern-select-trigger"
+        style={{ cursor: disabled ? 'not-allowed' : 'text' }}
+        onClick={(event) => {
+          if (disabled) return;
+          // 清空按钮有自己的 mousedown 处理，别让它冒泡到这里把面板又打开。
+          if ((event.target as HTMLElement).closest('button')) return;
+          // 选中一项后输入框仍然保持焦点，不会再触发 onFocus；这里兜住
+          // 「已经聚焦时再点一下要重新展开面板」的情况。
+          if (open) return;
+          setOpen(true);
+          setEdited(false);
+          setQuery(selected ? selected.label : (allowCustom ? value : ''));
+          inputRef.current?.focus();
+        }}
+      >
         <input
           ref={inputRef}
           type="text"
@@ -191,10 +227,25 @@ export default function Combobox({
           disabled={disabled}
           onFocus={() => {
             setOpen(true);
+            setEdited(false);
             setQuery(selected ? selected.label : (allowCustom ? value : ''));
+            // 光标是 mousedown 的默认动作放进去的，排在本次聚焦回调之后，
+            // 所以要把全选推迟一帧，否则第一次按键会接在已有文字后面。
+            justFocusedRef.current = true;
+            scheduleFrame(() => {
+              justFocusedRef.current = false;
+              inputRef.current?.select();
+            });
+          }}
+          onMouseUp={(event) => {
+            // 聚焦后紧接着的那次 mouseup 会把光标重新落定、抹掉全选，这里拦掉。
+            if (!justFocusedRef.current) return;
+            event.preventDefault();
+            inputRef.current?.select();
           }}
           onChange={(event) => {
             setQuery(event.target.value);
+            setEdited(true);
             onQueryChange?.(event.target.value);
             setOpen(true);
           }}

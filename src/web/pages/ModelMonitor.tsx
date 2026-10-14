@@ -4,7 +4,6 @@ import CenteredModal from '../components/CenteredModal.js';
 import Combobox from '../components/Combobox.js';
 import ModelChatModal from '../components/ModelChatModal.js';
 import DownstreamKeyCcSwitchModal, { type CcSwitchKeyTarget } from './downstream-keys/DownstreamKeyCcSwitchModal.js';
-import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
 import {
@@ -538,7 +537,9 @@ export default function ModelMonitor() {
       <div className="card model-monitor-toolbar">
         {/* 站点在前、模型在后：模型候选是按站点收窄的，先定站点再挑模型才顺。 */}
         <div className="model-monitor-filter model-monitor-filter-site">
-          <ModernSelect
+          {/* 用 Combobox：触发框本身就是输入框，想筛站点当前页直接打字就行，
+              不用「先点开面板、再点进面板里的搜索框」那两步。 */}
+          <Combobox
             value={siteFilter}
             onChange={setSiteFilter}
             options={[
@@ -553,16 +554,14 @@ export default function ModelMonitor() {
               })),
             ]}
             size="sm"
-            searchable
-            placeholder={tr('全部站点')}
-            searchPlaceholder={tr('搜索站点名')}
+            placeholder={tr('搜索站点名')}
             emptyLabel={tr('没有匹配的站点')}
             menuMaxHeight={320}
             data-testid="model-monitor-site-select"
           />
         </div>
         <div className="model-monitor-filter model-monitor-filter-model">
-          <ModernSelect
+          <Combobox
             value={modelFilter}
             onChange={setModelFilter}
             options={[
@@ -574,9 +573,7 @@ export default function ModelMonitor() {
               })),
             ]}
             size="sm"
-            searchable
-            placeholder={tr('全部模型')}
-            searchPlaceholder={tr('搜索模型名')}
+            placeholder={tr('搜索模型名')}
             emptyLabel={selectedSiteName
               ? `${selectedSiteName} ${tr('没有采集到模型')}`
               : tr('没有匹配的模型')}
@@ -587,7 +584,7 @@ export default function ModelMonitor() {
         {/* 家族排在模型前：类别是把模型候选收窄的一层，先选类别再从更短的
             清单里挑模型才顺。选项与计数都来自后端，跟站点/成功率保持同一范围。 */}
         <div className="model-monitor-filter">
-          <ModernSelect
+          <Combobox
             value={familyFilter}
             onChange={setFamilyFilter}
             options={[
@@ -599,9 +596,7 @@ export default function ModelMonitor() {
               })),
             ]}
             size="sm"
-            searchable
-            placeholder={tr('全部模型类型')}
-            searchPlaceholder={tr('搜索模型类型')}
+            placeholder={tr('搜索模型类型')}
             emptyLabel={tr('没有匹配的模型类型')}
             menuMaxHeight={320}
             data-testid="model-monitor-family-select"

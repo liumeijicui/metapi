@@ -39,12 +39,17 @@ describe('ModelMonitor unsupported sites', () => {
     expect(source).toContain("${tr('（不支持）')}");
   });
 
-  it('模型名与站点名都是可搜索下拉', () => {
+  it('模型名与站点名都是「直接打字就能筛」的下拉', () => {
     expect(source).toContain('model-monitor-model-select');
     expect(source).toContain('model-monitor-site-select');
-    // 两个下拉都开着搜索，站点数量多了以后靠打字过滤。
-    expect(source).toContain('searchPlaceholder={tr(\'搜索模型名\')}');
-    expect(source).toContain('searchPlaceholder={tr(\'搜索站点名\')}');
+    // 用 Combobox（触发框本身就是输入框）而不是 ModernSelect：后者得先点开面板、
+    // 再点进面板里的搜索框才能打字。筛选框一多这一步很烦。
+    expect(source).toContain('model-monitor-family-select');
+    expect(source).not.toContain('ModernSelect');
+    // 打字提示直接落在触发框的 placeholder 上。
+    expect(source).toContain("placeholder={tr('搜索模型名')}");
+    expect(source).toContain("placeholder={tr('搜索站点名')}");
+    expect(source).toContain("placeholder={tr('搜索模型类型')}");
   });
 
   it('站点名可点开原站、模型名点击即复制', () => {

@@ -1,3 +1,22 @@
+### 108. 模型监控筛选框改成「在页面上直接打字就能搜」的可输入下拉
+
+- **类型**：交互改进 + 缺陷修复（模型监控 → 筛选栏）
+- **需求来源**：本会话（用户：「模型监控的全部模型、全部站点 必须点开才能搜索，我希望是直接在当前页面就能直接带搜索的下拉」）
+- **一、换了什么**
+  - 筛选栏三个下拉（站点 / 模型 / 模型类型）由 `ModernSelect` 换成 `Combobox`：`Combobox` 的触发器本身就是 `<input>`，聚焦后直接在页面上敲字就筛，不再需要「点开面板 → 再把鼠标移到面板里的搜索框 → 点一次」。
+  - `data-testid` 原样保留（`model-monitor-site-select` / `model-monitor-model-select` / `model-monitor-family-select`），既有测试与外部脚本不受影响；`ModelMonitor.tsx` 里因此不再引用 `ModernSelect`，import 一并删掉。
+  - 原来各自的 `searchPlaceholder` 改成 `placeholder`，提示语直接落在这个输入框上（「搜索站点名」/「搜索模型名」/「搜索模型类型」）。
+  - 站点框保持 `allowCustom=false`、模型框保持 `allowCustom=true`，语义和以前一致：站点只能在候选里选（填对了自动补全），模型名允许填列表外的值。
+- **二、顺带修掉 `Combobox` 的两个真 bug**（不修的话「直接打字」是假的，打了反而更糟）
+  - **聚焦即被自己的标签筛掉**：聚焦后输入框要显示「现在选的是谁」（`happycoding`），但旧逻辑把这个标签当成了筛选词，于是面板一打开就只剩选中那一项 —— 想搜别的必须先手动删字。改为新增 `edited` 状态，**只有用户真的敲过字才启用关键字过滤**，展示标签时不筛。
+  - **第一次按键是追加而不是替换**：光标由 mousedown 的默认动作落定，排在 `onFocus` 回调之后，天真的 `select()` 会被紧接着的 `mouseup` 抹掉，于是打出 `happycodinghap` 而不是 `hap`。改为 `onFocus` 里推迟一帧再 `select()`，并在聚焦后那一次 `mouseup` 上 `preventDefault()` 保住全选。
+  - 另修一处复验时才发现的问题：**选中一项后输入框仍保持焦点，`onFocus` 不会再触发，此时再点输入框无法重新展开面板**（只能点别处失焦再点回来）。给触发框补了 `onClick` 兜底，并跳过「点的是清空按钮」那种冒泡。
+  - `scheduleFrame` 兜底 `requestAnimationFrame`（测试用的 react-test-renderer 与 SSR 环境都没有这个 API），语义不变：把回调推迟一帧。
+- **三、验证**
+  - 单测：`Combobox.test.tsx` 8 例全绿（含「刚聚焦不拿选中项标签当筛选词」「第一次按键是替换」「选中后重新点击能展开完整候选」三条回归）；`modelMonitor.*.test.ts` 三份共 19 例全绿。
+  - `npx tsc -p tsconfig.web.json --noEmit` 与 `npx vite build` 通过。
+  - 真机复验（Chromium 打开 `/monitor`）：站点框聚焦 → 面板 **48 项**（全部站点 + 47 个站点，改前只有 1 项）；敲 `hap` → 只剩 `happycoding` 且输入框是 `hap`；选中后重新点击 → 又回到 48 项；站点选中 `happycoding` 时模型框是 6 项（按站点收窄），敲 `deep` → 带出 `deepseek-v4.1-flash`；清空站点后模型框 632 项，即全量。
+
 ### 107. 使用日志新增「思考强度」字段（reasoning_effort / reasoning.effort）
 
 - **类型**：新增能力（可观测性：日志 → 数据库 → 接口 → 界面）
