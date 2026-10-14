@@ -21,7 +21,14 @@ import {
   downgradeResponsesCustomToolDeclarations,
   normalizeResponsesCustomToolCallItemIds,
 } from '../transformers/openai/responses/customToolDowngrade.js';
-import { resolveUnsupportedResponsesCustomToolNames } from './siteProfiles.js';
+import {
+  hoistChatToolMessageMedia,
+  hoistResponsesToolOutputMedia,
+} from '../transformers/openai/responses/toolOutputMedia.js';
+import {
+  resolveResponsesToolOutputMediaPolicy,
+  resolveUnsupportedResponsesCustomToolNames,
+} from './siteProfiles.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import {
   convertOpenAiBodyToAnthropicMessagesBody,
@@ -810,7 +817,7 @@ export function buildUpstreamEndpointRequest(input: {
     // 回程那一侧由 customToolDowngrade 按工具名还原。
     // 历史里的 custom_tool_call 可能带着上游函数调用那套 id 前缀（fc_/fc_tmp_/ct_），
     // 严格的上游会因为「id 前缀和 item 类型对不上」直接 400，发之前归一成 ctc_。
-    const upstreamResponsesBody = normalizeResponsesCustomToolCallItemIds(
+    const normalizedResponsesBody = normalizeResponsesCustomToolCallItemIds(
       downgradeResponsesCustomToolDeclarations(
         configuredResponsesBody,
         resolveUnsupportedResponsesCustomToolNames(
@@ -820,6 +827,12 @@ export function buildUpstreamEndpointRequest(input: {
         ),
       ),
     );
+    // 转发薄壳的 `/v1/responses` 是「转成 Chat Completions 再转发」，而 Chat
+    // Completions 的 `tool` 消息只允许文本：工具输出里带着 `input_image` 时上游直接
+    // 400 `invalid_request`（实测君の公益）。把图片搬到后一条 user 消息，图片不丢。
+    const upstreamResponsesBody = resolveResponsesToolOutputMediaPolicy(input.siteUrl, sitePlatform) === 'hoist'
+      ? hoistResponsesToolOutputMedia(normalizedResponsesBody)
+      : normalizedResponsesBody;
 
     if (sitePlatform === 'codex') {
       if (providerProfile?.id !== 'codex') {
@@ -866,10 +879,15 @@ export function buildUpstreamEndpointRequest(input: {
     model: input.modelName,
     stream: input.stream,
   };
-  const configuredChatBody = applyConfiguredPayloadRules(
-    input.downstreamFormat === 'responses'
-      ? sanitizeResponsesFallbackChatBody(chatBody)
-      : chatBody,
+  // Chat Completions 的 `tool` 消息只允许文本，工具结果里的图片（截图、view_image）
+  // 放到那里是非法的：薄壳站点会把它丢给只收文本的上游，回 400 `invalid_request`
+  // （实测君の公益）。搬到后一条 user 消息，图片不丢。
+  const configuredChatBody = hoistChatToolMessageMedia(
+    applyConfiguredPayloadRules(
+      input.downstreamFormat === 'responses'
+        ? sanitizeResponsesFallbackChatBody(chatBody)
+        : chatBody,
+    ),
   );
   return {
     path: resolveEndpointPath('chat'),

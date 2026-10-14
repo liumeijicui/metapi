@@ -219,6 +219,65 @@ export function resolveUnsupportedResponsesCustomToolNames(
 }
 
 /**
+ * 站点的 Responses 端点怎么处理「工具结果里的图片」。
+ *
+ * - `passthrough`：原生 Responses 实现，`function_call_output.output` 里的图片块
+ *   原样发过去（OpenAI / Codex 都收）。
+ * - `hoist`：转发薄壳。它们的 `/v1/responses` 是「转成 Chat Completions 再转发」，
+ *   而 Chat Completions 的 `tool` 消息只允许文本，图片会被丢给只收文本的上游，
+ *   上游回 `400 invalid_request`。这种站点要把图片搬到后一条 user 消息
+ *   （见 `hoistResponsesToolOutputMedia`）。
+ */
+export type ResponsesToolOutputMediaPolicy = 'passthrough' | 'hoist';
+
+/** 只有原生 Responses 实现才把工具输出里的图片原样透传。 */
+const RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_PLATFORMS: ReadonlySet<string> = new Set([
+  'openai',
+  'codex',
+]);
+
+/**
+ * Per-host overrides, for the rare relay that *is* a native Responses
+ * implementation but does not run on the openai/codex platform.
+ */
+const SITE_RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_HOSTS: readonly string[] = [];
+
+/**
+ * The tool-output-media policy of a site's Responses endpoint.
+ *
+ * 默认按「转发薄壳」处理：除了 openai / codex 这两个原生 Responses 平台，其它站点
+ * 的 `/v1/responses` 基本都是 new-api / sub2api 这类薄壳，实测（君の公益 muyuan.do，
+ * 账号 3145215575 / `deepseek-v4.1-flash`）同一个工具输出里带 `input_image` 就回
+ * `400 {"error":{"message":"invalid_request","type":"upstream_error"}}`，把图片搬到
+ * 后一条 user 消息后同一个请求 200。搬运是无损的：图片只是换了承载它的消息，
+ * 模型仍然看得到。
+ */
+export function resolveResponsesToolOutputMediaPolicy(
+  rawUrl: string | null | undefined,
+  sitePlatform?: string | null,
+): ResponsesToolOutputMediaPolicy {
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(String(rawUrl || ''));
+  } catch {
+    parsed = null;
+  }
+  if (parsed) {
+    const host = normalizeHost(parsed.host);
+    const passthrough = SITE_RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_HOSTS.some(
+      (entry) => host === entry || host.endsWith(`.${entry}`),
+    );
+    if (passthrough) return 'passthrough';
+  }
+
+  const platform = String(sitePlatform || '').trim().toLowerCase();
+  if (RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_PLATFORMS.has(platform)) {
+    return 'passthrough';
+  }
+  return 'hoist';
+}
+
+/**
  * Additional `anthropic-beta` flags a site's `/v1/messages` endpoint requires.
  *
  * anyrouter 的 claude 模型只挂在 `/v1/messages` 上（`/v1/chat/completions` 一律
