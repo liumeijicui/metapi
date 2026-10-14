@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applySiteInferenceUserAgent,
   hasExplicitUserAgent,
+  resolveResponsesToolOutputMediaPolicy,
   resolveSiteAnthropicBetaHeaders,
   resolveSiteInferenceUserAgent,
   resolveUnsupportedResponsesCustomToolNames,
@@ -113,6 +114,37 @@ describe('siteProfiles', () => {
     expect(
       resolveUnsupportedResponsesCustomToolNames('https://agentrouter.org', ['apply_patch'], 'new-api'),
     ).toEqual([]);
+  });
+
+  it('工具结果里的图片只有「君の公益 + deepseek-v4.1-flash」才搬运，别的站点/模型一律不改', () => {
+    // 唯一命中的组合（实测那条 400）。
+    expect(
+      resolveResponsesToolOutputMediaPolicy('https://muyuan.do', 'new-api', 'deepseek-v4.1-flash'),
+    ).toBe('hoist');
+    // 子域同样命中。
+    expect(
+      resolveResponsesToolOutputMediaPolicy('https://api.muyuan.do/v1', 'new-api', 'deepseek-v4.1-flash'),
+    ).toBe('hoist');
+    // 同一个站点、别的模型：不动。
+    expect(
+      resolveResponsesToolOutputMediaPolicy('https://muyuan.do', 'new-api', 'gpt-6.1-sol'),
+    ).toBe('passthrough');
+    // 别的站点：不动，哪怕模型名一样。
+    expect(
+      resolveResponsesToolOutputMediaPolicy('https://happycoding.xyz', 'new-api', 'deepseek-v4.1-flash'),
+    ).toBe('passthrough');
+    // 平台对不上也不动（host 白名单只在它自己那条记录上生效，不跨平台放宽）。
+    expect(
+      resolveResponsesToolOutputMediaPolicy('https://api.openai.com', 'openai', 'deepseek-v4.1-flash'),
+    ).toBe('passthrough');
+    // 缺模型名时按「不确定」处理：不放行。
+    expect(resolveResponsesToolOutputMediaPolicy('https://muyuan.do', 'new-api')).toBe('passthrough');
+    expect(resolveResponsesToolOutputMediaPolicy('https://muyuan.do', 'new-api', '')).toBe('passthrough');
+    // 坏 URL 不能抛，也不能误命中。
+    expect(resolveResponsesToolOutputMediaPolicy('not-a-url', 'new-api', 'deepseek-v4.1-flash'))
+      .toBe('passthrough');
+    expect(resolveResponsesToolOutputMediaPolicy(null, 'new-api', 'deepseek-v4.1-flash'))
+      .toBe('passthrough');
   });
 
   it('anyrouter 的 messages 端点必须补上 1M 上下文的 opt-in beta', () => {

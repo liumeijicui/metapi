@@ -1,4 +1,4 @@
-### 112. 修「工具结果里带图片 → 上游 400 invalid_request」：图片搬到后一条消息
+### 112. 修「工具结果里带图片 → 上游 400 invalid_request」：图片搬到后一条消息（只对君の公益 + deepseek-v4.1-flash）
 
 - **类型**：缺陷修复（Responses / Chat 转发，服务端与桌面边缘版共用同一份 `src/server`）
 - **需求来源**：本会话（用户：「为啥君的公益站还是报这个错：`model: gpt-6.1-sol; upstream_status: HTTP 400; cause: [upstream:/v1/responses] Upstream returned HTTP 400: invalid_request`」）
@@ -20,13 +20,15 @@
     - `hoistResponsesToolOutputMedia`：把 `input` 里 `function_call_output` / `custom_tool_call_output` 的 `output` 拆成「文本块」和「媒体块」，文本留在工具输出（一个文本块都不剩时补一句占位，避免出现空数组），媒体块原样放进**紧随其后的一条 `user` 消息**（前置一句 `Images returned by the previous tool call:`）。图片一张不丢，模型照样看得到。
     - `hoistChatToolMessageMedia`：同样的搬运，作用在 `messages` 里 `role: 'tool'` 的消息上（`tool_call_id` 保留，content 只剩图片时留空字符串）。
     - 判定媒体块只看「类型含 image/audio/video/screenshot」或「带 `image_url` / `audio_url` / `video_url` / `image_data` 字段」，不依赖某一种形状；`output` 里混着字符串这类非对象项时不动，交给原来的路径。
-  - 站点策略 `resolveResponsesToolOutputMediaPolicy`（`siteProfiles.ts`）：原生 Responses 实现（`openai` / `codex` 平台）`passthrough` 原样透传，其余（new-api / sub2api / xapi / gwrelay / agentrouter … 这些转发薄壳）一律 `hoist`。留了 host 级 `passthrough` 覆盖位。
-  - 挂载点：`upstreamRequestBuilder.ts` 的 responses 分支（在 custom 工具降级、id 前缀归一之后）与 chat 兜底分支（在 payload rules 之后），两处都在「发往上游前」的最后一步。
+  - 站点策略 `resolveResponsesToolOutputMediaPolicy`（`siteProfiles.ts`）**默认 `passthrough`，一个字节都不改**；只有明写在 `SITE_RESPONSES_TOOL_OUTPUT_MEDIA_HOIST` 里的「站点 + 模型」命中时才 `hoist`。当前只登记了一条：
+    `{ host: 'muyuan.do', models: ['deepseek-v4.1-flash'] }`。
+    用户明确要求「只针对该网站该模型做特级处理，避免影响到其他网站其他模型」——这条 400 是**该站点该模型**实测出来的行为，不是通用规则，所以不做「按平台一刀切」。匹配用的 `modelName` 是**发往上游的真实模型名**（规则里的 `upstream_model`，即 `deepseek-v4.1-flash`），不是下游那个对外名字（`gpt-6.1-sol` / `gpt-6-astra` 都指向它）。`models` 省略即「该站点所有模型」，将来别的站点复现同一条 400 时按同样格式加一行即可。
+  - 挂载点：`upstreamRequestBuilder.ts` 的 responses 分支（在 custom 工具降级、id 前缀归一之后）与 chat 兜底分支（在 payload rules 之后），两处都在「发往上游前」的最后一步，且都以同一个白名单为准。
 - **三、验证**
-  - 单测新增 10 例（识别媒体块、拆分、搬运后的形状、只剩图片时的占位、无媒体 / 无 `input` / 混合类型时不做无谓拷贝、Chat 侧同样 4 例）。`src/server/transformers/openai/responses` + `upstreamRequestBuilder.test.ts` 共 195 例全绿；`tsc -p tsconfig.server.json` 通过。
+  - 单测新增 12 例：`toolOutputMedia.test.ts` 10 例（识别媒体块、拆分、搬运后的形状、只剩图片时的占位、无媒体 / 无 `input` / 混合类型时不做无谓拷贝、Chat 侧同样 4 例）；`siteProfiles.test.ts` 补策略 1 例（命中组合 / 子域 / 同站别的模型 / 别站同模型名 / openai 平台 / 缺模型名 / 坏 URL 共 9 条断言）；`upstreamRequestBuilder.test.ts` 补 1 例，直接断言**同一个 builder 入口下**：命中的改写、同站别的模型不改、别站同样模型名不改。`tsc -p tsconfig.server.json` 通过。
   - 端到端（小图省额度，强制通道 `x-metapi-tester-forced-channel-id: 3581`）：
     - 修复前：`/v1/responses` → 400 `invalid_request`（trace 224），`/v1/chat/completions` → 400（同一条）。
-    - 修复后：`/v1/responses` → **200**（`output_text: "ok"`，日志 `status=success`），`/v1/chat/completions` → **200**。
+    - 修复后：`/v1/responses` → **200**（`output_text: "ok"`，日志 `status=success`），`/v1/chat/completions` → **200**；改动收窄成白名单后复测仍 **200**。
     - 抓包核对上游实际收到的 body：`function_call_output` 里已无图片，图片块落在后一条 `message(user)` 里（`image_url count: 1`）。
   - 全量 `src/server`：仅剩 3 条与本次无关的既有失败（`db/index.default-path`、`factoryResetService`、`siteProxy`）。
 - **主要文件**：`src/server/transformers/openai/responses/toolOutputMedia.ts`、`src/server/transformers/openai/responses/toolOutputMedia.test.ts`、`src/server/services/siteProfiles.ts`、`src/server/services/upstreamRequestBuilder.ts`

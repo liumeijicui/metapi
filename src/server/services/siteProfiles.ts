@@ -221,60 +221,72 @@ export function resolveUnsupportedResponsesCustomToolNames(
 /**
  * 站点的 Responses 端点怎么处理「工具结果里的图片」。
  *
- * - `passthrough`：原生 Responses 实现，`function_call_output.output` 里的图片块
- *   原样发过去（OpenAI / Codex 都收）。
- * - `hoist`：转发薄壳。它们的 `/v1/responses` 是「转成 Chat Completions 再转发」，
- *   而 Chat Completions 的 `tool` 消息只允许文本，图片会被丢给只收文本的上游，
- *   上游回 `400 invalid_request`。这种站点要把图片搬到后一条 user 消息
- *   （见 `hoistResponsesToolOutputMedia`）。
+ * - `passthrough`（默认）：工具输出里的图片块原样发过去，一个字节都不动。
+ * - `hoist`：把媒体块搬到后一条 user 消息（见 `hoistResponsesToolOutputMedia`）。
+ *   只有明写在 `SITE_RESPONSES_TOOL_OUTPUT_MEDIA_HOIST` 里的站点/模型才走这条，
+ *   因为「工具输出里能不能带图片」是**该站点该模型**实测出来的行为，不是通用规则。
  */
 export type ResponsesToolOutputMediaPolicy = 'passthrough' | 'hoist';
 
-/** 只有原生 Responses 实现才把工具输出里的图片原样透传。 */
-const RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_PLATFORMS: ReadonlySet<string> = new Set([
-  'openai',
-  'codex',
-]);
-
 /**
- * Per-host overrides, for the rare relay that *is* a native Responses
- * implementation but does not run on the openai/codex platform.
+ * 需要对「工具结果里的图片」做特级处理的站点，精确到模型。
+ *
+ * 实测君の公益（`muyuan.do`，账号 3145215575 / `deepseek-v4.1-flash`）：它的
+ * `/v1/responses` 是「转成 Chat Completions 再转发」的薄壳，而 Chat Completions 的
+ * `tool` 消息只允许文本，工具输出里带 `input_image` 会被丢给只收文本的上游，上游回
+ * `400 {"error":{"message":"invalid_request","type":"upstream_error"}}`：
+ *   - 工具输出里加 7KB 小图 → 400；换成 2.2MB 大图 → 同样 400（与体积无关）
+ *   - 同一张图放进普通 `message.content` → 200
+ *   - 图片从工具输出挪到紧随其后的 user 消息 → 200
+ * 同一个洞在 Chat 侧（`role: 'tool'` 里带 `image_url`）也在（同样 400）。
+ *
+ * 这里只登记「实测确认过」的站点/模型，其它站点/模型一律 `passthrough` 原样透传：
+ * 绝大多数转发站都能正常收工具输出里的图片，没必要替它们改写请求。将来若别的站点也
+ * 复现同一条 400，按同样的格式加一条即可；`models` 省略表示「该站点所有模型」。
  */
-const SITE_RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_HOSTS: readonly string[] = [];
+const SITE_RESPONSES_TOOL_OUTPUT_MEDIA_HOIST: ReadonlyArray<{
+  host: string;
+  models?: readonly string[];
+}> = [
+  { host: 'muyuan.do', models: ['deepseek-v4.1-flash'] },
+];
 
 /**
  * The tool-output-media policy of a site's Responses endpoint.
  *
- * 默认按「转发薄壳」处理：除了 openai / codex 这两个原生 Responses 平台，其它站点
- * 的 `/v1/responses` 基本都是 new-api / sub2api 这类薄壳，实测（君の公益 muyuan.do，
- * 账号 3145215575 / `deepseek-v4.1-flash`）同一个工具输出里带 `input_image` 就回
- * `400 {"error":{"message":"invalid_request","type":"upstream_error"}}`，把图片搬到
- * 后一条 user 消息后同一个请求 200。搬运是无损的：图片只是换了承载它的消息，
- * 模型仍然看得到。
+ * 默认 `passthrough`：不改写任何请求。只有 host（含子域）命中、且模型名也命中
+ * `SITE_RESPONSES_TOOL_OUTPUT_MEDIA_HOIST` 那条记录时，才返回 `hoist`。
+ *
+ * `modelName` 传的是**发往上游的真实模型名**（规则里的 `upstream_model`），不是下游
+ * 请求的那个对外名字 —— 站点看的是前者。
  */
 export function resolveResponsesToolOutputMediaPolicy(
   rawUrl: string | null | undefined,
   sitePlatform?: string | null,
+  modelName?: string | null,
 ): ResponsesToolOutputMediaPolicy {
+  // 原生 Responses 实现（OpenAI / Codex）本来就收图片，不需要也不该改写。
+  const platform = String(sitePlatform || '').trim().toLowerCase();
+  if (platform === 'openai' || platform === 'codex') return 'passthrough';
+
   let parsed: URL | null = null;
   try {
     parsed = new URL(String(rawUrl || ''));
   } catch {
-    parsed = null;
-  }
-  if (parsed) {
-    const host = normalizeHost(parsed.host);
-    const passthrough = SITE_RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_HOSTS.some(
-      (entry) => host === entry || host.endsWith(`.${entry}`),
-    );
-    if (passthrough) return 'passthrough';
-  }
-
-  const platform = String(sitePlatform || '').trim().toLowerCase();
-  if (RESPONSES_TOOL_OUTPUT_MEDIA_PASSTHROUGH_PLATFORMS.has(platform)) {
     return 'passthrough';
   }
-  return 'hoist';
+  if (!parsed) return 'passthrough';
+
+  const host = normalizeHost(parsed.host);
+  const model = String(modelName || '').trim().toLowerCase();
+  for (const entry of SITE_RESPONSES_TOOL_OUTPUT_MEDIA_HOIST) {
+    if (host !== entry.host && !host.endsWith(`.${entry.host}`)) continue;
+    if (!entry.models) return 'hoist';
+    if (model && entry.models.some((name) => name.trim().toLowerCase() === model)) {
+      return 'hoist';
+    }
+  }
+  return 'passthrough';
 }
 
 /**

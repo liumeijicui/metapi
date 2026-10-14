@@ -6,6 +6,49 @@ import {
 } from './upstreamRequestBuilder.js';
 
 describe('upstreamRequestBuilder', () => {
+  it('工具结果里的图片只在「君の公益 + deepseek-v4.1-flash」上被搬运，别的站点/模型原样透传', () => {
+    const imageInToolOutput = () => [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call_1' }] },
+      {
+        role: 'tool',
+        tool_call_id: 'call_1',
+        content: [
+          { type: 'text', text: 'Script completed\n' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+        ],
+      },
+    ];
+    const build = (siteUrl: string, modelName: string, sitePlatform: string) => (
+      buildUpstreamEndpointRequest({
+        endpoint: 'chat',
+        modelName,
+        stream: true,
+        tokenValue: 'sk-test',
+        sitePlatform,
+        siteUrl,
+        openaiBody: { model: modelName, messages: imageInToolOutput(), stream: true },
+        downstreamFormat: 'openai',
+        downstreamHeaders: {},
+      })
+    );
+
+    // 命中：tool 消息里不再有图片，图片落到后一条 user 消息里。
+    const hoisted = build('https://muyuan.do', 'deepseek-v4.1-flash', 'new-api').body as any;
+    expect(hoisted.messages[2].content).toEqual([{ type: 'text', text: 'Script completed\n' }]);
+    expect(hoisted.messages[3].content[1].type).toBe('image_url');
+
+    // 同一个站点、别的模型：一个字节都不改。
+    const otherModel = build('https://muyuan.do', 'gpt-6.1-sol', 'new-api').body as any;
+    expect(otherModel.messages[2].content).toHaveLength(2);
+    expect(otherModel.messages).toHaveLength(3);
+
+    // 别的站点、同样模型名：同样不改。
+    const otherSite = build('https://happycoding.xyz', 'deepseek-v4.1-flash', 'new-api').body as any;
+    expect(otherSite.messages[2].content).toHaveLength(2);
+    expect(otherSite.messages).toHaveLength(3);
+  });
+
   it('agentrouter 的推理请求会自动带上它要求的客户端标识', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

@@ -827,10 +827,15 @@ export function buildUpstreamEndpointRequest(input: {
         ),
       ),
     );
-    // 转发薄壳的 `/v1/responses` 是「转成 Chat Completions 再转发」，而 Chat
-    // Completions 的 `tool` 消息只允许文本：工具输出里带着 `input_image` 时上游直接
-    // 400 `invalid_request`（实测君の公益）。把图片搬到后一条 user 消息，图片不丢。
-    const upstreamResponsesBody = resolveResponsesToolOutputMediaPolicy(input.siteUrl, sitePlatform) === 'hoist'
+    // 少数站点（目前只有君の公益 / deepseek-v4.1-flash）的 `/v1/responses` 是「转成
+    // Chat Completions 再转发」，而 Chat Completions 的 `tool` 消息只允许文本：工具
+    // 输出里带着 `input_image` 时上游直接 400 `invalid_request`。命中的把图片搬到后一
+    // 条 user 消息（图片不丢），其余站点原样透传，见 siteProfiles 里的白名单。
+    const upstreamResponsesBody = resolveResponsesToolOutputMediaPolicy(
+      input.siteUrl,
+      sitePlatform,
+      input.modelName,
+    ) === 'hoist'
       ? hoistResponsesToolOutputMedia(normalizedResponsesBody)
       : normalizedResponsesBody;
 
@@ -879,20 +884,24 @@ export function buildUpstreamEndpointRequest(input: {
     model: input.modelName,
     stream: input.stream,
   };
-  // Chat Completions 的 `tool` 消息只允许文本，工具结果里的图片（截图、view_image）
-  // 放到那里是非法的：薄壳站点会把它丢给只收文本的上游，回 400 `invalid_request`
-  // （实测君の公益）。搬到后一条 user 消息，图片不丢。
-  const configuredChatBody = hoistChatToolMessageMedia(
-    applyConfiguredPayloadRules(
-      input.downstreamFormat === 'responses'
-        ? sanitizeResponsesFallbackChatBody(chatBody)
-        : chatBody,
-    ),
+  const configuredChatBody = applyConfiguredPayloadRules(
+    input.downstreamFormat === 'responses'
+      ? sanitizeResponsesFallbackChatBody(chatBody)
+      : chatBody,
   );
+  // 同一个白名单同样约束 Chat 侧：只有命中的站点/模型才把工具消息里的图片搬到后一条
+  // user 消息（`role: 'tool'` 的 content 按协议只能是文本），其余站点原样透传。
+  const upstreamChatBody = resolveResponsesToolOutputMediaPolicy(
+    input.siteUrl,
+    sitePlatform,
+    input.modelName,
+  ) === 'hoist'
+    ? hoistChatToolMessageMedia(configuredChatBody)
+    : configuredChatBody;
   return {
     path: resolveEndpointPath('chat'),
     headers,
-    body: configuredChatBody,
+    body: upstreamChatBody,
     runtime,
   };
 }
