@@ -4,7 +4,14 @@ import { createManagedBrowser } from './browserManager.js';
 import { passCloudflareChallenge } from './cloudflareChallenge.js';
 import { buildEntryLocator } from './entryMatch.js';
 import { captureHyperGithubCredentials, supportsHyperGithubLogin } from './sites/hyper.js';
-import type { AssistedLoginProvider, CaptureResult, CapturedCredentials, LoginState } from './types.js';
+import { pipiImageHintsFor } from './sites/pipiImageSite.js';
+import type {
+  AssistedLoginProvider,
+  CaptureResult,
+  CapturedCredentials,
+  LoginState,
+  StorageCredentialHints,
+} from './types.js';
 
 const NAVIGATION_TIMEOUT_MS = 45_000;
 const CONSENT_TIMEOUT_MS = 20_000;
@@ -73,9 +80,12 @@ function storageLookup(records: Array<[string, string]>): Map<string, string> {
 }
 
 /** Reads the site's numeric user id, preferring the stored user object. */
-function extractStoredUserId(records: Array<[string, string]>): number | null {
+function extractStoredUserId(
+  records: Array<[string, string]>,
+  hints?: StorageCredentialHints | null,
+): number | null {
   const lookup = storageLookup(records);
-  const userRaw = lookup.get('auth_user') || lookup.get('user') || '';
+  const userRaw = lookup.get('auth_user') || lookup.get('user') || firstPresent(lookup, hints?.userKeys) || '';
   if (userRaw) {
     try {
       const parsedUser = JSON.parse(userRaw) as Record<string, unknown>;
@@ -85,19 +95,37 @@ function extractStoredUserId(records: Array<[string, string]>): number | null {
       // fall through to the bare uid key
     }
   }
-  return normalizeUserId(lookup.get('uid'));
+  return normalizeUserId(lookup.get('uid') || firstPresent(lookup, hints?.uidKeys));
+}
+
+/** First non-empty value among the given storage keys, in declaration order. */
+function firstPresent(lookup: Map<string, string>, keys?: string[]): string {
+  for (const key of keys || []) {
+    const value = lookup.get(key.trim().toLowerCase());
+    if (value) return value;
+  }
+  return '';
 }
 
 /** Reads the display name from the stored user object, when present. */
-function extractStoredUsername(records: Array<[string, string]>): string | null {
+function extractStoredUsername(
+  records: Array<[string, string]>,
+  hints?: StorageCredentialHints | null,
+): string | null {
   const lookup = storageLookup(records);
-  const userRaw = lookup.get('auth_user') || lookup.get('user') || '';
+  const userRaw = lookup.get('auth_user') || lookup.get('user') || firstPresent(lookup, hints?.userKeys) || '';
   if (!userRaw) return null;
   try {
     const parsedUser = JSON.parse(userRaw) as Record<string, unknown>;
-    return normalizeText(parsedUser?.username) || normalizeText(parsedUser?.email) || null;
+    return normalizeText(parsedUser?.username)
+      || normalizeText(parsedUser?.email)
+      || normalizeText(parsedUser?.nickname)
+      || normalizeText(parsedUser?.name)
+      || null;
   } catch {
-    return null;
+    // A site may store a bare display name instead of a JSON user object.
+    const bare = userRaw.trim();
+    return hints?.userKeys?.length ? (bare || null) : null;
   }
 }
 
@@ -111,7 +139,10 @@ function withFlowLock<T>(state: { current: Promise<unknown> }, task: () => Promi
  * Pulls a credential bundle out of the site's own storage. Exported so the exact
  * key-preference rules stay unit-testable without a browser.
  */
-export function pickTokenFromRecords(records: Array<[string, string]>): CapturedCredentials | null {
+export function pickTokenFromRecords(
+  records: Array<[string, string]>,
+  hints?: StorageCredentialHints | null,
+): CapturedCredentials | null {
   const lookup = new Map<string, string>();
   for (const [rawKey, rawValue] of records) {
     const key = rawKey.trim().toLowerCase();
@@ -119,7 +150,8 @@ export function pickTokenFromRecords(records: Array<[string, string]>): Captured
     if (key && value && !lookup.has(key)) lookup.set(key, value);
   }
 
-  const accessKey = ACCESS_TOKEN_KEYS.find((candidate) => lookup.has(candidate));
+  const accessKey = [...ACCESS_TOKEN_KEYS, ...(hints?.tokenKeys || [])]
+    .find((candidate) => lookup.has(candidate.trim().toLowerCase()));
   const accessToken = accessKey ? lookup.get(accessKey) || '' : '';
   if (!accessToken) return null;
 
@@ -130,17 +162,23 @@ export function pickTokenFromRecords(records: Array<[string, string]>): Captured
 
   let username: string | null = null;
   let platformUserId: number | null = null;
-  const userRaw = lookup.get('auth_user') || lookup.get('user') || '';
+  const userRaw = lookup.get('auth_user') || lookup.get('user') || firstPresent(lookup, hints?.userKeys) || '';
   if (userRaw) {
     try {
       const parsedUser = JSON.parse(userRaw) as Record<string, unknown>;
-      username = normalizeText(parsedUser?.username) || normalizeText(parsedUser?.email) || null;
+      username = normalizeText(parsedUser?.username)
+        || normalizeText(parsedUser?.email)
+        || normalizeText(parsedUser?.nickname)
+        || normalizeText(parsedUser?.name)
+        || null;
       platformUserId = normalizeUserId(parsedUser?.id ?? parsedUser?.user_id);
     } catch {
-      username = null;
+      username = extractStoredUsername(records, hints);
     }
   }
-  if (platformUserId === null) platformUserId = normalizeUserId(lookup.get('uid'));
+  if (platformUserId === null) {
+    platformUserId = normalizeUserId(lookup.get('uid') || firstPresent(lookup, hints?.uidKeys));
+  }
 
   return {
     accessToken,
@@ -172,13 +210,14 @@ function isUsableCookie(cookie: { name?: string; value?: string }): boolean {
 function buildCookieCredential(
   cookies: Array<{ name: string; value: string }>,
   records: Array<[string, string]>,
+  hints?: StorageCredentialHints | null,
 ): CapturedCredentials {
   return {
     accessToken: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; '),
     refreshToken: null,
     tokenExpiresAt: null,
-    username: extractStoredUsername(records),
-    platformUserId: extractStoredUserId(records),
+    username: extractStoredUsername(records, hints),
+    platformUserId: extractStoredUserId(records, hints),
     source: 'cookie',
     harvestedKeys: cookies.map((cookie) => cookie.name),
   };
@@ -200,19 +239,20 @@ function buildCookieCredential(
 export function selectHarvestedCredential(input: {
   records: Array<[string, string]>;
   cookies: Array<{ name: string; value: string }>;
+  storageHints?: StorageCredentialHints | null;
 }): CapturedCredentials | null {
-  const { records } = input;
+  const { records, storageHints } = input;
   const cookies = input.cookies.filter(isUsableCookie);
 
   if (cookies.some((cookie) => cookie.name.trim().toLowerCase() === REFRESH_COOKIE_NAME)) {
-    return buildCookieCredential(cookies, records);
+    return buildCookieCredential(cookies, records, storageHints);
   }
 
-  const fromStorage = pickTokenFromRecords(records);
+  const fromStorage = pickTokenFromRecords(records, storageHints);
   if (fromStorage) return fromStorage;
 
   if (cookies.some((cookie) => SESSION_COOKIE_NAMES.has(cookie.name.trim().toLowerCase()))) {
-    return buildCookieCredential(cookies, records);
+    return buildCookieCredential(cookies, records, storageHints);
   }
 
   return null;
@@ -325,7 +365,10 @@ export function createAssistedLoginSession(input: {
     return { url: page.url() || loginUrl };
   }
 
-  async function harvestFromPage(page: import('playwright-core').Page): Promise<CapturedCredentials | null> {
+  async function harvestFromPage(
+    page: import('playwright-core').Page,
+    storageHints?: StorageCredentialHints | null,
+  ): Promise<CapturedCredentials | null> {
     // Provider pages (the Linux.do / GitHub handoff and its parked probe tab)
     // store the provider's own session, never a target-site credential.
     const pageHost = safeHost(page.url());
@@ -364,11 +407,11 @@ export function createAssistedLoginSession(input: {
         return host === domain || host.endsWith(`.${domain}`);
       });
 
-      return selectHarvestedCredential({ records, cookies });
+      return selectHarvestedCredential({ records, cookies, storageHints });
     } catch {
       // Reading the jar can fail on a context that is closing. Storage alone
       // still tells us whether this page holds a token worth keeping.
-      return pickTokenFromRecords(records);
+      return pickTokenFromRecords(records, storageHints);
     }
   }
 
@@ -389,12 +432,18 @@ export function createAssistedLoginSession(input: {
    * and answers immediately. The previous code relied on it, so it raced SPA
    * hydration and reported "login entry not found" on every site whose button
    * renders a moment after load - which is most community relay panels.
+   *
+   * The wait is on "some copy is visible", not "the first copy is visible".
+   * Panels that serve both a mobile and a desktop shell ship two copies of the
+   * same button and hide the unused one with `display: none`; `first()` resolves
+   * in DOM order, so it kept picking the hidden copy and every wait timed out
+   * while a perfectly clickable button sat further down the page (皮皮智绘).
    */
   async function clickWhenVisible(
     locator: import('playwright-core').Locator,
     timeoutMs: number,
   ): Promise<boolean> {
-    const target = locator.first();
+    const target = locator.filter({ visible: true }).first();
     try {
       await target.waitFor({ state: 'visible', timeout: timeoutMs });
     } catch {
@@ -480,9 +529,10 @@ export function createAssistedLoginSession(input: {
   async function unlockAgreementCheckbox(page: import('playwright-core').Page): Promise<boolean> {
     try {
       const deadline = Date.now() + AGREEMENT_WAIT_TIMEOUT_MS;
-      if ((await entryLocator(page).count()) === 0) return false;
+      const visibleEntry = () => entryLocator(page).filter({ visible: true });
+      if ((await visibleEntry().count()) === 0) return false;
       while (Date.now() < deadline) {
-        const entry = entryLocator(page);
+        const entry = visibleEntry();
         const blocked = await entry.first().evaluate(
           (el) =>
             el.getAttribute('aria-disabled') === 'true' ||
@@ -557,7 +607,7 @@ export function createAssistedLoginSession(input: {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const entry = entryLocator(page);
       try {
-        await entry.first().waitFor({ state: 'visible', timeout: perAttemptTimeoutMs });
+        await entry.filter({ visible: true }).first().waitFor({ state: 'visible', timeout: perAttemptTimeoutMs });
       } catch {
         return false;
       }
@@ -705,6 +755,7 @@ export function createAssistedLoginSession(input: {
     context: import('playwright-core').BrowserContext,
     pagesBefore: Set<import('playwright-core').Page>,
     initialPage: import('playwright-core').Page,
+    storageHints?: StorageCredentialHints | null,
   ): Promise<CaptureResult> {
     const loginPage = await findHandoffPage(context, pagesBefore, initialPage);
     await settle(loginPage);
@@ -740,7 +791,7 @@ export function createAssistedLoginSession(input: {
     while (Date.now() < tokenDeadline) {
       for (const candidate of context.pages()) {
         if (candidate.isClosed()) continue;
-        const harvested = await harvestFromPage(candidate);
+        const harvested = await harvestFromPage(candidate, storageHints);
         if (harvested && !looksSignedOut(candidate.url())) {
           return { status: 'captured', credentials: harvested, url: candidate.url() };
         }
@@ -853,13 +904,14 @@ export function createAssistedLoginSession(input: {
   async function harvestSiteCredential(siteUrl: string): Promise<CapturedCredentials | null> {
     const context = await browser.ensureManagedBrowserContext();
     const page = await getSitePage(context);
+    const storageHints = pipiImageHintsFor(siteUrl);
     try {
       await page.bringToFront().catch(() => undefined);
       await page.goto(siteUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
         .catch(() => undefined);
       await settle(page);
       if (looksSignedOut(page.url())) return null;
-      return await harvestFromPage(page);
+      return await harvestFromPage(page, storageHints);
     } finally {
       await parkSiteTab(page);
     }
@@ -879,6 +931,10 @@ export function createAssistedLoginSession(input: {
       return withFlowLock(flowLock, captureHyperGithubCredentials);
     }
 
+    // 站点自己的 storage 键名（皮皮智绘用 `pipi_pc_token`）只有站点模块知道，
+    // 通用键表认不出来；这里带上下文进去，采集才能读到凭据。
+    const storageHints = pipiImageHintsFor(site.url);
+
     let context: import('playwright-core').BrowserContext;
     try {
       context = await browser.ensureManagedBrowserContext();
@@ -897,7 +953,7 @@ export function createAssistedLoginSession(input: {
       // retired server-side the moment it is exchanged, so the jar can hold a value
       // that is already dead. When the caller knows the previous credential failed,
       // it asks for a fresh OAuth handshake instead of trusting the stale copy.
-      const existing = input.forceLogin ? null : await harvestFromPage(page);
+      const existing = input.forceLogin ? null : await harvestFromPage(page, storageHints);
       if (existing && !looksSignedOut(page.url())) {
         return { status: 'already_authorized', credentials: existing, url: page.url() };
       }
@@ -915,7 +971,7 @@ export function createAssistedLoginSession(input: {
           await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
           await settle(page);
           // A 404 page also loads fine, so the entry button is the real signal.
-          const retryHarvest = input.forceLogin ? null : await harvestFromPage(page);
+          const retryHarvest = input.forceLogin ? null : await harvestFromPage(page, storageHints);
           if (retryHarvest && !looksSignedOut(page.url())) {
             return { status: 'already_authorized', credentials: retryHarvest, url: page.url() };
           }
@@ -924,7 +980,7 @@ export function createAssistedLoginSession(input: {
             retryClicked = await dismissTermsGate(page, () => clickEntry(page, 1));
           }
           if (retryClicked) {
-            return await finishCapture(context, pagesBefore, page);
+            return await finishCapture(context, pagesBefore, page, storageHints);
           }
         }
         return {
@@ -935,7 +991,7 @@ export function createAssistedLoginSession(input: {
         };
       }
 
-      return await finishCapture(context, pagesBefore, page);
+      return await finishCapture(context, pagesBefore, page, storageHints);
       } finally {
         await parkSiteTab(page);
       }

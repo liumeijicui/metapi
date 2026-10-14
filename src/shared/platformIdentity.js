@@ -26,6 +26,10 @@ export const PLATFORM_ALIASES = Object.assign(Object.create(null), {
   'x-api': 'xapi',
   'x api': 'xapi',
   'x-api.cfd': 'xapi',
+  pipi: 'pipi-image',
+  pipiimage: 'pipi-image',
+  'pipi-image': 'pipi-image',
+  'pipi-image-site': 'pipi-image',
   openai: 'openai',
   codex: 'codex',
   'chatgpt-codex': 'codex',
@@ -108,6 +112,11 @@ export function detectPlatformByUrlHint(url) {
   // X-API ships its own gateway (neither New API nor Sub2API). Its API surface
   // is the OpenAI-compatible `/v1` one, so the credential is an API key.
   if (host === 'x-api.cfd' || host.endsWith('.x-api.cfd')) return 'xapi';
+
+  // 皮皮旺把出图站（图片站积分）与 API 站拆成两个域名。只有出图站是自研
+  // 面板，API 站仍走 new-api，所以这里必须按完整主机名精确匹配，不能按
+  // `pipiwangcom.com` 后缀判定，否则 `ai.pipiwangcom.com` 会被抢走。
+  if (host === 'img.pipiwangcom.com') return 'pipi-image';
 
   return undefined;
 }

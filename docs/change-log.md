@@ -1,3 +1,43 @@
+### 113. 登记「皮皮智绘」图片站：每日签到 + 图片站积分自动兑换 API 余额
+
+- **类型**：新平台接入（平台适配器 + 托管登录凭据采集 + 签到后置动作）
+- **需求来源**：本会话（用户：「帮我登记这个图片站……注意他没有模型，也不需要你创建 sk 秘钥，有签到，linux 快捷登录，每次签到结束后积分乐园里有个图片站积分兑换 api 站余额，帮我兑换了」）
+- **一、站点形态（从站点自己的前端 bundle 逆向，不猜）**
+  - `img.pipiwangcom.com`（皮皮智绘）是自研出图面板，不是 new-api 分支：`/api/user/*`、`/api/token/*` 全部 404，`/api/status` 也是 404，所以「余额 / 模型 / 管理面」这些 new-api 惯例在它身上一条都读不到。
+  - 唯一的凭据是 Linux.do OAuth 回跳后写进 `localStorage.pipi_pc_token` 的 bearer（有效期 7 天），所有请求走 `Authorization: Bearer <token>` 打 `/api/v1/pc/*`。
+  - 契约来自站点自己的 `wallet-transfer.js`：`GET /api/v1/pc/newapi/transfer` 返回 `{enabled, pointsPerUsd, minimumPoints, stepPoints, points, apiUsd, items}`；`POST` 用 `{request_id, direction:'points_to_api', points}` 下单，返回 `{status: completed|rejected|pending}`；`request_id` 幂等（`pending` 可安全重试），`400/401/403/422/429` 是确定性拒绝。默认 20 积分 = $1，起兑 100 分、步长 20 分。
+  - 兄弟域名 `ai.pipiwangcom.com` 是标准 new-api 站（此前已登记为站点 64），所以 URL 识别必须按**完整主机名**精确匹配，不能按 `pipiwangcom.com` 后缀。
+- **二、新增平台 `pipi-image`**
+  - `src/server/services/platforms/pipiImage.ts`：`StandardApiProviderAdapterBase` 子类（对齐 X-API 这个最薄样例）。实现 `getUserInfo`（`/api/v1/pc/me`）、`getBalance`（积分即余额）、`checkin`（`POST /api/v1/pc/checkin`，`{already:true}` 记成功而非失败——这一天已认领，报失败只会让调度器每个周期重试同一天；HTTP 401 原样带上，交给 `isTokenExpiredError` 判过期）。
+  - `getModels()` 固定返回 `[]` 且**不发任何请求**：这个站没有对话模型，用户也明确要求不要为它建 SK 秘钥。宁可界面上「没有模型」，也不伪造一个空模型池。
+  - 注册：`platforms/index.ts` 的 `adapters` 数组；识别：`src/shared/platformIdentity.js` 新增 `pipi-image` 别名 + `host === 'img.pipiwangcom.com'` 的 URL 提示（含 `.d.ts`/测试同步）。
+- **三、凭据采集：站点自有 storage 键**
+  - 通用采集只认 `token` / `access_token` 这类通用键名，站点把凭据写在自己的 `pipi_pc_token` 上，于是「浏览器里明明已登录，采集却读不到任何凭据」。
+  - 新增 `StorageCredentialHints`（`assistedLogin/types.ts`）与站点模块 `assistedLogin/sites/pipiImageSite.ts`（声明 `pipi_pc_token` / `pipi_pc_user` / `pipi_pc_uid`）。`pickTokenFromRecords` / `selectHarvestedCredential` / `extractStoredUsername` / `extractStoredUserId` 接受可选的站点键提示，**没声明就完全维持原行为**（既有 9 例单测原样通过）。
+  - 三个调用点都要带上提示才有效：`captureSiteCredentials` 的两次预采集、`finishCapture` 的轮询采集、`harvestSiteCredential`。第一次实现漏了 `finishCapture` 里那一处，端到端表现为「授权明明成功、却报等待凭证超时」——已修正。
+- **四、入口点击修复：只信「可见的那一份」**
+  - 皮皮智绘同时挂了移动端与桌面端两套按钮，用不到的那份是 `display: none`。`locator.first()` 按 DOM 顺序解析，永远选中隐藏的那份，于是 `waitFor({state:'visible'})` 次次超时，站点被报成「没有 Linux.do 入口」（实测 `login_button_not_found`，最后停在 `/login`）。
+  - `clickWhenVisible` / `tryClickEntryOnPage` / `unlockAgreementCheckbox` 改成对 `locator.filter({ visible: true })` 求值，即「某一份可见」而不是「第一份可见」。这是一个通用修复（这类双壳面板不少），不是给单个站点打补丁。
+  - 顺带确认入口在登录屏里：落地屏上先有 `[data-act="login"]`，已有的 `openLoginDialog()` 会点它，这一步原本就够用。
+- **五、签到后兑换**
+  - 新增 `src/server/services/pipiPointsExchangeService.ts`：读政策 → 取「满足起兑线与步长的最大整数积分」→ 下单 → 把 `completed/rejected/pending` 归成 `transferred/idle/failed`。
+  - 比例、下限、步长**一律以站点当次返回为准**，不在本地写死：站点调参时本地写死的数字会悄悄换错金额。
+  - 接线在 `checkinService` 签到成功分支、抽奖之后（与 `runDailyLottery` 同一个位置）：真兑换了或真失败了才追加到签到日志（` · 兑换 200 积分 → $10 API 余额`），`idle`（没到起兑线、站点关了兑换）不写，避免每天刷一行无意义的备注。
+  - 失败不 `throw`：兑换失败不该把一次成功的签到变成失败。
+- **六、令牌过期后的自动重登**
+  - 站点没有管理面、没有可重放的刷新令牌，`pipi_pc_token` 过期后唯一的路就是重放操作者当初那次入口点击。
+  - 新增 `assistedLogin/sites/pipiImageRelogin.ts`：先只清站点自己的 localStorage 与站点域 cookie（Linux.do 的论坛会话必须留着），再复用模块化的 `captureSiteCredentials({ forceLogin: true })`——入口点击、过盾、同意、采集都已经在那里。
+  - `autoRelogin.tryOauthRelogin` 在 `provider === 'linuxdo'` 分支里先判这个站点：new-api 那个驱动要 `/api/status` + `/api/oauth/state` + `/api/oauth/linuxdo` 回调，在它身上一步都走不通。
+- **七、验证**
+  - 单测新增 17 例：`pipiImage.test.ts` 6 例（平台名/别名、只认出图站主机、`getModels` 不发请求、余额与用户、签到三种答复、拒绝密码登录）、`pipiPointsExchangeService.test.ts` 7 例（非本站返回 null、未到起兑线只发一次 GET、站点关闭、取整与美元换算与下单体、pending/rejected、确定性拒绝透传站点原文、空凭据不发请求）、`pipiImageSite.test.ts` 3 例、`platformIdentity.test.ts` 补 4 条断言（含 `ai.pipiwangcom.com` 不被抢走）、`linuxdoSession/sessionService.test.ts` 补 1 例（未声明键读不到 / 声明后读到）。
+  - 端到端（真实站点、受管浏览器）：
+    - `POST /api/sites/detect` → `{"platform":"pipi-image"}`；建站 → 站点 65。
+    - 托管登录捕获 → `status: bound`，账号 51（`柳眉积翠`，`platformUserId=101830`，`oauth.provider=linuxdo`，`tokenType=session`，`modelCount=0`）。
+    - `POST /api/checkin/trigger/51` → `今日已签到 · 兑换 200 积分 → $10 API 余额`；随后刷新站点 64 余额，`$10` 确实到账（40 → 50 号账号 `balance` 由 0 变 10），图片站剩余 10 积分。
+  - `tsc -p tsconfig.server.json` 通过；`npx vitest run src/server` 仅剩 3 条与本次无关的既有失败（`db/index.default-path`、`factoryResetService`、`siteProxy`）；`npm run repo:drift-check` 0 违规。
+- **主要文件**：`src/server/services/platforms/pipiImage.ts`、`src/server/services/pipiPointsExchangeService.ts`、`src/server/services/assistedLogin/sites/pipiImageSite.ts`、`src/server/services/assistedLogin/sites/pipiImageRelogin.ts`、`src/server/services/assistedLogin/sessionService.ts`、`src/server/services/assistedLogin/types.ts`、`src/server/services/autoRelogin.ts`、`src/server/services/checkinService.ts`、`src/shared/platformIdentity.js`
+- **状态**：已完成
+
 ### 112. 修「工具结果里带图片 → 上游 400 invalid_request」：图片搬到后一条消息（只对君の公益 + deepseek-v4.1-flash）
 
 - **类型**：缺陷修复（Responses / Chat 转发，服务端与桌面边缘版共用同一份 `src/server`）

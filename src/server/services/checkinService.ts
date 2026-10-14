@@ -37,6 +37,7 @@ import {
 } from './browserSessionCredential.js';
 import { describeRenewalGap, tryAutoRelogin } from './autoRelogin.js';
 import { runDailyLottery } from './lotteryService.js';
+import { runPipiPointsExchange } from './pipiPointsExchangeService.js';
 import { isManagedSub2ApiTokenDue, isSub2ApiPlatform } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 import { config } from '../config.js';
@@ -576,6 +577,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   // this same pass, so the one log the operator reads shows both halves of the
   // daily routine instead of only the check-in.
   let lotteryNote = '';
+  // 皮皮智绘把「积分乐园」的兑换当成每日流程的后半段：签到只发图片站积分，
+  // 积分换回 API 余额才用得上。这里跟抽奖一样挂在签到成功后，稳态（没到
+  // 起兑线、站点关了兑换）不写进日志，避免每轮都刷一行无意义的备注。
+  let exchangeNote = '';
 
   if (effectiveSuccess) {
     const healthState = (unsupportedCheckin || manualVerificationRequired) ? 'degraded' : 'healthy';
@@ -633,6 +638,18 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         + (lottery.reward > 0 ? ` +$${lottery.reward}` : '');
     }
 
+    const exchange = await runPipiPointsExchange({
+      siteUrl: site.url,
+      accessToken: activeAccessToken,
+    }).catch(() => null);
+    if (exchange) {
+      if (exchange.transferred) {
+        exchangeNote = ` · 兑换 ${exchange.points} 积分 → $${exchange.usd} API 余额`;
+      } else if (exchange.kind === 'failed') {
+        exchangeNote = ` · 积分兑换未完成：${exchange.reason}`;
+      }
+    }
+
     if (shouldRefreshBalance) {
       try {
         refreshedBalanceInfo = await refreshBalance(account.id);
@@ -652,7 +669,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   await db.insert(schema.checkinLogs).values({
     accountId: account.id,
     status: normalizedStatus,
-    message: lotteryNote ? `${logMessage}${lotteryNote}` : logMessage,
+    message: `${logMessage}${lotteryNote}${exchangeNote}`,
     reward: logReward,
     createdAt,
   }).run();

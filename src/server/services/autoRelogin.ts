@@ -338,6 +338,34 @@ async function tryOauthRelogin(
   const provider = getOauthProviderFromExtraConfig(account.extraConfig)
     ?? getReloginProviderFromExtraConfig(account.extraConfig);
   if (provider === 'linuxdo') {
+    // 皮皮智绘不是 new-api 分支：没有 `/api/status`、没有 `/api/oauth/state`，
+    // 回调也不在 `/api/oauth/linuxdo`，所以下面这个 new-api 驱动在它身上一步
+    // 都走不通。它的「凭证」就是浏览器里的 `pipi_pc_token`，重登等于重放当初
+    // 那次入口点击 —— 复用模块化的捕获流程即可。
+    const { supportsPipiImageLinuxDoLogin, reloginPipiImageWithLinuxDo } =
+      await import('./assistedLogin/sites/pipiImageRelogin.js');
+    if (supportsPipiImageLinuxDoLogin(site.url, provider)) {
+      const captured = await reloginPipiImageWithLinuxDo({ siteId: site.id, siteUrl: site.url });
+      if (!captured.ok || !captured.accessToken) return null;
+
+      const persisted = await persistCredential(account, {
+        accessToken: captured.accessToken,
+        platformUserId: captured.platformUserId ?? undefined,
+        extraFields: buildReloginMarkerPatch(account.extraConfig, 'linuxdo', new Date().toISOString()),
+      });
+      const prune = await pruneAfterSignIn({
+        account,
+        site,
+        accessToken: persisted.accessToken,
+        platformUserId: persisted.platformUserId,
+      });
+      return {
+        ...persisted,
+        accessToken: applyRotatedCredentialIfCarried(persisted.accessToken, prune.rotated),
+        extraConfig: await persistExtraFields(account, prune.extraFields),
+      };
+    }
+
     // Same provider, two protocols. A Sub2API fork answers no `/api/status` and
     // has no `/api/oauth/state`, so the new-api driver below cannot even find
     // its client id there; it starts the flow on

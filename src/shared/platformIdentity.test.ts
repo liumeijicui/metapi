@@ -14,6 +14,8 @@ describe('platformIdentity', () => {
     expect(normalizePlatformAlias('xapi')).toBe('xapi');
     expect(normalizePlatformAlias('x-api')).toBe('xapi');
     expect(normalizePlatformAlias('X-API.CFD')).toBe('xapi');
+    expect(normalizePlatformAlias('pipi-image')).toBe('pipi-image');
+    expect(normalizePlatformAlias('PIPI')).toBe('pipi-image');
     expect(normalizePlatformAlias('')).toBe('');
   });
 
@@ -33,5 +35,11 @@ describe('platformIdentity', () => {
     expect(detectPlatformByUrlHint('https://evil.example.com/?next=https://x-api.cfd/v1/models')).toBeUndefined();
     expect(detectPlatformByUrlHint('https://evil.example.com/?next=https://api.orcarouter.ai/v1/models')).toBeUndefined();
     expect(detectPlatformByUrlHint('https://evil.example.com/?next=https://api.openai.com/v1/models')).toBeUndefined();
+    // 皮皮旺把出图站和 API 站拆成两个域名，只有出图站是自研面板；
+    // `ai.pipiwangcom.com` 仍然是 new-api，不能被这条规则抢走。
+    expect(detectPlatformByUrlHint('https://img.pipiwangcom.com/')).toBe('pipi-image');
+    expect(detectPlatformByUrlHint('https://img.pipiwangcom.com/?page=points')).toBe('pipi-image');
+    expect(detectPlatformByUrlHint('https://ai.pipiwangcom.com/pricing')).toBeUndefined();
+    expect(detectPlatformByUrlHint('https://evil.example.com/?next=https://img.pipiwangcom.com/')).toBeUndefined();
   });
 });

@@ -34,6 +34,19 @@ export type CapturedCredentials = {
   harvestedKeys: string[];
 };
 
+/**
+ * 站点自己的 storage 键名。
+ *
+ * 通用采集只认识 `token` / `access_token` 这类通用命名，而自研面板会把凭据
+ * 写进自己起名的键（皮皮智绘就是 `pipi_pc_token`）。站点专属的键名由站点
+ * 模块显式声明，通用逻辑据此多看几个键，而不是把猜测堆进通用键表里。
+ */
+export type StorageCredentialHints = {
+  tokenKeys: string[];
+  userKeys: string[];
+  uidKeys: string[];
+};
+
 export type CaptureStatus =
   | 'captured'
   | 'needs_provider_login'

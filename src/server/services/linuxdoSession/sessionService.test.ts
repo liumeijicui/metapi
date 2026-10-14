@@ -43,6 +43,28 @@ describe('pickTokenFromRecords', () => {
   it('returns null when no credential key is present', () => {
     expect(pickTokenFromRecords([['locale', 'zh-CN']])).toBeNull();
   });
+
+  it('reads a site-specific credential key only when the site declares it', () => {
+    const records: Array<[string, string]> = [
+      ['pipi_pc_page', 'points'],
+      ['pipi_pc_token', 'pipi-bearer-token'],
+      ['pipi_pc_user', JSON.stringify({ id: 4219, nickname: '皮皮用户' })],
+      ['pipi_pc_uid', '4219'],
+    ];
+
+    // 通用键表里没有站点自己的键名，没声明时读不到任何凭据。
+    expect(pickTokenFromRecords(records)).toBeNull();
+
+    const result = pickTokenFromRecords(records, {
+      tokenKeys: ['pipi_pc_token'],
+      userKeys: ['pipi_pc_user'],
+      uidKeys: ['pipi_pc_uid'],
+    });
+    expect(result?.accessToken).toBe('pipi-bearer-token');
+    expect(result?.username).toBe('皮皮用户');
+    expect(result?.platformUserId).toBe(4219);
+    expect(result?.source).toBe('localStorage');
+  });
 });
 
 describe('selectHarvestedCredential', () => {
