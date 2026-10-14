@@ -522,6 +522,8 @@ export type ProxyLogListItem = {
   clientAppId?: string | null;
   clientAppName?: string | null;
   clientConfidence?: ProxyLogClientConfidence;
+  /** 客户端请求的思考强度（reasoning_effort / reasoning.effort），没传就是 null。 */
+  reasoningEffort?: string | null;
   usageSource?: ProxyLogUsageSource;
   promptTokens?: number | null;
   completionTokens?: number | null;

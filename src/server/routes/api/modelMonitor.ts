@@ -35,6 +35,8 @@ async function recordDirectChatLog(input: {
    * 拿不到就写 null —— 日志里显示「--」，不拿总耗时冒充。
    */
   firstByteLatencyMs?: number | null;
+  /** 页面上选的思考强度；直连请求里就是它发出去的 reasoning_effort。 */
+  reasoningEffort?: string | null;
 }): Promise<void> {
   await insertProxyLog({
     routeId: null,
@@ -48,6 +50,7 @@ async function recordDirectChatLog(input: {
     // 直连对话永远是流式，首字耗时是排查「卡多久才出字」的关键指标。
     isStream: true,
     firstByteLatencyMs: input.firstByteLatencyMs ?? null,
+    reasoningEffort: input.reasoningEffort ?? null,
     errorMessage: input.errorMessage,
     retryCount: 0,
     clientAppName: '模型测试',
@@ -184,6 +187,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         startedAt,
         status: 'failed',
         httpStatus: outcome.status,
+        reasoningEffort,
         errorMessage: failure.message,
       }).catch(() => undefined);
       request.raw.off('close', onClientClose);
@@ -229,6 +233,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
           status: 'failed',
           httpStatus: 0,
           firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
+          reasoningEffort,
           errorMessage: bytes > 0
             ? `${failureMessage}（已输出 ${bytes} 字节后中断）`
             : failureMessage,
@@ -257,6 +262,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         httpStatus: 0,
         // 已经吐过数据就说明首字到达过，失败日志一样值得记这行。
         firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
+        reasoningEffort,
         errorMessage: bytes > 0
           ? `${failureMessage}（已输出 ${bytes} 字节后中断）`
           : failureMessage,
@@ -276,6 +282,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       httpStatus: upstream.status || 200,
       // 一个字节都没吐出来就没有「首字」可言，别把响应头到达时间写成首字。
       firstByteLatencyMs: bytes > 0 ? outcome.firstByteLatencyMs : null,
+      reasoningEffort,
       errorMessage: bytes > 0 ? null : '上游没有返回任何内容',
     }).catch(() => undefined);
     return reply;

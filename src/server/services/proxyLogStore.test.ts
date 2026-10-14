@@ -5,6 +5,7 @@ const {
   hasProxyLogClientColumnsMock,
   hasProxyLogDownstreamApiKeyIdColumnMock,
   hasProxyLogStreamTimingColumnsMock,
+  hasProxyLogReasoningEffortColumnMock,
   dbInsertMock,
   dbInsertValuesMock,
   dbInsertRunMock,
@@ -14,6 +15,7 @@ const {
   hasProxyLogClientColumnsMock: vi.fn(),
   hasProxyLogDownstreamApiKeyIdColumnMock: vi.fn(),
   hasProxyLogStreamTimingColumnsMock: vi.fn(),
+  hasProxyLogReasoningEffortColumnMock: vi.fn(),
   dbInsertMock: vi.fn(),
   dbInsertValuesMock: vi.fn(),
   dbInsertRunMock: vi.fn(),
@@ -38,6 +40,7 @@ const {
     clientAppId: 'client_app_id',
     clientAppName: 'client_app_name',
     clientConfidence: 'client_confidence',
+    reasoningEffort: 'reasoning_effort',
     errorMessage: 'error_message',
     retryCount: 'retry_count',
     createdAt: 'created_at',
@@ -55,6 +58,7 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogClientColumns: (...args: unknown[]) => hasProxyLogClientColumnsMock(...args),
   hasProxyLogDownstreamApiKeyIdColumn: (...args: unknown[]) => hasProxyLogDownstreamApiKeyIdColumnMock(...args),
   hasProxyLogStreamTimingColumns: (...args: unknown[]) => hasProxyLogStreamTimingColumnsMock(...args),
+  hasProxyLogReasoningEffortColumn: (...args: unknown[]) => hasProxyLogReasoningEffortColumnMock(...args),
 }));
 
 import { insertProxyLog, parseProxyLogBillingDetails, withProxyLogSelectFields } from './proxyLogStore.js';
@@ -65,6 +69,7 @@ describe('proxyLogStore', () => {
     hasProxyLogClientColumnsMock.mockReset();
     hasProxyLogDownstreamApiKeyIdColumnMock.mockReset();
     hasProxyLogStreamTimingColumnsMock.mockReset();
+    hasProxyLogReasoningEffortColumnMock.mockReset();
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
     dbInsertRunMock.mockReset();
@@ -72,6 +77,7 @@ describe('proxyLogStore', () => {
     hasProxyLogClientColumnsMock.mockResolvedValue(false);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
     hasProxyLogStreamTimingColumnsMock.mockResolvedValue(false);
+    hasProxyLogReasoningEffortColumnMock.mockResolvedValue(false);
 
     dbInsertMock.mockReturnValue({
       values: (...args: unknown[]) => dbInsertValuesMock(...args),
@@ -289,5 +295,60 @@ describe('proxyLogStore', () => {
     });
     expect(dbInsertValuesMock.mock.calls[1][0].isStream).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].firstByteLatencyMs).toBeUndefined();
+  });
+
+  it('retries proxy log selects without the reasoning effort column when it is missing', async () => {
+    hasProxyLogReasoningEffortColumnMock.mockResolvedValue(true);
+    const runner = vi.fn()
+      .mockRejectedValueOnce(new Error('no such column: proxy_logs.reasoning_effort'))
+      .mockResolvedValueOnce([{ id: 1 }]);
+
+    await expect(withProxyLogSelectFields(runner)).resolves.toEqual([{ id: 1 }]);
+
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[0][0].includeReasoningEffort).toBe(true);
+    expect(runner.mock.calls[0][0].fields.reasoningEffort).toBe('reasoning_effort');
+    expect(runner.mock.calls[1][0].includeReasoningEffort).toBe(false);
+    expect(runner.mock.calls[1][0].fields.reasoningEffort).toBeUndefined();
+  });
+
+  it('writes the requested reasoning effort when the column exists', async () => {
+    hasProxyLogReasoningEffortColumnMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      reasoningEffort: '  high  ',
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+      reasoningEffort: 'high',
+    });
+  });
+
+  it('retries proxy log inserts without reasoning effort when the column is missing', async () => {
+    hasProxyLogReasoningEffortColumnMock.mockResolvedValue(true);
+    dbInsertRunMock
+      .mockRejectedValueOnce(new Error('no such column: proxy_logs.reasoning_effort'))
+      .mockResolvedValueOnce(undefined);
+
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      reasoningEffort: 'high',
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(2);
+    expect(dbInsertValuesMock.mock.calls[0][0].reasoningEffort).toBe('high');
+    expect(dbInsertValuesMock.mock.calls[1][0].reasoningEffort).toBeUndefined();
+  });
+
+  it('omits reasoning effort entirely when the caller did not send one', async () => {
+    hasProxyLogReasoningEffortColumnMock.mockResolvedValue(true);
+
+    await insertProxyLog({ modelRequested: 'gpt-5' });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    expect(dbInsertValuesMock.mock.calls[0][0].reasoningEffort).toBeUndefined();
   });
 });

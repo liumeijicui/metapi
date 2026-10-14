@@ -62,6 +62,7 @@ import {
 } from '../../services/proxyDebugTraceRuntime.js';
 import {
   getSurfaceRequestFailure,
+  resolveReasoningEffortFromBody,
   runWithSurfaceSiteConcurrency,
 } from './sharedSurface.js';
 import {
@@ -264,6 +265,9 @@ async function logProxy(
   totalTokens = 0,
   isStream = false,
   firstByteLatencyMs: number | null = null,
+  // Gemini 协议的思考强度是以 thinkingConfig.thinkingBudget 表达的；下游若按
+  // OpenAI 习惯带了 reasoning_effort，这里就把它记下来，方便和别的协议对齐排查。
+  reasoningEffort: string | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -296,6 +300,7 @@ async function logProxy(
       clientAppId: clientContext?.clientAppId || null,
       clientAppName: clientContext?.clientAppName || null,
       clientConfidence: clientContext?.clientConfidence || null,
+      reasoningEffort,
       errorMessage: normalizedErrorMessage,
       retryCount,
       createdAt,
@@ -840,6 +845,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               0,
               isStreamAction,
               firstByteLatencyMs,
+            
+              resolveReasoningEffortFromBody(request.body),
             );
             if (canRetryChannelSelection(retryCount, forcedChannelId)) {
               retryCount += 1;
@@ -883,6 +890,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 0,
                 isStreamAction,
                 firstByteLatencyMs,
+              
+                resolveReasoningEffortFromBody(request.body),
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -969,6 +978,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 parsedUsage.totalTokens,
                 isStreamAction,
                 firstByteLatencyMs,
+              
+                resolveReasoningEffortFromBody(request.body),
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -1023,6 +1034,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 parsedUsage.totalTokens,
                 isStreamAction,
                 firstByteLatencyMs,
+              
+                resolveReasoningEffortFromBody(request.body),
               );
               await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
                 attemptIndex: retryCount,
@@ -1089,6 +1102,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               parsedUsage.totalTokens,
               isStreamAction,
               firstByteLatencyMs,
+            
+              resolveReasoningEffortFromBody(request.body),
             );
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: retryCount,
@@ -1139,6 +1154,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               0,
               isStreamAction,
               firstByteLatencyMs,
+            
+              resolveReasoningEffortFromBody(request.body),
             );
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: retryCount,
@@ -1387,6 +1404,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             0,
             isStreamAction,
             null,
+          
+            resolveReasoningEffortFromBody(request.body),
           );
           if (canRetryChannelSelection(retryCount, forcedChannelId)) {
             retryCount += 1;
@@ -1434,6 +1453,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           parsedUsage.totalTokens,
           isStreamAction,
           firstByteLatencyMs,
+        
+          resolveReasoningEffortFromBody(request.body),
         );
         const downstreamPayload = isGeminiCliDownstream
           ? { response: geminiResponse }
@@ -1486,6 +1507,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           0,
           isStreamAction,
           null,
+        
+          resolveReasoningEffortFromBody(request.body),
         );
         if (canRetryChannelSelection(retryCount, forcedChannelId)) {
           retryCount += 1;

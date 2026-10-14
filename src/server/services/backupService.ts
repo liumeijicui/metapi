@@ -1830,6 +1830,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         clientAppId: row.clientAppId ?? null,
         clientAppName: row.clientAppName ?? null,
         clientConfidence: row.clientConfidence ?? null,
+        reasoningEffort: row.reasoningEffort ?? null,
         errorMessage: row.errorMessage ?? null,
         retryCount: row.retryCount ?? 0,
         createdAt: row.createdAt,

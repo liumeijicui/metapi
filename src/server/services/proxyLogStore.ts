@@ -5,6 +5,7 @@ import {
   hasProxyLogClientColumns,
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
+  hasProxyLogReasoningEffortColumn,
 } from '../db/index.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 
@@ -29,6 +30,8 @@ export type ProxyLogInsertInput = {
   clientAppId?: string | null;
   clientAppName?: string | null;
   clientConfidence?: string | null;
+  /** 客户端请求的思考强度（reasoning_effort / reasoning.effort），原样入库。 */
+  reasoningEffort?: string | null;
   errorMessage?: string | null;
   retryCount?: number | null;
   createdAt?: string | null;
@@ -72,15 +75,23 @@ function buildProxyLogStreamTimingSelectFields() {
   };
 }
 
+function buildProxyLogReasoningEffortSelectFields() {
+  return {
+    reasoningEffort: schema.proxyLogs.reasoningEffort,
+  };
+}
+
 function buildProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
+  includeReasoningEffort?: boolean;
 }) {
   return {
     ...buildProxyLogCoreSelectFields(),
     ...(options?.includeStreamTimingFields ? buildProxyLogStreamTimingSelectFields() : {}),
     ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
+    ...(options?.includeReasoningEffort ? buildProxyLogReasoningEffortSelectFields() : {}),
     ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
   };
 }
@@ -95,6 +106,7 @@ export type ResolvedProxyLogSelectFields = {
   includeBillingDetails: boolean;
   includeClientFields: boolean;
   includeStreamTimingFields: boolean;
+  includeReasoningEffort: boolean;
   fields: ProxyLogSelectFields;
 };
 
@@ -102,6 +114,7 @@ export async function resolveProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
+  includeReasoningEffort?: boolean;
 }) {
   const includeBillingDetails = options?.includeBillingDetails === true
     && await hasProxyLogBillingDetailsColumn();
@@ -109,68 +122,71 @@ export async function resolveProxyLogSelectFields(options?: {
     && await hasProxyLogClientColumns();
   const includeStreamTimingFields = options?.includeStreamTimingFields !== false
     && await hasProxyLogStreamTimingColumns();
+  const includeReasoningEffort = options?.includeReasoningEffort !== false
+    && await hasProxyLogReasoningEffortColumn();
 
   return {
     includeBillingDetails,
     includeClientFields,
     includeStreamTimingFields,
+    includeReasoningEffort,
     fields: buildProxyLogSelectFields({
       includeBillingDetails,
       includeClientFields,
       includeStreamTimingFields,
+      includeReasoningEffort,
     }),
   };
 }
 
 export async function withProxyLogSelectFields<T>(
   runner: (selection: ResolvedProxyLogSelectFields) => Promise<T>,
-  options?: { includeBillingDetails?: boolean; includeClientFields?: boolean; includeStreamTimingFields?: boolean },
+  options?: {
+    includeBillingDetails?: boolean;
+    includeClientFields?: boolean;
+    includeStreamTimingFields?: boolean;
+    includeReasoningEffort?: boolean;
+  },
 ): Promise<T> {
   let selection = await resolveProxyLogSelectFields(options);
+
+  // 旧库缺列时逐项退让；用统一的 rebuild 保证每次退让都不会漏掉其它开关。
+  const rebuild = (
+    overrides: Partial<Omit<ResolvedProxyLogSelectFields, 'fields'>>,
+  ): ResolvedProxyLogSelectFields => {
+    const next = { ...selection, ...overrides };
+    return {
+      ...next,
+      fields: buildProxyLogSelectFields({
+        includeBillingDetails: next.includeBillingDetails,
+        includeClientFields: next.includeClientFields,
+        includeStreamTimingFields: next.includeStreamTimingFields,
+        includeReasoningEffort: next.includeReasoningEffort,
+      }),
+    };
+  };
 
   while (true) {
     try {
       return await runner(selection);
     } catch (error) {
       if (selection.includeBillingDetails && isMissingBillingDetailsColumnError(error)) {
-        selection = {
-          includeBillingDetails: false,
-          includeClientFields: selection.includeClientFields,
-          includeStreamTimingFields: selection.includeStreamTimingFields,
-          fields: buildProxyLogSelectFields({
-            includeBillingDetails: false,
-            includeClientFields: selection.includeClientFields,
-            includeStreamTimingFields: selection.includeStreamTimingFields,
-          }),
-        };
+        selection = rebuild({ includeBillingDetails: false });
         continue;
       }
 
       if (selection.includeClientFields && isMissingProxyLogClientColumnsError(error)) {
-        selection = {
-          includeBillingDetails: selection.includeBillingDetails,
-          includeClientFields: false,
-          includeStreamTimingFields: selection.includeStreamTimingFields,
-          fields: buildProxyLogSelectFields({
-            includeBillingDetails: selection.includeBillingDetails,
-            includeClientFields: false,
-            includeStreamTimingFields: selection.includeStreamTimingFields,
-          }),
-        };
+        selection = rebuild({ includeClientFields: false });
         continue;
       }
 
       if (selection.includeStreamTimingFields && isMissingProxyLogStreamTimingColumnsError(error)) {
-        selection = {
-          includeBillingDetails: selection.includeBillingDetails,
-          includeClientFields: selection.includeClientFields,
-          includeStreamTimingFields: false,
-          fields: buildProxyLogSelectFields({
-            includeBillingDetails: selection.includeBillingDetails,
-            includeClientFields: selection.includeClientFields,
-            includeStreamTimingFields: false,
-          }),
-        };
+        selection = rebuild({ includeStreamTimingFields: false });
+        continue;
+      }
+
+      if (selection.includeReasoningEffort && isMissingReasoningEffortColumnError(error)) {
+        selection = rebuild({ includeReasoningEffort: false });
         continue;
       }
 
@@ -257,6 +273,17 @@ export function isMissingProxyLogStreamTimingColumnsError(error: unknown): boole
     );
 }
 
+export function isMissingReasoningEffortColumnError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  return lowered.includes('reasoning_effort')
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
 export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> {
   const baseValues = {
     routeId: input.routeId ?? null,
@@ -295,11 +322,17 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
   const requestedStreamTimingFields = input.isStream != null || input.firstByteLatencyMs != null;
   const includeStreamTimingFields = requestedStreamTimingFields
     && await hasProxyLogStreamTimingColumns();
+  const normalizedReasoningEffort = typeof input.reasoningEffort === 'string'
+    ? input.reasoningEffort.trim()
+    : '';
+  const includeReasoningEffort = normalizedReasoningEffort.length > 0
+    && await hasProxyLogReasoningEffortColumn();
 
   let allowBillingDetails = includeBillingDetails;
   let allowDownstreamApiKeyId = includeDownstreamApiKeyId;
   let allowClientFields = includeClientFields;
   let allowStreamTimingFields = includeStreamTimingFields;
+  let allowReasoningEffort = includeReasoningEffort;
 
   while (true) {
     const values = {
@@ -320,6 +353,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
           clientConfidence: input.clientConfidence ?? null,
         }
         : {}),
+      ...(allowReasoningEffort ? { reasoningEffort: normalizedReasoningEffort || null } : {}),
     };
 
     try {
@@ -343,6 +377,11 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
 
       if (allowStreamTimingFields && isMissingProxyLogStreamTimingColumnsError(error)) {
         allowStreamTimingFields = false;
+        continue;
+      }
+
+      if (allowReasoningEffort && isMissingReasoningEffortColumnError(error)) {
+        allowReasoningEffort = false;
         continue;
       }
 

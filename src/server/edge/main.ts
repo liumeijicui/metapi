@@ -34,6 +34,7 @@ const {
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
   ensureProxyLogStreamTimingColumns,
+  ensureProxyLogReasoningEffortColumn,
   ensureRouteGroupingCompatibilityColumns,
   ensureSiteCompatibilityColumns,
   getSqliteConnection,
@@ -67,6 +68,7 @@ await ensureProxyLogStreamTimingColumns();
 await ensureProxyLogClientColumns();
 await ensureProxyLogDownstreamApiKeyIdColumn();
 await ensureProxyLogBillingDetailsColumn();
+await ensureProxyLogReasoningEffortColumn();
 
 // 3) 使用日志归档：日志镜像到数据目录下的 SQLite 文件，并把上次的日志读回内存。
 setupEdgeLogArchive({ dataDirAbsolute: edge.dataDirAbsolute });

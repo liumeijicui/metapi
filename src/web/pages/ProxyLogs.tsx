@@ -361,6 +361,17 @@ function formatStreamModeLabel(isStream: boolean | null | undefined) {
   return isStream ? "流式" : "非流";
 }
 
+/**
+ * 思考强度：只在客户端真的发了 reasoning_effort / reasoning.effort 时才有值。
+ *
+ * 这里只返回**值本身**（如 high），标签交给 `tr('思考强度')` —— 把中文拼进值里
+ * 会让严格英文模式（i18n 会把中文剥掉）只剩一个光秃秃的 high，看不出是什么含义。
+ */
+function formatReasoningEffortValue(effort: string | null | undefined) {
+  const trimmed = typeof effort === "string" ? effort.trim() : "";
+  return trimmed || null;
+}
+
 function formatFirstByteLabel(ms: number | null | undefined) {
   if (!Number.isFinite(ms) || typeof ms !== "number" || ms < 0) return null;
   return `首字 ${formatLatency(ms)}`;
@@ -2782,6 +2793,9 @@ export default function ProxyLogs() {
               const firstByteLabel = formatFirstByteLabel(
                 detailLog.firstByteLatencyMs,
               );
+              const reasoningEffortValue = formatReasoningEffortValue(
+                detailLog.reasoningEffort,
+              );
               const routeKindLabel = formatRouteKindLabel(log.routeKind);
               const mappedModelLabel = formatMappedModelLabel(
                 log.modelRequested,
@@ -2929,6 +2943,12 @@ export default function ProxyLogs() {
                       {streamModeLabel ? (
                         <MobileField label="模式" value={streamModeLabel} />
                       ) : null}
+                      {reasoningEffortValue ? (
+                        <MobileField
+                          label="思考强度"
+                          value={reasoningEffortValue}
+                        />
+                      ) : null}
                       {firstByteLabel ? (
                         <MobileField
                           label="首字"
@@ -3040,6 +3060,9 @@ export default function ProxyLogs() {
                 const firstByteLabel = formatFirstByteLabel(
                   detailLog.firstByteLatencyMs,
                 );
+                const reasoningEffortValue = formatReasoningEffortValue(
+                  detailLog.reasoningEffort,
+                );
                 const routeKindLabel = formatRouteKindLabel(log.routeKind);
                 const mappedModelLabel = formatMappedModelLabel(
                   log.modelRequested,
@@ -3128,7 +3151,7 @@ export default function ProxyLogs() {
                               {downstreamKeySummary}
                             </div>
                           ) : null}
-                          {routeKindLabel || streamModeLabel || firstByteLabel ? (
+                          {routeKindLabel || streamModeLabel || firstByteLabel || reasoningEffortValue ? (
                             <div
                               style={{
                                 display: "flex",
@@ -3168,6 +3191,15 @@ export default function ProxyLogs() {
                                   }}
                                 >
                                   {firstByteLabel}
+                                </span>
+                              ) : null}
+                              {reasoningEffortValue ? (
+                                <span
+                                  className="badge badge-muted"
+                                  style={{ fontSize: 10 }}
+                                  title="客户端这次请求的思考强度（reasoning_effort）"
+                                >
+                                  {tr('思考强度')} {reasoningEffortValue}
                                 </span>
                               ) : null}
                             </div>
@@ -3358,6 +3390,19 @@ export default function ProxyLogs() {
                                             }}
                                           >
                                             {streamModeLabel}
+                                          </strong>
+                                        </>
+                                      )}
+                                      {reasoningEffortValue && (
+                                        <>
+                                          ，{tr('思考强度')}:{" "}
+                                          <strong
+                                            style={{
+                                              color:
+                                                "var(--color-text-primary)",
+                                            }}
+                                          >
+                                            {reasoningEffortValue}
                                           </strong>
                                         </>
                                       )}

@@ -84,6 +84,7 @@ import {
   createSurfaceDispatchRequest,
   getSurfaceStickyPreferredChannelId,
   recordSurfaceSuccess,
+  resolveReasoningEffortFromBody,
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
 } from './sharedSurface.js';
@@ -318,6 +319,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
       maxRetries,
       clientContext,
       downstreamApiKeyId,
+      reasoningEffort: resolveReasoningEffortFromBody(body),
     });
     const stickySessionKey = buildSurfaceStickySessionKey({
       clientContext,

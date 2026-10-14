@@ -265,6 +265,8 @@ export async function writeSurfaceProxyLog(input: {
   usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
+  /** 客户端这次请求要的思考强度；没发就是 null。 */
+  reasoningEffort?: string | null;
 }): Promise<void> {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -300,6 +302,7 @@ export async function writeSurfaceProxyLog(input: {
       clientAppId: input.clientContext?.clientAppId || null,
       clientAppName: input.clientContext?.clientAppName || null,
       clientConfidence: input.clientContext?.clientConfidence || null,
+      reasoningEffort: input.reasoningEffort ?? null,
       errorMessage: normalizedErrorMessage,
       retryCount: input.retryCount,
       createdAt,
@@ -307,6 +310,27 @@ export async function writeSurfaceProxyLog(input: {
   } catch (error) {
     console.warn(`[proxy/${input.warningScope}] failed to write proxy log`, error);
   }
+}
+
+/**
+ * 取客户端这次要的思考强度：OpenAI Chat 走 `reasoning_effort`，Responses 走
+ * `reasoning.effort`（也有客户端两者都发）。
+ *
+ * 这里**不做白名单归一**：值原样透传给上游，日志也就该原样记下来，
+ * 这样「上游报 reasoning_effort 不支持」时能一眼看出当时发的档位。
+ * 只做去空白和长度上限，避免脏数据把日志字段撑爆。
+ */
+export function resolveReasoningEffortFromBody(body: unknown): string | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+  const reasoning = record.reasoning && typeof record.reasoning === 'object' && !Array.isArray(record.reasoning)
+    ? record.reasoning as Record<string, unknown>
+    : null;
+  const raw = typeof record.reasoning_effort === 'string'
+    ? record.reasoning_effort
+    : (typeof reasoning?.effort === 'string' ? reasoning.effort : '');
+  const trimmed = raw.trim();
+  return trimmed ? trimmed.slice(0, 32) : null;
 }
 
 export function createSurfaceDispatchRequest(input: {
@@ -537,6 +561,8 @@ export function createSurfaceFailureToolkit(input: {
   maxRetries: number;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
+  /** 下游请求里的思考强度，由各 surface 从请求体里解出来后带进来。 */
+  reasoningEffort?: string | null;
 }) {
   const log = async (args: {
     selected: SurfaceSelectedChannel;
@@ -577,6 +603,7 @@ export function createSurfaceFailureToolkit(input: {
       upstreamPath: args.upstreamPath,
       clientContext: input.clientContext,
       downstreamApiKeyId: input.downstreamApiKeyId,
+      reasoningEffort: input.reasoningEffort ?? null,
     });
   };
 

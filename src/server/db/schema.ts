@@ -360,6 +360,9 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   clientAppId: text('client_app_id'),
   clientAppName: text('client_app_name'),
   clientConfidence: text('client_confidence'),
+  // 客户端这次请求要求的思考强度（reasoning_effort / reasoning.effort），
+  // 原样记录，不做白名单归一 —— 日志要回答的是「当时到底发了什么」。
+  reasoningEffort: text('reasoning_effort'),
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').default(0),
   createdAt: text('created_at').default(sql`(datetime('now'))`),

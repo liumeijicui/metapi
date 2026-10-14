@@ -1,3 +1,34 @@
+### 107. 使用日志新增「思考强度」字段（reasoning_effort / reasoning.effort）
+
+- **类型**：新增能力（可观测性：日志 → 数据库 → 接口 → 界面）
+- **需求来源**：本会话（用户：「帮我看看日志里能不能加上思考强度的字段」）
+- **一、记什么、从哪取**
+  - 记的是**客户端这次请求要求的思考强度**，也就是真正发给上游的那个值：
+    - OpenAI Chat / Completions：顶层 `reasoning_effort`
+    - OpenAI Responses：嵌套 `reasoning.effort`（也有客户端两者都发，此时以顶层为准 —— 上游 `upstreamRequestBuilder` 就是这么取的）
+    - Gemini：下游若按 OpenAI 习惯带了 `reasoning_effort` 也一并记下（Gemini 原生是用 `thinkingConfig.thinkingBudget` 表达强度，这里不做换算，避免记出一个上游其实没收到的东西）
+  - 取值**不做白名单归一**（不把 `xhigh` 之类裁成 `high`）：日志要回答的是「当时到底发了什么」，上游报「reasoning_effort 不支持」时能一眼看出档位。只做去空白 + 32 字符上限，防止脏请求把字段撑爆。
+  - 提取逻辑集中在 `resolveReasoningEffortFromBody()`（`sharedSurface.ts`），各 surface 复用同一份，不再各写一遍。
+- **二、落库与接口**
+  - `proxy_logs` 新增列 `reasoning_effort text`（迁移 `drizzle/0033_marvelous_pestilence.sql`），并按仓库规则同步了 schema 契约与跨方言工件（`schema:generate`）。
+  - 旧库兼容：`hasProxyLogReasoningEffortColumn()` / `ensureProxyLogReasoningEffortColumn()` 走 `has*` + `ensure*` 双件套；`proxyLogStore` 的**选择**与**插入**两条路径都加了「缺列就退让重试」分支，历史列缺失的库不会因此写不进日志（与 `is_stream` / `client_*` / `billing_details` 同一套模式），选列的重试用统一的 `rebuild()` 收敛，避免每次退让漏掉其它开关。
+  - 读接口返回 `reasoningEffort`（列表 `view=query`、`view=meta` 与单条详情都会带），`src/web/api.ts` 补类型。
+  - 备份/导入（`backupService`）同步搬运该字段；exe 边缘版的使用日志归档本来就是按 `main.proxy_logs` 的实际列清单动态生成的，schema 加列无需改动。
+- **三、界面**
+  - 表格「模型」列的徽标行新增一枚灰色小徽标 `思考强度 high`，鼠标悬停有 tooltip；移动端卡片展开后有「思考强度」一项；日志详情弹窗的摘要句里也带上一句 `，思考强度: high。`
+  - **标签用 `tr('思考强度')`、值单独拼接**：最初把中文直接拼进值里（`思考 ${effort}`）在中文界面正常，但严格英文模式会把中文剥掉、只剩一个光秃秃的 `high`，看不出是什么含义；改为 `tr()` 后英文界面显示 `Reasoning effort high`。顺带补了 `思考` / `思考强度` / tooltip 三条英文映射（`i18n.supplement.ts`）。
+- **四、验证**
+  - `tsc -p tsconfig.server.json`、`tsc -p tsconfig.web.json`、`vite build`、`repo:drift-check`（0 violations）通过；服务已重启，启动时本地库自动补出 `reasoning_effort` 列。
+  - 单测：`proxyLogStore.test.ts` 补 4 例（缺列退让 / 写入前 trim / 缺列插入退让 / 没传就不写该字段）；`sharedSurface.test.ts` 补 3 例覆盖 `resolveReasoningEffortFromBody`（顶层与嵌套取值、空白与非字符串、32 字符截断）。相关 38 个测试文件 490 例全绿。
+  - 真机实测（走网关 `sk-metapi-local-dev`，日志落库后核对）：
+    - `/v1/chat/completions` + `reasoning_effort=high` → 日志 `high`；同请求去掉该字段 → 日志为空（不写假值）。
+    - `/v1/responses` + `reasoning: {effort: medium}` → 日志 `medium`（嵌套写法也认得）。
+    - `/v1/completions` + `reasoning_effort=minimal` → 日志 `minimal`。
+    - 模型监控「对话」（直连、不经路由）→ 也会记下页面所选档位（`reasoningEffort` 一路透传到直连日志）。
+  - 界面实测（Playwright + 系统 chromium）：中文界面看到 `思考强度 low / medium / high`，详情弹窗摘要句带 `，思考强度: low`；英文界面显示 `Reasoning effort ...`，不再出现只有值没有标签的情况。
+- **主要文件**：`src/server/db/schema.ts`、`drizzle/0033_marvelous_pestilence.sql`、`src/server/db/index.ts`、`src/server/services/proxyLogStore.ts`、`src/server/proxy-core/surfaces/sharedSurface.ts`、`src/server/proxy-core/surfaces/chatSurface.ts`、`src/server/proxy-core/surfaces/openAiResponsesSurface.ts`、`src/server/proxy-core/surfaces/geminiSurface.ts`、`src/server/routes/proxy/completions.ts`、`src/server/routes/api/modelMonitor.ts`、`src/server/routes/api/proxyLogRoutes.ts`、`src/server/services/backupService.ts`、`src/web/api.ts`、`src/web/pages/ProxyLogs.tsx`、`src/web/i18n.supplement.ts`
+- **状态**：已完成
+
 ### 106. 左侧菜单过长时无法滚动：补上滚动条并修正侧边栏高度
 
 - **类型**：缺陷修复（前端布局）

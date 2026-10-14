@@ -359,6 +359,7 @@ describe('selectSurfaceChannelForAttempt', () => {
         traceHint: 'trace-1',
       },
       downstreamApiKeyId: 44,
+      reasoningEffort: 'high',
     });
 
     expect(composeProxyLogMessageMock).toHaveBeenCalledWith({
@@ -391,9 +392,42 @@ describe('selectSurfaceChannelForAttempt', () => {
       clientAppId: 'app-id',
       clientAppName: 'App',
       clientConfidence: 'high',
+      reasoningEffort: 'high',
       errorMessage: 'normalized error',
       retryCount: 1,
       createdAt: '2026-03-21 22:00:00',
+    });
+  });
+
+  describe('resolveReasoningEffortFromBody', () => {
+    it('reads the chat-completions field and the responses nested effort', async () => {
+      const { resolveReasoningEffortFromBody } = await import('./sharedSurface.js');
+
+      expect(resolveReasoningEffortFromBody({ reasoning_effort: 'high' })).toBe('high');
+      expect(resolveReasoningEffortFromBody({ reasoning: { effort: 'xhigh' } })).toBe('xhigh');
+      // 两者都发时以 Chat 的顶层字段为准（上游也是这么取的）。
+      expect(resolveReasoningEffortFromBody({
+        reasoning_effort: 'low',
+        reasoning: { effort: 'high' },
+      })).toBe('low');
+    });
+
+    it('returns null when the client asked for nothing, and trims blanks', async () => {
+      const { resolveReasoningEffortFromBody } = await import('./sharedSurface.js');
+
+      expect(resolveReasoningEffortFromBody({ model: 'gpt-5.2' })).toBeNull();
+      expect(resolveReasoningEffortFromBody({ reasoning_effort: '   ' })).toBeNull();
+      expect(resolveReasoningEffortFromBody({ reasoning: { effort: 3 } })).toBeNull();
+      expect(resolveReasoningEffortFromBody(null)).toBeNull();
+      expect(resolveReasoningEffortFromBody('high')).toBeNull();
+      expect(resolveReasoningEffortFromBody(['high'])).toBeNull();
+    });
+
+    it('caps the stored value so a junk body cannot bloat the column', async () => {
+      const { resolveReasoningEffortFromBody } = await import('./sharedSurface.js');
+
+      expect(resolveReasoningEffortFromBody({ reasoning_effort: 'x'.repeat(100) }))
+        .toBe('x'.repeat(32));
     });
   });
 

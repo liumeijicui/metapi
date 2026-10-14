@@ -30,6 +30,7 @@ import {
   getTesterForcedChannelId,
   selectProxyChannelForAttempt,
 } from '../../proxy-core/channelSelection.js';
+import { resolveReasoningEffortFromBody } from '../../proxy-core/surfaces/sharedSurface.js';
 
 export async function completionsProxyRoute(app: FastifyInstance) {
   app.post('/v1/completions', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -53,6 +54,9 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     });
 
     const isStream = body.stream === true;
+    // 思考强度原样记进日志：这个 surface 把请求体直接转发给上游，
+    // 所以日志里记的就是上游真正收到的那份。
+    const reasoningEffort = resolveReasoningEffortFromBody(body);
     const firstByteTimeoutMs = Math.max(0, Math.trunc((config.proxyFirstByteTimeoutSec || 0) * 1000));
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
@@ -214,6 +218,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             resolvedUsage.usageSource,
             isStream,
             firstByteLatencyMs,
+            reasoningEffort,
           );
           return;
         }
@@ -254,6 +259,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             null,
             isStream,
             firstByteLatencyMs,
+            reasoningEffort,
           );
 
           if (shouldRetryProxyRequest(failure.status, errText) && canRetryChannelSelection(retryCount, forcedChannelId)) {
@@ -317,6 +323,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           resolvedUsage.usageSource,
           isStream,
           firstByteLatencyMs,
+          reasoningEffort,
         );
         return reply.send(data);
       } catch (err: any) {
@@ -347,6 +354,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           null,
           isStream,
           firstByteLatencyMs,
+          reasoningEffort,
         );
         if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
           await reportTokenExpired({
@@ -391,6 +399,7 @@ async function logProxy(
   usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream: boolean,
   firstByteLatencyMs: number | null,
+  reasoningEffort: string | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -425,6 +434,7 @@ async function logProxy(
       clientAppId: clientContext?.clientAppId || null,
       clientAppName: clientContext?.clientAppName || null,
       clientConfidence: clientContext?.clientConfidence || null,
+      reasoningEffort,
       errorMessage: normalizedErrorMessage,
       retryCount,
       createdAt,

@@ -66,6 +66,7 @@ import {
   createSurfaceDispatchRequest,
   getSurfaceStickyPreferredChannelId,
   recordSurfaceSuccess,
+  resolveReasoningEffortFromBody,
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
 } from './sharedSurface.js';
@@ -360,6 +361,7 @@ export async function handleChatSurfaceRequest(
     maxRetries,
     clientContext,
     downstreamApiKeyId,
+    reasoningEffort: resolveReasoningEffortFromBody(downstreamFormat === 'claude' ? claudeOriginalBody : request.body),
   });
   const stickySessionKey = buildSurfaceStickySessionKey({
     clientContext,
@@ -1394,6 +1396,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
     maxRetries,
     clientContext,
     downstreamApiKeyId,
+    reasoningEffort: resolveReasoningEffortFromBody(rawBody),
   });
   const stickySessionKey = buildSurfaceStickySessionKey({
     clientContext,
