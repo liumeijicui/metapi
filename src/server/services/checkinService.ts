@@ -38,6 +38,7 @@ import {
 import { describeRenewalGap, tryAutoRelogin } from './autoRelogin.js';
 import { runDailyLottery } from './lotteryService.js';
 import { runPipiPointsExchange } from './pipiPointsExchangeService.js';
+import { isPipiImageSiteUrl } from './platforms/pipiImage.js';
 import { isManagedSub2ApiTokenDue, isSub2ApiPlatform } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 import { config } from '../config.js';
@@ -638,15 +639,23 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         + (lottery.reward > 0 ? ` +$${lottery.reward}` : '');
     }
 
-    const exchange = await runPipiPointsExchange({
-      siteUrl: site.url,
-      accessToken: activeAccessToken,
-    }).catch(() => null);
-    if (exchange) {
-      if (exchange.transferred) {
-        exchangeNote = ` · 兑换 ${exchange.points} 积分 → $${exchange.usd} API 余额`;
-      } else if (exchange.kind === 'failed') {
-        exchangeNote = ` · 积分兑换未完成：${exchange.reason}`;
+    // 皮皮智绘把签到与「积分乐园」配成一对：签到只发图片站积分，积分换回 API
+    // 余额才用得上，所以这里跟着签到一起跑。判定与平台适配器同源，别的站点
+    // 不会走进这个分支；这条线在定时任务里同样成立（`checkinAll` →
+    // `checkinAccount`），不需要操作者点一次签到才兑换。
+    if (isPipiImageSiteUrl(site.url)) {
+      const exchange = await runPipiPointsExchange({
+        siteUrl: site.url,
+        accessToken: activeAccessToken,
+      }).catch(() => null);
+      if (exchange) {
+        if (exchange.transferred) {
+          exchangeNote = ` · 兑换 ${exchange.points} 积分 → $${exchange.usd} API 余额`;
+        } else if (exchange.kind === 'failed') {
+          // `reason` 本身就是一句能独立读的话（「站点拒绝兑换请求：HTTP 502」），
+          // 调用方再补一层前缀只会拼出「积分兑换未完成：兑换未完成：…」。
+          exchangeNote = ` · ${exchange.reason}`;
+        }
       }
     }
 

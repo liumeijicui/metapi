@@ -1,3 +1,24 @@
+### 114. 皮皮两站收尾：签到与积分兑换在定时任务里一起跑、图片站的模型监控原因如实化
+
+- **类型**：缺陷修复（分支条件显式化 + 日志文案 + 平台能力声明）
+- **需求来源**：本会话（用户：「签到对话行程对应的分支代码，定时任务自动一起跑」／「模型监控里也没看到他的模型。帮我拉取一次」）
+- **一、签到 + 兑换在定时任务里一起跑**
+  - 兑换原本是「签到成功后无条件调一次 `runPipiPointsExchange`，靠它自己返回 `null` 兜底」。行为上没错，但读代码的人得跳到另一个文件才能确定「谁会真的兑换」，而且这段逻辑对每个签到成功的站点都要多一次 `await`（哪怕立刻返回）。
+  - 改成显式分支：`if (isPipiImageSiteUrl(site.url))`，判定函数直接从平台适配器导入 —— 与「这个 URL 是不是皮皮智绘」保持同一处定义，避免两处判定各自漂移。
+  - 定时任务走的是 `checkinAll({scheduleMode:'cron'})` → `checkinAccount` 同一条链路，因此分支提到这里之后，签到与兑换是同一个定时任务里一起完成的，不需要操作者手动点一次签到。
+  - 新增 `src/server/services/checkinService.pipiExchange.test.ts`（5 例）：定时任务模式下确实调用了兑换并写进日志（`兑换 200 积分 → $10 API 余额`）；「今日已签到」那天照样兑换；未到起兑线只记签到、不写兑换备注；兑换失败只作为备注、**不把成功的签到翻成失败**；非图片站（happycoding / new-api）一次都不调用兑换。
+- **二、兑换失败文案去重**
+  - `pipiPointsExchangeService` 的失败原因本身就是一句完整的话（`站点拒绝兑换请求：HTTP 502`），`checkinService` 再拼一层 `积分兑换未完成：` 会得到「积分兑换未完成：兑换未完成：HTTP 502」。现在调用方直接 ` · ${reason}`。
+- **三、图片站的模型监控原因改成实话**
+  - 皮皮智绘（图片站）在模型监控里显示的是「该平台没有模型监控接口；用密钥没读回任何模型（密钥无权限或被盾拦截）」。后半句是诬告：它没有对话模型，压根没试过任何凭据；照这句话排查会一路去查权限问题。
+  - `PlatformAdapter` 新增可选声明 `modelMonitorUnsupportedReason`，`PipiImageAdapter` 填上「皮皮智绘是图片站，只有出图模型（image-1 / image-2），没有对话模型，因此没有成功率 / 延迟可采样」。
+  - `fetchSiteMetricsFromAdapter` 在拿到适配器之后、列凭据之前短路：有声明就直接落 `unsupported` + 该声明，凭据列与降级读模型那两步都不执行。新增 1 例单测锁住这一点（`getModels` 一次都没被调用、`credentialKind/credentialId` 为 `null`、文案不含「密钥」）。
+- **四、验证**
+  - `npx vitest run`（本次涉及的 3 个文件）46 例全绿；`tsc -p tsconfig.server.json` + `npm run build:server` 通过；`npm run repo:drift-check` 0 违规。
+  - 重启服务后手动跑一轮采集（`POST /api/model-monitor/refresh`）：站点 64 皮皮旺 API `ok` / 5 个模型（`deepseek-v4.1-flash` 99.03%、`gpt-6-luna` 91.67%、`grok-4.6` 100%、`grok-4.5` 90.36%、`glm-5.3-flash` 87.5%）；站点 65 皮皮智绘 `unsupported`，文案即上面那句声明。
+- **主要文件**：`src/server/services/checkinService.ts`、`src/server/services/pipiPointsExchangeService.ts`、`src/server/services/modelMonitorService.ts`、`src/server/services/platforms/base.ts`、`src/server/services/platforms/pipiImage.ts`、`src/server/services/checkinService.pipiExchange.test.ts`、`src/server/services/modelMonitorService.test.ts`
+- **状态**：已完成
+
 ### 113. 登记「皮皮智绘」图片站：每日签到 + 图片站积分自动兑换 API 余额
 
 - **类型**：新平台接入（平台适配器 + 托管登录凭据采集 + 签到后置动作）

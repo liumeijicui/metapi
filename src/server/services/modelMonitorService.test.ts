@@ -545,6 +545,36 @@ describe('modelMonitorService', () => {
       expect(service.isModelMonitorRunning()).toBe(false);
     });
 
+    it('平台自己声明没有模型面（图片站）时直接标不支持，而不是猜「密钥没权限」', async () => {
+      const site = await seedSite({ platform: 'pipi-image', url: 'https://img.pipiwangcom.com' });
+      await seedAccount(site.id, { accessToken: 'pipi-pc-token' });
+      const getModels = vi.fn(async () => ['unexpected']);
+      getAdapterMock.mockImplementation(() => ({
+        platformName: 'pipi-image',
+        modelMonitorUnsupportedReason: '皮皮智绘是图片站，只有出图模型（image-1 / image-2），没有对话模型，因此没有成功率 / 延迟可采样',
+        getModels,
+      }));
+
+      const summary = await service.runModelMonitorFetch();
+
+      expect(summary.status).toMatchObject({ unsupported: 1, modelsOnly: 0, ok: 0, error: 0 });
+      expect(summary.models).toBe(0);
+      // 声明优先：连「降级用凭据读模型名」这一步都不该发生。
+      expect(getModels).not.toHaveBeenCalled();
+
+      const row = (await db.select().from(schema.siteModelMonitorSites).all())[0];
+      expect(row).toMatchObject({
+        status: 'unsupported',
+        modelsCount: 0,
+        credentialKind: null,
+        credentialId: null,
+      });
+      // 文案必须是平台自己的声明，不能写成「用密钥没读回任何模型」这种没发生过的结论。
+      expect(row.message).toContain('只有出图模型');
+      expect(row.message).not.toContain('密钥');
+      expect((await db.select().from(schema.siteModelMonitorModels).all())).toHaveLength(0);
+    });
+
     it('平台没有监控接口时降级用密钥读模型名：指标留空并标记为仅模型列表', async () => {
       const site = await seedSite({ platform: 'sub2api' });
       const account = await seedAccount(site.id, { accessToken: 'jwt-session-token' });

@@ -55,6 +55,13 @@ function errorText(error: unknown): string {
 export class PipiImageAdapter extends StandardApiProviderAdapterBase {
   readonly platformName = PIPI_IMAGE_PLATFORM;
 
+  /**
+   * 图片站按设计就没有对话模型：模型监控不该把它报成「密钥无权限」，
+   * 那是它从空模型列表猜出来的结论。
+   */
+  readonly modelMonitorUnsupportedReason =
+    '皮皮智绘是图片站，只有出图模型（image-1 / image-2），没有对话模型，因此没有成功率 / 延迟可采样';
+
   protected override loginUnsupportedMessage =
     '皮皮智绘只支持 Linux.do 快捷登录，请在该站完成 Linux.do 授权后重试';
 

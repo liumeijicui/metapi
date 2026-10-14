@@ -191,7 +191,7 @@ export async function runPipiPointsExchange(input: {
       transferred: false,
       points: 0,
       usd: 0,
-      reason: `兑换未完成：${order.message}`,
+      reason: `站点拒绝兑换请求：${order.message}`,
     };
   }
 

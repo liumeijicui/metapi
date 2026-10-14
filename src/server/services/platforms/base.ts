@@ -328,6 +328,18 @@ export interface PlatformAdapter {
   readonly balanceUnavailableReason?: string;
 
   /**
+   * Set when the platform serves no chat models at all — a picture-only site.
+   *
+   * The model monitor would otherwise report it as "该平台没有模型监控接口；
+   * 用密钥没读回任何模型（密钥无权限或被盾拦截）": the second half is an
+   * accusation about a credential that was never even tried, and it sends the
+   * operator looking for a permission problem that does not exist. Declaring
+   * the fact here lets the monitor state the real reason instead of guessing
+   * from an empty model list.
+   */
+  readonly modelMonitorUnsupportedReason?: string;
+
+  /**
    * Set when the site pays its daily grant inside the login handler.
    *
    * The check-in then has to replay a sign-in to collect it, and the caller

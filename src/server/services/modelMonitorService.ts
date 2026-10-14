@@ -706,6 +706,19 @@ async function fetchSiteMetricsFromAdapter(
     return { status: 'unsupported', message: MODEL_LIST_ONLY_UNAVAILABLE_MESSAGE, credential: null, data: null, pricing: emptyPricing };
   }
 
+  // 平台自己声明「没有模型面」（只出图的图片站）。这跟「有模型面但读不到」
+  // 是两件事：后者要写清是密钥没权限还是被盾拦，前者写那句话等于诬告一份
+  // 根本没被用过的凭据。声明优先，也省掉后面那轮没有意义的降级尝试。
+  if (adapter.modelMonitorUnsupportedReason) {
+    return {
+      status: 'unsupported',
+      message: adapter.modelMonitorUnsupportedReason,
+      credential: null,
+      data: null,
+      pricing: emptyPricing,
+    };
+  }
+
   const credentials = await listSiteCredentials(site.id, preferredKind, preferredId);
   if (!credentials.length) {
     return { status: 'error', message: '站点下没有可用凭据（缺少账号或密钥）', credential: null, data: null, pricing: emptyPricing };
