@@ -17,7 +17,10 @@ import {
   convertResponsesCustomToolToChatTool,
   flattenResponsesToolList,
 } from '../transformers/openai/responses/toolCompat.js';
-import { downgradeResponsesCustomToolDeclarations } from '../transformers/openai/responses/customToolDowngrade.js';
+import {
+  downgradeResponsesCustomToolDeclarations,
+  normalizeResponsesCustomToolCallItemIds,
+} from '../transformers/openai/responses/customToolDowngrade.js';
 import { resolveUnsupportedResponsesCustomToolNames } from './siteProfiles.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import {
@@ -805,12 +808,16 @@ export function buildUpstreamEndpointRequest(input: {
     // 只认 Chat Completions 的上游），把这些声明降级成 function 再发，否则源站直接
     // 400 `Unsupported custom tool: ...` / 422 `unknown variant 'custom'`。
     // 回程那一侧由 customToolDowngrade 按工具名还原。
-    const upstreamResponsesBody = downgradeResponsesCustomToolDeclarations(
-      configuredResponsesBody,
-      resolveUnsupportedResponsesCustomToolNames(
-        input.siteUrl,
-        collectResponsesCustomToolNames(configuredResponsesBody),
-        sitePlatform,
+    // 历史里的 custom_tool_call 可能带着上游函数调用那套 id 前缀（fc_/fc_tmp_/ct_），
+    // 严格的上游会因为「id 前缀和 item 类型对不上」直接 400，发之前归一成 ctc_。
+    const upstreamResponsesBody = normalizeResponsesCustomToolCallItemIds(
+      downgradeResponsesCustomToolDeclarations(
+        configuredResponsesBody,
+        resolveUnsupportedResponsesCustomToolNames(
+          input.siteUrl,
+          collectResponsesCustomToolNames(configuredResponsesBody),
+          sitePlatform,
+        ),
       ),
     );
 

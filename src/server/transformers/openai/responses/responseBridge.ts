@@ -4,7 +4,10 @@ import {
 } from '../../shared/normalized.js';
 import { decodeOpenAiEncryptedReasoning } from '../../shared/reasoningTransport.js';
 import { decodeResponsesMcpCompatToolCall } from './mcpCompatibility.js';
-import { convertDowngradedFunctionCallsInResponsesPayload } from './customToolDowngrade.js';
+import {
+  convertDowngradedFunctionCallsInResponsesPayload,
+  toResponsesCustomToolCallItemId,
+} from './customToolDowngrade.js';
 import {
   resolveResponsesToolNamespace,
   unwrapCustomToolCallArguments,
@@ -31,7 +34,7 @@ function toCustomToolCallItemId(callId: string): string {
     const syntheticCallId = createSyntheticId('call');
     return `ctc_${syntheticCallId.slice('call_'.length)}`;
   }
-  return trimmed.startsWith('call_') ? `ctc_${trimmed.slice('call_'.length)}` : `ctc_${trimmed}`;
+  return toResponsesCustomToolCallItemId(trimmed);
 }
 
 function toFunctionCallItemId(callId: string): string {

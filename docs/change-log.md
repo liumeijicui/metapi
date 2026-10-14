@@ -1,3 +1,24 @@
+### 110. 修 `custom_tool_call` 的 item id 前缀（回放历史被上游 400 `invalid_id_prefix`）
+
+- **类型**：缺陷修复（Responses 转发；服务端 + 桌面边缘版共用同一份 `src/server`）
+- **需求来源**：本会话（用户：「调用某些站会报这个……`Invalid 'input[14].id': 'fc_tmp_ukxb1i9c3k'. Expected an ID that begins with 'ctc'`」）
+- **一、现象与根因**
+  - 现象：Codex 打 `/v1/responses`，上游 400 `[ApiIdParam] [input[14].id] [invalid_id_prefix] Invalid 'input[14].id': 'fc_tmp_ukxb1i9c3k'. Expected an ID that begins with 'ctc'.`（实测站点：冰山公益站，`gpt-6.1-sol`；同一天还有 `fc_0d2c01fa...` 一条）。
+  - 根因在**我们的回程还原**：#98 起，站点不认 `custom`（freeform）工具声明时，请求体里的声明会被降级成 `function` 再发；上游于是按 function 调用来回，item id 用的是函数调用那套前缀（`fc_...`，薄壳站还会自造成 `fc_tmp_...` / `ct_...`）。回程 `convertDowngradedFunctionCallItem` 只把 `type` 改回 `custom_tool_call`、把 `arguments` 拆成 `input`，**id 原样留着**。
+  - 于是我们回给客户端的 item 是「`type: custom_tool_call` + `id: fc_...`」。客户端把这段历史原样回放给上游，严格实现（OpenAI 自己的 Responses 也用同样的前缀规则）就按「id 前缀必须和 item 类型匹配」判 400。
+  - 直接对冰山实测确认了这一点：同一份请求，id 用 `fc_tmp_...` → 400 `invalid_id_prefix`；只把 id 换成 `ctc_tmp_...` → 200；把 id 删掉也 200（说明它只校验前缀）；把 `call_id` 改成 `fc_...` 不报前缀错（`call_id` 不做前缀校验，且它要用来配 `custom_tool_call_output`）。
+- **二、修复（通用，不是冰山专用）**
+  - 新增 `toResponsesCustomToolCallItemId` / `normalizeResponsesCustomToolCallItemIds`（`customToolDowngrade.ts`）：发往上游前，把历史里 `custom_tool_call` 的 item id 归一成 `ctc_` 前缀 —— 已对的不动；`fc_` / `ct_` / `call_` / `custom_tool_call_` / `toolu_` 等换掉前缀（不叠前缀）；其他形状补 `ctc_` 前缀。顺手把引用同一 item 的 `item_reference` / `reference.id` 一起改，否则上游找不到被引用的 item。`call_id` 一律不动。
+  - 挂载点：`upstreamRequestBuilder.ts` 的 responses 分支，包在 `downgradeResponsesCustomToolDeclarations` 外面（同一个「发上游前」的位置）。
+  - 顺带修一处同源小问题：`aggregator.ts` 的 `ensureCustomToolItem` 自造 id 时用的是 `ct_` 前缀，改成 `ctc_`（我们自己的流式补事件同样不该发出前缀不匹配的 id）；`responseBridge.ts` 的 `toCustomToolCallItemId` 改为复用同一个归一函数，前缀规则只留一处。
+  - 「回程照原样回 `fc_` id」这一行为**特意保留**：客户端会话历史里存的就是它自己拿到的 id，真正需要在发上游前对齐前缀的地方只有出口一处，改在出口比改回程小且不会让客户端对不上历史。
+- **三、验证**
+  - 单测：新增 4 例（前缀归一表、冰山那条历史发上游前被改对且原对象不被改坏、`item_reference` 跟着改名/无事时不做无谓拷贝、回程保留 `fc_` id 的既有行为）。`customToolDowngrade` / `aggregator` / `conversion` / `responseBridge` / `outbound` / `streamBridge` / `upstreamRequestBuilder` 等 12 份共 182 例全绿。
+  - 端到端：把「`message` + `custom_tool_call(id=fc_tmp_ukxb1i9c3k)` + `custom_tool_call_output`」这段历史经本网关（强制 channel 3797 = 冰山）打上去，`invalid_id_prefix` 不再出现（上游只回了它自己的 `server_busy`）。
+  - `tsc -p tsconfig.server.json` 与 `npm run build:server` 通过，服务重启后生效。
+- **主要文件**：`src/server/transformers/openai/responses/customToolDowngrade.ts`、`src/server/transformers/openai/responses/customToolDowngrade.test.ts`、`src/server/services/upstreamRequestBuilder.ts`、`src/server/transformers/openai/responses/aggregator.ts`、`src/server/transformers/openai/responses/responseBridge.ts`
+- **状态**：已完成（exe 边缘版需重新打包才带上）
+
 ### 109. 去掉顶部页签栏（回退 #103 / #104）：菜单回到「点一个看一个」
 
 - **类型**：功能删除（前端导航壳；无后端改动）

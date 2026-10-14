@@ -568,7 +568,8 @@ function ensureCustomToolItem(
     : resolveCompatibleOutputIndex(state, 'custom_tool_call', indexHint, itemId, callId);
   const created = !state.outputItems[index];
   const item = ensureOutputItem(state, index, () => ({
-    id: ensureOutputItemId(itemId, 'ct', index),
+    // custom_tool_call 的 item id 前缀是 ctc_（上游严格实现会校验），别用 ct_。
+    id: ensureOutputItemId(itemId, 'ctc', index),
     type: 'custom_tool_call',
     status: 'in_progress',
     call_id: ensureOutputItemId(callId || itemId, 'call', index),

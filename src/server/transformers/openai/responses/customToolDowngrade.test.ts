@@ -3,6 +3,8 @@ import {
   convertDowngradedFunctionCallItem,
   convertDowngradedFunctionCallsInResponsesPayload,
   downgradeResponsesCustomToolDeclarations,
+  normalizeResponsesCustomToolCallItemIds,
+  toResponsesCustomToolCallItemId,
 } from './customToolDowngrade.js';
 
 const execCustomTool = {
@@ -110,5 +112,72 @@ describe('customToolDowngrade', () => {
     expect(converted.output[2]).toEqual(payload.output[2]);
     // 原 payload 不能被改坏。
     expect(payload.output[1]).toMatchObject({ type: 'function_call' });
+  });
+
+  it('custom_tool_call 的 item id 统一归一成 ctc_ 前缀', () => {
+    // 已经是 ctc_ 的、以及没有 id 的都原样返回。
+    expect(toResponsesCustomToolCallItemId('ctc_abc')).toBe('ctc_abc');
+    expect(toResponsesCustomToolCallItemId('')).toBe('');
+    // 转发站自造的各种前缀都要换成 ctc_，而不是叠一层前缀。
+    expect(toResponsesCustomToolCallItemId('fc_0d2c01fa')).toBe('ctc_0d2c01fa');
+    expect(toResponsesCustomToolCallItemId('fc_tmp_ukxb1i9c3k')).toBe('ctc_tmp_ukxb1i9c3k');
+    expect(toResponsesCustomToolCallItemId('call_1')).toBe('ctc_1');
+    expect(toResponsesCustomToolCallItemId('toolu_1')).toBe('ctc_1');
+    expect(toResponsesCustomToolCallItemId('whatever')).toBe('ctc_whatever');
+  });
+
+  it('发往上游前把历史里对不上类型的 custom_tool_call id 改成 ctc_（冰山 400 那条）', () => {
+    const body = {
+      model: 'gpt-6.1-sol',
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        {
+          type: 'custom_tool_call',
+          id: 'fc_tmp_ukxb1i9c3k',
+          call_id: 'call_1',
+          name: 'exec',
+          input: 'ls',
+        },
+        { type: 'custom_tool_call_output', call_id: 'call_1', output: 'ok' },
+      ],
+    };
+
+    const normalized: any = normalizeResponsesCustomToolCallItemIds(body);
+
+    expect(normalized.input[1]).toMatchObject({ id: 'ctc_tmp_ukxb1i9c3k', call_id: 'call_1' });
+    // 输出项是按 call_id 配对的，call_id 不能被改。
+    expect(normalized.input[2]).toMatchObject({ call_id: 'call_1' });
+    // 原对象不能被改坏。
+    expect(body.input[1]).toMatchObject({ id: 'fc_tmp_ukxb1i9c3k' });
+  });
+
+  it('引用被改名 item 的 item_reference 也要跟着改，没得改时不做无谓拷贝', () => {
+    const body = {
+      input: [
+        { type: 'custom_tool_call', id: 'fc_1', call_id: 'call_1', name: 'exec', input: 'ls' },
+        { type: 'custom_tool_call_output', call_id: 'call_1', item_reference: 'fc_1', output: 'ok' },
+      ],
+    };
+    expect((normalizeResponsesCustomToolCallItemIds(body) as any).input[1].item_reference).toBe('ctc_1');
+
+    // 前缀本来就对、也没有引用关系时返回原对象。
+    const untouched = {
+      input: [{ type: 'custom_tool_call', id: 'ctc_1', call_id: 'call_1', name: 'exec', input: 'ls' }],
+    };
+    expect(normalizeResponsesCustomToolCallItemIds(untouched)).toBe(untouched);
+    // 不是 Responses 形态（input 不是数组）时直接返回。
+    const chatLike = { input: 'hello' };
+    expect(normalizeResponsesCustomToolCallItemIds(chatLike)).toBe(chatLike);
+  });
+
+  it('回程还原出来的 custom_tool_call 带的是上游 function_call 的 fc_ id', () => {
+    // 这个 id 我们照原样回给客户端，客户端回放时由
+    // normalizeResponsesCustomToolCallItemIds 在发上游前归一（见上一条用例）。
+    const item = { type: 'function_call', id: 'fc_tmp_ukxb1i9c3k', call_id: 'call_1', name: 'exec', arguments: '{"input":"ls"}' };
+    expect(convertDowngradedFunctionCallItem(item, ['exec'])).toMatchObject({
+      type: 'custom_tool_call',
+      id: 'fc_tmp_ukxb1i9c3k',
+      call_id: 'call_1',
+    });
   });
 });
