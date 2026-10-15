@@ -1630,7 +1630,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     ]);
   });
 
-  it('converts reasoning items back into assistant content instead of dropping them', () => {
+  it('converts reasoning items into assistant reasoning_content instead of dropping them', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1653,14 +1653,58 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     expect(result.messages).toEqual([
       {
         role: 'assistant',
-        content: [
-          {
-            type: 'text',
-            text: 'Think step by step',
-          },
-        ],
+        content: '',
+        reasoning_content: 'Think step by step',
         reasoning_signature: 'enc_sig_1',
       },
+    ]);
+  });
+
+  it('attaches replayed reasoning to the tool_calls assistant message so thinking-mode upstreams accept the history', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'list files' }] },
+          {
+            type: 'reasoning',
+            id: 'rs_1',
+            summary: [{ type: 'summary_text', text: 'I should call exec.' }],
+            encrypted_content: 'enc_sig_1',
+          },
+          {
+            type: 'function_call',
+            call_id: 'call_1',
+            id: 'fc_1',
+            name: 'exec',
+            arguments: '{"cmd":"ls"}',
+            status: 'completed',
+          },
+          { type: 'function_call_output', call_id: 'call_1', output: 'a.txt' },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续' }] },
+        ],
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'list files' }] },
+      {
+        role: 'assistant',
+        content: '',
+        reasoning_content: 'I should call exec.',
+        reasoning_signature: 'enc_sig_1',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'exec', arguments: '{"cmd":"ls"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'a.txt' },
+      { role: 'user', content: [{ type: 'text', text: '继续' }] },
     ]);
   });
 

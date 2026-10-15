@@ -1048,6 +1048,25 @@ export function convertResponsesBodyToOpenAiBody(
   let functionCallIndex = 0;
   let pendingToolCalls: OpenAiToolCall[] = [];
   const emittedToolCallIds = new Set<string>();
+  /**
+   * Responses 把思考单独放成一个 `reasoning` item，而 Chat 协议里思考是
+   * assistant 消息上的 `reasoning_content` 字段。DeepSeek 这类思考模式后端在
+   * 历史里出现带 tool_calls 的 assistant 消息时会校验这个字段，缺了就回
+   * `The reasoning_content in the thinking mode must be passed back to the API`。
+   * 所以 reasoning item 不能立刻变成一条可见内容的 assistant 消息，必须先缓存，
+   * 挂到同一轮的下一条 assistant 消息上（通常是 tool_calls 那条）。
+   */
+  let pendingReasoning: { text: string; signature: string } | null = null;
+
+  const takePendingReasoningFields = (): Record<string, unknown> => {
+    if (!pendingReasoning) return {};
+    const { text, signature } = pendingReasoning;
+    pendingReasoning = null;
+    return {
+      ...(text ? { reasoning_content: text } : {}),
+      ...(signature ? { reasoning_signature: signature } : {}),
+    };
+  };
 
   const flushPendingToolCalls = () => {
     if (pendingToolCalls.length <= 0) return;
@@ -1058,6 +1077,7 @@ export function convertResponsesBodyToOpenAiBody(
     messages.push({
       role: 'assistant',
       content: '',
+      ...takePendingReasoningFields(),
       tool_calls: pendingToolCalls,
     });
     pendingToolCalls = [];
@@ -1109,22 +1129,10 @@ export function convertResponsesBodyToOpenAiBody(
     }
 
     if (itemType === 'reasoning') {
-      flushPendingToolCalls();
-      const reasoningContent = toOpenAiMessageContent(item.summary ?? item.content ?? item);
+      const reasoningText = extractTextContent(item.summary ?? item.content ?? item).trim();
       const reasoningSignature = asTrimmedString(item.encrypted_content);
-      const hasReasoningContent = typeof reasoningContent === 'string'
-        ? reasoningContent.trim().length > 0
-        : Array.isArray(reasoningContent) && reasoningContent.length > 0;
-      if (!hasReasoningContent && !reasoningSignature) return;
-
-      const message: Record<string, unknown> = {
-        role: 'assistant',
-        content: reasoningContent,
-      };
-      if (reasoningSignature) {
-        message.reasoning_signature = reasoningSignature;
-      }
-      messages.push(message);
+      if (!reasoningText && !reasoningSignature) return;
+      pendingReasoning = { text: reasoningText, signature: reasoningSignature };
       return;
     }
 
@@ -1143,11 +1151,13 @@ export function convertResponsesBodyToOpenAiBody(
     const hasContent = typeof content === 'string'
       ? content.trim().length > 0
       : Array.isArray(content) && content.length > 0;
-    if (!hasContent) return;
+    const reasoningFields = normalizedRole === 'assistant' ? takePendingReasoningFields() : {};
+    if (!hasContent && Object.keys(reasoningFields).length <= 0) return;
 
     const message: Record<string, unknown> = {
       role: normalizedRole,
       content,
+      ...reasoningFields,
     };
     const phase = asTrimmedString(item.phase);
     if (phase) message.phase = phase;
@@ -1163,6 +1173,15 @@ export function convertResponsesBodyToOpenAiBody(
     processInputItem(input);
   }
   flushPendingToolCalls();
+  // reasoning item 后面没有同轮的 assistant 消息时（比如只回放了思考），
+  // 也要把思考按 Chat 协议的字段发出去，不能丢。
+  if (pendingReasoning) {
+    messages.push({
+      role: 'assistant',
+      content: '',
+      ...takePendingReasoningFields(),
+    });
+  }
 
   const instructions = asTrimmedString(normalizedBody.instructions);
   if (instructions) {

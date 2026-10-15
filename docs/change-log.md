@@ -1,3 +1,37 @@
+### 115. Responses 历史回放：思考内容改挂 `reasoning_content`，修 DeepSeek 思考模式 400
+
+- **类型**：修复（代理转换，Chat 上游）
+- **现象**：Codex 走 `/v1/responses`，上游落到 `/v1/chat/completions` 时，第二轮（带历史）开始报
+  `Upstream returned HTTP 400: The reasoning_content in the thinking mode must be passed back to the API.`
+  同一个会话第一轮（无历史）正常，第二轮起必错 —— agentrouter 的 `deepseek-v4-flash`、happycoding 的
+  `deepseek-v4.1-flash` 都复现过同一条错误（`proxy_debug_attempts` 里有留存）。
+- **根因**：Responses 把思考单独放成一个 `reasoning` item，Chat 协议里思考是 assistant 消息上的
+  `reasoning_content` 字段。`convertResponsesBodyToOpenAiBody` 遇到 reasoning item 时直接 push 了一条
+  `{role:'assistant', content:'<思考正文>'}`，于是
+  1. 思考摘要被当成**可见正文**塞进上下文（污染对话），
+  2. 紧随其后的那条带 `tool_calls` 的 assistant 消息**没有任何 reasoning_content**。
+  DeepSeek 系思考模式后端要求把思考原样回传，于是回 400。
+  反方向 `convertOpenAiBodyToResponsesBody` 读的却是 `reasoning_content`，来回本来就不对称。
+- **改法**：reasoning item 不再立刻落成消息，改成先缓存（正文 + `reasoning_signature`），挂到同一轮的
+  下一条 assistant 消息上（通常是 `tool_calls` 那条）；同轮没有 assistant 消息时（只回放了思考）
+  补一条 `content: ''` + `reasoning_content` 的 assistant 消息，思考不丢。
+  顺带修好 Responses → Responses 的往返：历史里的 thinking 现在还原成 `reasoning` item（summary +
+  encrypted_content），不再变成一条可见的 assistant 文本。
+- **验证**：
+  - 新增/改写 2 条单测（`conversion.test.ts`）：reasoning 单独出现 → `content:'' + reasoning_content`；
+    reasoning + function_call + function_call_output → `reasoning_content` 挂在 `tool_calls` 那条上。
+  - `npx vitest run src/server/transformers src/server/routes/proxy` 865 例全绿；
+    `npx vitest run src/server` 只剩 3 条既有基线失败（`db/index.default-path`、`factoryResetService`、`siteProxy`）。
+  - 重启 `metapi` 后实测：带历史回放（reasoning + 工具调用 + 工具结果）的 `/v1/responses` 请求
+    经网关返回 200（`proxy_logs` 第 7529/7530 条，agentrouter，1.0~1.1s）。
+  - **诚实交代**：没能对上游做「修复前 400 / 修复后 200」的逐字 A/B。agentrouter 的
+    `deepseek-v4-flash` 背后是多个后端在轮转（同一请求有时回 Anthropic 风格的 `msg_` id），
+    用小请求手搓各种形状都复现不出那条 400，所以只能确认「我们发出去的历史现在符合上游要求」，
+    无法确认「上游那条 400 的触发条件已被完全消除」。
+- **主要文件**：`src/server/transformers/openai/responses/conversion.ts`、
+  `src/server/transformers/openai/responses/conversion.test.ts`
+- **状态**：已完成
+
 ### 114. 皮皮两站收尾：签到与积分兑换在定时任务里一起跑、图片站的模型监控原因如实化
 
 - **类型**：缺陷修复（分支条件显式化 + 日志文案 + 平台能力声明）
