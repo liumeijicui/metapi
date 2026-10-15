@@ -1,3 +1,32 @@
+### 116. 登记「Supra AI」(aapi.ssite.site)：新版 React 签到流程 + 登录页协议勾选框
+
+- **类型**：新站点接入 + 浏览器签到流程修复
+- **需求来源**：本会话（用户：「帮我登记这个网站：https://aapi.ssite.site/ 用户名密码：3145215575/liyaodong7238508 有签到，注意每次登录新会话的时候帮我注销『会话与访问』里其他的会话」）
+- **一、站点形态**
+  - Supra AI 是 New API 分支（`v1.0.0-rc.41`），登录路由是 `/sign-in`（不是 `/login`），签到卡在 `/profile`。
+  - 「会话与访问」在 `/security`：列表来自 `GET /api/user/sessions`，单条注销是 `DELETE /api/user/sessions/<sid>`，响应里的 `current` 由站点自己算。
+  - 密码登录开关是开的，但被 Turnstile 拦死：`POST /api/user/login` 一律回 `{"message":"Turnstile token 为空","success":false}`。所以这条链路只会走 `runBrowserSessionCheckin`，与其它 Turnstile 站一致。
+- **二、真正的卡点：登录页多了一个协议勾选框**
+  - 三次浏览器尝试全部失败在「字段已填好、Turnstile 已变绿、点 Sign in 毫无反应、页面停在 `/sign-in`」，从像素上看与「密码错误」完全一样。
+  - 根因是表单里那句 `I have read and agree to the User Agreement and the Privacy Policy.`：不勾选，表单不提交，也不报错。它是个 Radix 风格的自定义控件 —— 可见的是 `<span role="checkbox" aria-checked>`，真正的 `<input id="legal-consent">` 被藏在 `1x1` 的地方，所以按「找 input」或按预设坐标点都点不中。
+- **三、改法（都在 `scripts/checkin-browser/`）**
+  - 新增 `agreementLocator.mjs`：走 DevTools 的 `Runtime.evaluate` 读真实 DOM，按 `consent|agree|terms|privacy|legal` 认这个框（认不出来时退回表单里最后一个可见 checkbox），输出 `checked` / `x=.. y=..` / `none`。**只读**，点击仍然由 xdotool 发。
+  - `login()` 里输入密码之后调用 `agree_to_terms()`：**幂等** —— 已经勾上就跳过。这一点是必须的，因为脚本有 3 次 attempt，每轮都会执行一次，盲目重复点会把上一轮勾好的框又取消掉。
+  - 用 `LOGIN_CONSENT` 开关（只在 `supra` 预设里置 1）：别的站即使有 `role=checkbox` 也不会被误勾成「记住我」。
+  - 新增 `checkinLocator.mjs`：读签到卡的真实状态（`actionable` / `checked` / `nocard`）、登录态（按 URL 是否落在 `sign-in|login` 判断，与界面语言无关）以及按钮的实时屏幕坐标。
+  - 新增 `dom_measure()`：只对 `supra` 生效的覆盖层 —— 用 DOM 结论盖掉像素结论（`profile` / `st` / 登录页 Turnstile 是否已解交给 `challengeLocator` 的 `solved`）。理由是这个站的签到卡和登录表单都排在同一套响应式栅格里，卡片位置随窗口高度和内容浮动，任何量出来的常量都会漂。
+  - 新布局预设 `supra`（`*aapi.ssite.site*` 命中）：`CHECKIN_BUTTON_BOX` / `MODAL_TITLE_BOX` / `PROFILE_MARKER_BOX` 全部置 `0 0 0 0`（等于关掉像素判定），`click_checkin()` 优先使用 DOM 报出的坐标，预设值只作为读不到 DevTools 时的兜底。
+- **四、会话清理**
+  - 复用既有的 `sessionHygiene`（`autoRelogin.pruneOtherSessions` 默认开启），没有为这个站新写逻辑。本次绑定的 `extra_config` 里落地为 `sessionHygiene: {"outcome":"pruned","removed":2,"kept":1}`。
+- **五、验证**
+  - 站点 66 / 账号 52 登记成功：`apiToken` 自动同步为 `sk-ZAGH…QH2Z`，余额 `1.002686`，模型探测 `healthy`。
+  - 端到端跑 `POST /api/checkin/trigger/52`：`run.log` 记 `state1=CHECKED modal=0 profile=1` → `already checked in today`（今天此前已手工签到），随后 `login cookie stored in the profile (landed=21)`，说明登录、签到底层的读写都通。
+  - 「未签到 → 签到成功」这条路径在真实浏览器里逐步跑过：点 `Check in now` → 弹 `Security Check` → 点 Turnstile → 卡片变成 `Checked in` / `Today +$0.0027` / `Total check-ins 1`。
+  - 定位器自检：把已签到按钮的文案临时改回 `Check in now` 后，`checkinLocator.mjs` 输出 `state=actionable signedIn=1 x=1173 y=454 w=99 h=28`，与实测点中的坐标一致。
+  - `bash -n scripts/checkin-browser/newapi-x11-checkin.sh` 通过。
+- **主要文件**：`scripts/checkin-browser/newapi-x11-checkin.sh`、`scripts/checkin-browser/agreementLocator.mjs`、`scripts/checkin-browser/checkinLocator.mjs`
+- **状态**：已完成
+
 ### 115. Responses 历史回放：思考内容改挂 `reasoning_content`，修 DeepSeek 思考模式 400
 
 - **类型**：修复（代理转换，Chat 上游）

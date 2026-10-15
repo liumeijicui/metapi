@@ -58,6 +58,8 @@ NODE=${NODE_BIN:-node}
 HELPER=${CHECKIN_HELPER:-$(dirname "$0")/regionStats.mjs}
 COOKIE_HELPER=$(dirname "$0")/cookieStore.mjs
 CHALLENGE_HELPER=$(dirname "$0")/challengeLocator.mjs
+AGREEMENT_HELPER=$(dirname "$0")/agreementLocator.mjs
+CHECKIN_HELPER=$(dirname "$0")/checkinLocator.mjs
 COOKIE_NAME=${CHECKIN_COOKIE_NAME:-}
 SESSION_SEEDED=${CHECKIN_SESSION_SEEDED:-}
 COOKIE_PREVIOUS=${CHECKIN_COOKIE_PREVIOUS:-}
@@ -85,6 +87,10 @@ apply_layout() {
   OVERLAY_WAIT_SECONDS=0
   PWD_BUBBLE_BOX="0 0 0 0"
   CHECKIN_BADGE_BOX="0 0 0 0"
+  # Some sign-in forms refuse to submit until their consent box is ticked.
+  # Opt-in so that a layout which never renders one cannot have a "remember me"
+  # style checkbox ticked by mistake.
+  LOGIN_CONSENT=0
   EXTRA_LAUNCH_FLAGS=""
   case "$1" in
     moto)
@@ -201,6 +207,34 @@ apply_layout() {
       PWD_BUBBLE_BOX="850 95 300 40"
       PWD_BUBBLE_DISMISS_XY="1126 114"
       ;;
+    supra)
+      # Supra AI (aapi.ssite.site). A React dashboard whose sign-in form and
+      # check-in card are both laid out in a responsive grid, so their
+      # positions depend on the window and on the card's own content. Nothing
+      # below the form coordinates is trusted for this layout: the check-in
+      # card is classified from the live DOM (see dom_measure) and clicked
+      # wherever it currently is.
+      #
+      # The one trap is the consent box under the form. Unticked, the password
+      # is accepted and the form simply never submits, which is indistinguishable
+      # from a wrong password in the pixels: the fields stay filled and the
+      # page stays on the sign-in route.
+      USERNAME_XY="640 447"
+      PASSWORD_XY="640 515"
+      LOGIN_SHIELD_XY="457 660"
+      LOGIN_BUTTON_XY="640 571"
+      CHECKIN_BUTTON_XY="1173 454"
+      MODAL_SHIELD_XY="515 557"
+      # The Security Check dialog carries the same widget ~75px above where the
+      # sign-in page puts it; both are only fallbacks for a frame whose DOM
+      # could not be read.
+      LOGIN_TICK_BOX="445 630 30 30"
+      CHECKIN_BUTTON_BOX="0 0 0 0"
+      MODAL_TITLE_BOX="0 0 0 0"
+      PROFILE_MARKER_BOX="0 0 0 0"
+      LOGIN_CONSENT=1
+      EXTRA_LAUNCH_FLAGS="--test-type"
+      ;;
     *)
       USERNAME_XY="640 546"
       PASSWORD_XY="640 616"
@@ -223,6 +257,7 @@ case "$SITE" in
   *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
   *bxacc.xyz*) apply_layout ark ;;
   *justwoker.icu*) apply_layout jdw ;;
+  *aapi.ssite.site*) apply_layout supra ;;
   *) apply_layout classic ;;
 esac
 
@@ -400,6 +435,45 @@ measure() {
   if [ "$og" -gt 500 ]; then announce_dialog=1; fi
   if [ "$OVERLAY_DIALOG_STRONG" -gt 0 ] && [ "$os" -gt "$OVERLAY_DIALOG_STRONG" ]; then announce_dialog=1; fi
   if [ "$pb" -gt 2000 ]; then pwd_bubble=1; fi
+  dom_measure
+}
+
+# Re-classifies the page from the live DOM for the layouts that ask for it.
+#
+# A measured preset is right for a build that paints its card at a fixed spot
+# and wrong for one that lays it out in a responsive grid: there the control
+# moves with the window and with the card's own content, so the same screenshot
+# that reads as "check in now" on the operator's screen reads as empty page on
+# a run with a different window height. Those layouts set `LOGIN_CONSENT`-style
+# contracts of their own, and this is where the DOM answers replace the pixels:
+# the sign-in state, whether the card is actionable or already claimed, and
+# where the control actually is. The pixel values stay as the fallback for a
+# frame the DevTools endpoint could not be read from.
+dom_measure() {
+  [ "$LAYOUT" = supra ] || return 0
+  local line
+  line=$("$NODE" "$CHECKIN_HELPER" "$PROFILE" 2>/dev/null | tail -1)
+  DOM_CHECKIN_XY=""
+  case "$line" in
+    *signedIn=1*) profile=1 ;;
+    *signedIn=0*) profile=0 ;;
+  esac
+  case "$line" in
+    *state=actionable*)
+      st=BLUE
+      DOM_CHECKIN_XY=$(printf '%s' "$line" | sed -n 's/.*x=\([0-9][0-9]*\) y=\([0-9][0-9]*\).*/\1 \2/p')
+      ;;
+    *state=checked*) st=CHECKED ;;
+    *state=nocard*) st=BLANK ;;
+  esac
+  # The sign-in page carries its own challenge widget, and "has it been
+  # answered" is a question the DOM answers exactly while the layout's green
+  # box is another measurement that can miss the widget entirely.
+  if [ "$profile" = 0 ]; then
+    case "$("$NODE" "$CHALLENGE_HELPER" "$PROFILE" 2>/dev/null | tail -1)" in
+      solved) tsolved=1 ;;
+    esac
+  fi
 }
 
 if [ ! -f "$HELPER" ]; then
@@ -456,6 +530,37 @@ click_shield() {
   xdotool mousemove $fallback click 1
 }
 
+# Ticks the consent box the sign-in form refuses to submit without.
+#
+# On these builds the password is accepted and nothing happens: no error, no
+# navigation, the fields stay filled. The click is taken from the live DOM
+# rather than from a preset because the control is a custom span whose position
+# follows the card, and the locator also reports whether the box is *already*
+# ticked - clicking a ticked box turns it back off, which is exactly what a
+# retry would do on its second attempt.
+agree_to_terms() {
+  [ "$LOGIN_CONSENT" = 1 ] || return 0
+  [ -f "$AGREEMENT_HELPER" ] || return 0
+  local out x y
+  out=$("$NODE" "$AGREEMENT_HELPER" "$PROFILE" 2>/dev/null | tail -1)
+  case "$out" in
+    checked)
+      say "consent box already ticked"
+      return 0
+      ;;
+    x=*)
+      x=$(printf '%s' "$out" | sed -n 's/.*x=\([0-9][0-9]*\).*/\1/p')
+      y=$(printf '%s' "$out" | sed -n 's/.*y=\([0-9][0-9]*\).*/\1/p')
+      ;;
+    *) return 0 ;;
+  esac
+  if [ -z "$x" ] || [ -z "$y" ]; then return 0; fi
+  say "ticking the consent box at $x $y"
+  xdotool mousemove "$x" "$y"; sleep 0.4
+  xdotool click 1
+  sleep 1
+}
+
 login() {
   local attempt=1 i
   while [ "$attempt" -le 3 ]; do
@@ -466,6 +571,7 @@ login() {
     xdotool mousemove $PASSWORD_XY click 1; sleep 0.6
     xdotool key --clearmodifiers ctrl+a
     xdotool type --delay 40 "$USER_PASS"; sleep 0.4
+    agree_to_terms
     snap cur; measure; rm -f "$LOG/cur.ppm"
     if [ "$tsolved" = 0 ]; then
       click_shield
@@ -629,6 +735,13 @@ fi
 # follows the pixels: `measure` reports where the amber control actually is, and
 # the preset stays as the fallback for a frame that had no match at all.
 click_checkin() {
+  # A layout whose card moves reports the control's live position, and that
+  # outranks every preset: it is the same page the click is about to land on.
+  if [ -n "${DOM_CHECKIN_XY:-}" ]; then
+    say "clicking Check in now at $DOM_CHECKIN_XY (located)"
+    xdotool mousemove $DOM_CHECKIN_XY click 1
+    return
+  fi
   if [ "$LAYOUT" = moto ] && [ "${gold_cx:-0}" -gt 0 ] && [ "${gold_cy:-0}" -gt 0 ]; then
     say "clicking Check in now at $gold_cx $gold_cy"
     xdotool mousemove "$gold_cx" "$gold_cy" click 1
