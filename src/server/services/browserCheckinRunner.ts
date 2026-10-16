@@ -21,7 +21,21 @@ import { browserLane } from '../shared/browserLane.js';
  */
 
 export type BrowserCheckinOutcome =
-  | { kind: 'result'; result: CheckinResult; logDir: string; profileDir: string }
+  | {
+    kind: 'result';
+    result: CheckinResult;
+    logDir: string;
+    profileDir: string;
+    /**
+     * Whether the run reached a signed-in page.
+     *
+     * The profile's login cookie is only meaningful in that case. A run that
+     * bailed out before signing in (the site was unreachable, the form was never
+     * submitted) leaves the *previous* run's cookie in the profile, and adopting
+     * it would write a spent credential over a working one.
+     */
+    signedIn: boolean;
+  }
   | { kind: 'unavailable'; reason: string };
 
 export type BrowserCheckinInput = {
@@ -54,6 +68,8 @@ type RawCheckinVerdict = {
   ok: boolean;
   already: boolean;
   detail: string;
+  /** Absent from an older script, which only ever printed the three above. */
+  signedIn?: boolean;
 };
 
 const SCRIPT_RELATIVE_PATH = 'scripts/checkin-browser/newapi-x11-checkin.sh';
@@ -113,11 +129,17 @@ export function parseCheckinResultLine(stdout: string): RawCheckinVerdict | null
     const trimmed = line.trim();
     if (!trimmed.startsWith('METAPI_CHECKIN_RESULT=')) continue;
     try {
-      const parsed = JSON.parse(trimmed.slice('METAPI_CHECKIN_RESULT='.length)) as Partial<RawCheckinVerdict>;
+      const parsed = JSON.parse(trimmed.slice('METAPI_CHECKIN_RESULT='.length)) as {
+        ok?: unknown;
+        already?: unknown;
+        detail?: unknown;
+        signed_in?: unknown;
+      };
       return {
         ok: parsed.ok === true,
         already: parsed.already === true,
         detail: typeof parsed.detail === 'string' ? parsed.detail : 'unknown',
+        signedIn: parsed.signed_in === true,
       };
     } catch {
       return null;
@@ -337,7 +359,14 @@ async function executeBrowserCheckin(
       result: { success: false, message: `浏览器签到未完成：${detail}` },
       logDir,
       profileDir,
+      signedIn: false,
     };
   }
-  return { kind: 'result', result: mapCheckinVerdict(verdict), logDir, profileDir };
+  return {
+    kind: 'result',
+    result: mapCheckinVerdict(verdict),
+    logDir,
+    profileDir,
+    signedIn: verdict.signedIn === true,
+  };
 }

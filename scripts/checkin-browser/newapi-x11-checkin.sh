@@ -60,6 +60,7 @@ COOKIE_HELPER=$(dirname "$0")/cookieStore.mjs
 CHALLENGE_HELPER=$(dirname "$0")/challengeLocator.mjs
 AGREEMENT_HELPER=$(dirname "$0")/agreementLocator.mjs
 CHECKIN_HELPER=$(dirname "$0")/checkinLocator.mjs
+FORM_HELPER=$(dirname "$0")/loginFormLocator.mjs
 COOKIE_NAME=${CHECKIN_COOKIE_NAME:-}
 SESSION_SEEDED=${CHECKIN_SESSION_SEEDED:-}
 COOKIE_PREVIOUS=${CHECKIN_COOKIE_PREVIOUS:-}
@@ -91,6 +92,18 @@ apply_layout() {
   # Opt-in so that a layout which never renders one cannot have a "remember me"
   # style checkbox ticked by mistake.
   LOGIN_CONSENT=0
+  # Which of the three sign-in coordinates below are worth trusting. A preset
+  # is a measurement of one build, and a fork that reskins its card moves the
+  # fields without moving anything else: chinahk's sign-in form ended up 16px
+  # higher than the preset, which put every click just past the bottom edge of
+  # its input. Nothing about that reads as an error - no dialog, no message -
+  # so the run reported a failed sign-in for a password that was never typed.
+  # Layouts that set this read the form from the page instead and keep the
+  # preset only as the fallback for a browser with no DevTools endpoint.
+  LOGIN_FORM_DOM=0
+  # Opt-in flag for layouts whose page state (signed in, card actionable) is
+  # read from the DOM rather than from the screenshot's colours.
+  DOM_PAGE_RULES=0
   EXTRA_LAUNCH_FLAGS=""
   case "$1" in
     moto)
@@ -233,6 +246,34 @@ apply_layout() {
       MODAL_TITLE_BOX="0 0 0 0"
       PROFILE_MARKER_BOX="0 0 0 0"
       LOGIN_CONSENT=1
+      LOGIN_FORM_DOM=1
+      DOM_PAGE_RULES=1
+      EXTRA_LAUNCH_FLAGS="--test-type"
+      ;;
+    chinahk)
+      # chinahk (newapi.chinahk.qzz.io, badged "sunapi" since its last reskin)
+      # is the same React dashboard as supra - same check-in card at the same
+      # spot - so the card is classified from the live DOM here too.
+      #
+      # Its sign-in page is its own though: the OAuth buttons that push supra's
+      # form down are not rendered, so the fields sit ~16px higher. Measured
+      # against the running page, and read from the DOM at run time so a
+      # relayout cannot take the sign-in down silently again.
+      USERNAME_XY="640 426"
+      PASSWORD_XY="640 496"
+      LOGIN_SHIELD_XY="455 641"
+      LOGIN_BUTTON_XY="640 552"
+      CHECKIN_BUTTON_XY="1192 454"
+      MODAL_SHIELD_XY="509 525"
+      # Bands borrowed from the rc preset, whose build this page still matches
+      # pixel for pixel: they overlap the real controls, so a run that cannot
+      # read the DOM keeps a usable fallback.
+      CHECKIN_BUTTON_BOX="1150 437 90 34"
+      MODAL_TITLE_BOX="440 398 90 24"
+      PROFILE_MARKER_BOX="340 192 220 22"
+      LOGIN_TICK_BOX="441 625 28 28"
+      LOGIN_FORM_DOM=1
+      DOM_PAGE_RULES=1
       EXTRA_LAUNCH_FLAGS="--test-type"
       ;;
     *)
@@ -254,7 +295,8 @@ apply_layout() {
 case "$SITE" in
   *kktoken.cc*) apply_layout kkt ;;
   *motomoto.lol*) apply_layout moto ;;
-  *chinahk.qzz.io*|*5201201314*) apply_layout rc ;;
+  *5201201314*) apply_layout rc ;;
+  *chinahk.qzz.io*) apply_layout chinahk ;;
   *bxacc.xyz*) apply_layout ark ;;
   *justwoker.icu*) apply_layout jdw ;;
   *aapi.ssite.site*) apply_layout supra ;;
@@ -263,7 +305,13 @@ esac
 
 mkdir -p "$LOG"
 say() { echo "[$(date '+%F %T')] $*" >> "$LOG/run.log"; }
-emit() { printf 'METAPI_CHECKIN_RESULT={"ok":%s,"already":%s,"detail":"%s"}\n' "$1" "$2" "$3"; }
+# The four fields are the check-in verdict, plus whether the run ever reached a
+# signed-in page. The caller reads the login cookie back out of this profile
+# afterwards, and that cookie is only worth having when the page was signed in:
+# a run that bailed out early (the site was unreachable, the sign-in never
+# landed) leaves the *previous* run's cookie behind, and handing that back would
+# overwrite a working credential with a spent one.
+emit() { printf 'METAPI_CHECKIN_RESULT={"ok":%s,"already":%s,"detail":"%s","signed_in":%s}\n' "$1" "$2" "$3" "${4:-false}"; }
 
 XVFB_PID=""
 CHROMIUM_STARTED=0
@@ -450,7 +498,7 @@ measure() {
 # where the control actually is. The pixel values stay as the fallback for a
 # frame the DevTools endpoint could not be read from.
 dom_measure() {
-  [ "$LAYOUT" = supra ] || return 0
+  [ "$DOM_PAGE_RULES" = 1 ] || return 0
   local line
   line=$("$NODE" "$CHECKIN_HELPER" "$PROFILE" 2>/dev/null | tail -1)
   DOM_CHECKIN_XY=""
@@ -481,6 +529,36 @@ if [ ! -f "$HELPER" ]; then
   emit false false no_helper
   exit 1
 fi
+
+# Prints "ux uy px py sx sy" for the sign-in form as the page lays it out now,
+# or nothing when there is no form to read.
+#
+# Layouts with `LOGIN_FORM_DOM=1` sign in on a card whose build the preset
+# coordinates were never measured against, and a click that misses a field by a
+# few pixels types the password nowhere without raising anything: the run just
+# reports a failed sign-in. Reading the three controls back out of the live DOM
+# removes that whole class of silent miss, and it costs one DevTools round trip.
+#
+# Retried, because the page is a React app that mounts the form a moment after
+# the navigation returns. A page that never grows a form (already signed in, or
+# a build whose fields the locator cannot name) ends up printing nothing, and
+# the caller keeps the preset it started with.
+located_login_form() {
+  [ "$LOGIN_FORM_DOM" = 1 ] || return 0
+  [ -f "$FORM_HELPER" ] || return 0
+  local attempt=1 out=""
+  while [ "$attempt" -le 8 ]; do
+    out=$("$NODE" "$FORM_HELPER" "$PROFILE" 2>/dev/null | tail -1)
+    case "$out" in
+      *form=1*) break ;;
+    esac
+    out=""
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" | sed -n 's/.*ux=\([0-9][0-9]*\) uy=\([0-9][0-9]*\) px=\([0-9][0-9]*\) py=\([0-9][0-9]*\) sx=\([0-9][0-9]*\) sy=\([0-9][0-9]*\).*/\1 \2 \3 \4 \5 \6/p'
+}
 
 # Clicks the Turnstile checkbox wherever it actually is.
 #
@@ -563,12 +641,24 @@ agree_to_terms() {
 
 login() {
   local attempt=1 i
+  # Resolved up front rather than inside the loop: aim is the one thing the
+  # retries should not vary, and a failed attempt re-reads it below, which is
+  # what covers a page that re-rendered the form while we were typing.
+  local user_xy="$USERNAME_XY" pass_xy="$PASSWORD_XY" submit_xy="$LOGIN_BUTTON_XY"
+  local located
+  located=$(located_login_form)
+  if [ -n "$located" ]; then
+    user_xy=$(printf '%s' "$located" | cut -d' ' -f1,2)
+    pass_xy=$(printf '%s' "$located" | cut -d' ' -f3,4)
+    submit_xy=$(printf '%s' "$located" | cut -d' ' -f5,6)
+    say "sign-in form located: user=$user_xy pass=$pass_xy submit=$submit_xy"
+  fi
   while [ "$attempt" -le 3 ]; do
     say "sign-in attempt $attempt"
-    xdotool mousemove $USERNAME_XY click 1; sleep 0.6
+    xdotool mousemove $user_xy click 1; sleep 0.6
     xdotool key --clearmodifiers ctrl+a
     xdotool type --delay 40 "$USER_NAME"; sleep 0.4
-    xdotool mousemove $PASSWORD_XY click 1; sleep 0.6
+    xdotool mousemove $pass_xy click 1; sleep 0.6
     xdotool key --clearmodifiers ctrl+a
     xdotool type --delay 40 "$USER_PASS"; sleep 0.4
     agree_to_terms
@@ -591,12 +681,21 @@ login() {
     fi
     snap "login-form-$attempt"
     say "attempt$attempt shield=$tsolved"
-    xdotool mousemove $LOGIN_BUTTON_XY click 1
+    xdotool mousemove $submit_xy click 1
     sleep 8
     snap "after-login-$attempt"
     snap cur; measure; rm -f "$LOG/cur.ppm"
     say "attempt$attempt profile=$profile state=$st"
     if [ "$profile" = 0 ]; then
+      # A failure after typing can also mean the page re-rendered the form and
+      # moved it under our feet; re-resolving costs one round trip and turns a
+      # silent miss into a second try at the right place.
+      located=$(located_login_form)
+      if [ -n "$located" ]; then
+        user_xy=$(printf '%s' "$located" | cut -d' ' -f1,2)
+        pass_xy=$(printf '%s' "$located" | cut -d' ' -f3,4)
+        submit_xy=$(printf '%s' "$located" | cut -d' ' -f5,6)
+      fi
       # Some builds land on a start page without the profile marker; look at
       # the real profile page before declaring the attempt a failure.
       nav "$SITE/profile" 8
@@ -722,7 +821,7 @@ if [ "$st" = CHECKED ]; then
   snap result
   say "already checked in today"
   wait_for_login_cookie
-  emit true true already_checked_in
+  emit true true already_checked_in true
   exit 0
 fi
 
@@ -770,7 +869,7 @@ while [ "$n" -lt 8 ]; do
     snap result
     say "check-in completed"
     wait_for_login_cookie
-    emit true false checked_in
+    emit true false checked_in true
     exit 0
   fi
   if [ "$modal" = 1 ]; then
@@ -790,5 +889,7 @@ while [ "$n" -lt 8 ]; do
 done
 snap result
 say "check-in did not complete (state=$st modal=$modal)"
-emit false false checkin_failed
+# The check-in itself failed, but the page is signed in: the session this run
+# minted is live, so the caller should keep it even though the day is not paid.
+emit false false checkin_failed true
 exit 1

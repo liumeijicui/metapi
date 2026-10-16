@@ -34,6 +34,7 @@ describe('runBrowserSessionCheckin', () => {
       result: { success: true, message: 'ok' },
       logDir: '/data/metapi/checkin-browser/site-15/runs/site-15-x',
       profileDir: '/data/metapi/checkin-browser/site-15/profiles/site-15',
+      signedIn: true,
     });
     readCookieMock.mockReturnValue('184e90e0-9ec6-4f08-8871-bc13d9ffd6c5.abcdef');
 
@@ -68,6 +69,26 @@ describe('runBrowserSessionCheckin', () => {
     const result = await runBrowserSessionCheckin({ site, username: 'u', password: 'p' });
 
     expect(result.outcome.kind).toBe('unavailable');
+    expect(result.accessToken).toBeNull();
+    expect(readCookieMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the stored credential when the run never signed in', async () => {
+    // The profile still holds the cookie a *previous* run wrote. Reporting it
+    // here would write that spent secret over the account's live one, and the
+    // account would then read as revoked until the next browser run.
+    runBrowserCheckinMock.mockResolvedValue({
+      kind: 'result',
+      result: { success: false, message: '浏览器签到未完成：login_failed' },
+      logDir: '/data/metapi/checkin-browser/site-15/runs/site-15-x',
+      profileDir: '/data/metapi/checkin-browser/site-15/profiles/site-15',
+      signedIn: false,
+    });
+    readCookieMock.mockReturnValue('stale-value');
+
+    const { runBrowserSessionCheckin } = await import('./browserSessionCredential.js');
+    const result = await runBrowserSessionCheckin({ site, username: 'u', password: 'p' });
+
     expect(result.accessToken).toBeNull();
     expect(readCookieMock).not.toHaveBeenCalled();
   });

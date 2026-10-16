@@ -102,6 +102,12 @@ export async function runBrowserSessionCheckin(
   });
 
   if (outcome.kind === 'unavailable') return { outcome, accessToken: null };
+  // Only a run that reached a signed-in page leaves a session worth keeping.
+  // Every other ending - the site was unreachable, the form never submitted -
+  // leaves whatever the *previous* run wrote in the profile, and reporting that
+  // as this run's credential overwrites a live secret with a spent one. The
+  // account then reads as revoked, and the next re-login is a day away.
+  if (!outcome.signedIn) return { outcome, accessToken: null };
   return {
     outcome,
     accessToken: readBrowserSessionCredential(outcome.profileDir, input.site.url),

@@ -10,7 +10,7 @@ describe('parseCheckinResultLine', () => {
     const stdout = [
       '[2026-09-30 10:00:00] signing in',
       'noise',
-      'METAPI_CHECKIN_RESULT={"ok":true,"already":false,"detail":"checked_in"}',
+      'METAPI_CHECKIN_RESULT={"ok":true,"already":false,"detail":"checked_in","signed_in":true}',
       '',
     ].join('\n');
 
@@ -18,7 +18,20 @@ describe('parseCheckinResultLine', () => {
       ok: true,
       already: false,
       detail: 'checked_in',
+      signedIn: true,
     });
+  });
+
+  it('reports a run that never signed in as not having a session', () => {
+    const stdout = 'METAPI_CHECKIN_RESULT={"ok":false,"already":false,"detail":"login_failed","signed_in":false}';
+
+    expect(parseCheckinResultLine(stdout)?.signedIn).toBe(false);
+  });
+
+  it('treats a verdict from the older script as not signed in', () => {
+    const stdout = 'METAPI_CHECKIN_RESULT={"ok":true,"already":false,"detail":"checked_in"}';
+
+    expect(parseCheckinResultLine(stdout)?.signedIn).toBe(false);
   });
 
   it('keeps the last verdict when the script prints more than one', () => {

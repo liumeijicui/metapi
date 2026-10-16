@@ -1,3 +1,29 @@
+### 117. chinahk（换肤后叫 `sunapi`）连续多天没签到：登录页改版坐标漂移 + 失败运行把旧 cookie 写回账号
+
+- **类型**：修复（浏览器签到 + 凭据轮换）
+- **需求来源**：本会话（用户：「https://newapi.chinahk.qzz.io/profile 这个站为啥好几天都没有签到了」）
+- **一、现象**
+  - 站点 `#30 chinahk`（`newapi.chinahk.qzz.io`）、账号 `#14`（`3145215575@qq.com`）：`checkin_logs` 从 10-13 起连续 `failed: Unauthorized, invalid access token`，`accounts.status` 掉到 `expired`，最后一次成功签到停在 `2026-10-13T06:10:12Z`。`events` 里成对出现「令牌失效 / checkin failed」，看上去像凭据过期。
+  - 但站点侧的会话是好的：浏览器那一轮其实**已经签到成功**，只是整条链路没把它记成成功。
+- **二、真因一：站点 10-13 改版，登录表单上移约 16px，密码根本没被输进去**
+  - 逐条比对 `data/checkin-browser/site-30/runs/*/run.log` 的 409 轮运行：**10-13 08:01:13Z 之前**每轮要么 `already checked in today`、要么根本不进登录页；**从 10-13 08:01:13Z 起**，此后每小时一轮全部以 `sign-in never reached the profile page` 收尾。这天站点换了皮肤（首页 badge 变成 `sunapi`），登录卡比 `rc` 预设整体高了约 16px。
+  - `rc` 预设的 `USERNAME_XY="640 442"` / `PASSWORD_XY="640 512"` / `LOGIN_BUTTON_XY="640 567"` 换算到视口是 355 / 425 / 480，而实测输入框底边在 355 / 425、按钮底边在 481 —— **每次点击都落在控件下边界之外**，等于点空。页面不会因此报任何错，密码框始终为空，所以日志只能写出「没到 profile 页」，看起来像密码错。
+  - 后果链：浏览器永远签不进去 → 账号手里的 `new_api_refresh` 只被一次次换票消耗、再没机会换新 → HTTP 签到在 `resolveBearerToken` 换票失败后把 cookie 当 Bearer 发出去 → 站点回 `Unauthorized, invalid access token` → 账号置 `expired` → 次日重演。
+- **三、真因二：失败的浏览器运行会把 profile 里「上一次」的过期 cookie 当成本轮凭据写回账号**
+  - `readBrowserSessionCredential()` 只检查「profile 里有没有 `new_api_refresh`」，不看这一轮到底有没有登录成功。脚本在「站点不可达 / 登录没落地」时提前退出，profile 里留着的是**上一轮**的值，于是这个死值被写进 `accounts.access_token`，把一个可能还有效的凭据覆盖成过期值；再叠上 `browserRelogin` 的 15 分钟冷却，账号就一直修不回来。
+  - 生产取证：16:09:39 那次运行在 `site unreachable through proxy (http 000)` 提前退出（`browserRelogin.attemptedAt` 记到 08:09:39Z），16:12 / 16:15 两次手动触发都在 15 分钟冷却里空跑（14 秒即返回、没有浏览器运行目录），而账号 token 已被写回成 profile 里的旧值。
+- **四、改法（都在 `scripts/checkin-browser/` 与两个 service）**
+  - **量准坐标**：`newapi-x11-checkin.sh` 新增 `chinahk` 预设（`*chinahk.qzz.io*` 从 `rc` 组拆出来），按实测改成用户名 `640 426` / 密码 `640 496` / 提交 `640 552`，Turnstile 与签到卡沿用同构建的 `rc` 值（该站个人页与 rc 构建像素级一致）。`5201201314` 仍留在 `rc`。
+  - **不再依赖量出来的常量**：新增 `loginFormLocator.mjs`，走 DevTools `Runtime.evaluate` 读实时 DOM，按 `input[name=username]` / `input[type=password]` / 文案 `^(sign in|log in|登录|登陆)$` 定位三个控件并按 Chromium 的窗口装饰换算成屏幕坐标（**只读**，不点不输入）；新增 `located_login_form()`（最多 8 次、每次 2 秒重试，读不到就返回空）。`login()` 在开跑前解析一次覆盖三个预设坐标，某个 attempt 失败后再解析一次（覆盖「页面在我们打字时重渲染」），读不到就沿用预设。开关是 `LOGIN_FORM_DOM`，只有 `chinahk` / `supra` 打开，其余站点行为不变。
+  - **凭据只在真登录过时才采纳**：`METAPI_CHECKIN_RESULT` 增加 `signed_in` 字段（`already_checked_in` / `checked_in` / `checkin_failed` 为 true，其余提前退出的路径为 false）；`parseCheckinResultLine()` 读出 `signedIn`，`BrowserCheckinOutcome` 带上它，`runBrowserSessionCheckin()` 只在 `signedIn === true` 时才去读 profile 里的 cookie。这样「站点不可达 / 登录没落地」不会再拿旧值覆盖账号，而「页面已登录、只是签到本身没完成」仍然保留这一轮换到的新会话。
+- **五、验证**
+  - 端到端：`POST /api/checkin/trigger/14` → `{"success":true,"message":"already checked in (browser check-in)"}`；`run.log` 记 `state1=CHECKED modal=0 profile=1` → `already checked in today` → `login cookie stored in the profile (landed=24)`；账号回 `status=active`、新会话 `29f1dc2d-…`、`sessionHygiene: no-other-session`，`checkin_logs` 最新一条 `success`。
+  - 登录链路单独复跑（脚本直跑、不经服务端）：`sign-in attempt 1` → `attempt1 profile=1 state=BLUE` → `check-in completed` → `landed=12`。
+  - 换票链路对照实测：浏览器刚写入的新 cookie 打 `/api/user/auth/refresh`，**直连与经系统代理都返回 200 + `access_token`**；被花掉的旧值返回 `AUTH_UNAUTHORIZED`。**系统代理不是原因**（此前「代理污染换票」的怀疑已排除，站点直连也可达）。
+  - 回归：`browserCheckinRunner` / `browserSessionCredential` / `checkinService.autoRelogin` / `autoRelogin` / `autoRelogin.agentrouter` / `sessionHygiene` 共 **84 例全绿**；`tsc --noEmit -p tsconfig.server.json` 通过；`bash -n scripts/checkin-browser/newapi-x11-checkin.sh` 通过；服务已重新构建并重启。
+- **主要文件**：`scripts/checkin-browser/newapi-x11-checkin.sh`、`scripts/checkin-browser/loginFormLocator.mjs`、`src/server/services/browserCheckinRunner.ts`、`src/server/services/browserSessionCredential.ts`
+- **状态**：已完成
+
 ### 116. 登记「Supra AI」(aapi.ssite.site)：新版 React 签到流程 + 登录页协议勾选框
 
 - **类型**：新站点接入 + 浏览器签到流程修复
