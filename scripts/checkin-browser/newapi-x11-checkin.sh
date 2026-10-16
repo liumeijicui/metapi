@@ -125,6 +125,14 @@ apply_layout() {
       MODAL_TITLE_BOX="490 495 305 60"
       PROFILE_MARKER_BOX="237 185 66 66"
       LOGIN_TICK_BOX="445 665 60 35"
+      # A claimed card is announced by a disabled `已签到` button painted in the
+      # same muted amber as the live button's idle state, so the pixel probe below
+      # reads "claimed" as "nothing here" - and a run that had just been paid
+      # reports `checkin_failed` anyway, then keeps clicking a disabled control on
+      # every later run that day. The card's own labels say which state it is in,
+      # so read them (see `dom_measure`); the boxes above stay as the fallback for
+      # a browser whose DevTools endpoint could not be read.
+      DOM_PAGE_RULES=1
       # Floating panels that must be dismissed before the card is clickable:
       # the site's announcement dialog and Chromium's save-password bubble.
       OVERLAY_DIALOG_BOX="845 590 55 28"

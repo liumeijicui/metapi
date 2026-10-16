@@ -1,3 +1,37 @@
+### 118. motomoto 签到卡改版成「标签 + 日历」：已签到状态被像素判定读成空白，每天恒报失败
+
+- **类型**：缺陷修复（浏览器签到判定）
+- **需求来源**：本会话（用户：「再检查检查其他签到不成功的站，看有没有类似的情况」，承接上一轮 chinahk 的排查）
+- **一、现象**
+  - 站点 `#32 motomoto`（`motomoto.lol`）、账号 `#16`（`li3145215575`）：`checkin_logs` 从 10-14 起每小时一条 `failed: 浏览器签到未完成：checkin_failed`，最后一条成功停在 `2026-10-13T01:10:37Z`，账号却一直是 `active`、余额正常 —— 典型的「站点侧已经签到成功、我们记成失败」。
+  - `data/checkin-browser/site-32/runs/*/run.log` 里的证据链：`state1=BLANK`（偶尔 `BLUE`）→ 点 `1161 454` → 之后一直 `state=BLANK` → `check-in did not complete`。
+- **二、真因：签到卡改版，已领取按钮的暗淡琥珀色落进了灰度档**
+  - 站点把签到卡改成「标签按钮 + 日历」。**已领取**状态下按钮文案变成 `已签到` 且 `disabled=true`，配色是**暗淡琥珀**（实测 `rgb(122,101,66)`）。
+  - `regionStats.mjs` 的 `gold` 判定要求 `r>=150`，暗淡色只够进 `dull` 档；徽章区（`CHECKIN_BADGE_BOX`）的 green 计数只有 **32**（阈值 50）。于是像素分类永远得出 `BLANK` —— 即便当天**已经签到成功**（日历上 16 日是高亮琥珀、卡片写着「今天 +$50」），脚本仍报 `checkin_failed`，并在之后每一轮继续去点那个 `disabled` 按钮。
+  - 也就是说：问题**不在登录、不在账号、也不在凭据**，只在签到卡状态的判读方式上。
+- **三、取证（Live DOM 探针，只读）**
+  - 卡片按钮：`{"t":"每日签到 已签到 今天 +$50","d":false,"b":[910,353,260,52]}` + `{"t":"已签到","d":true,"b":[1186,353,36,28]}`（`disabled=true` 与暗淡色都能读到）。
+  - `checkinLocator.mjs` 在已签到页返回 `state=checked signedIn=1` —— **定位器本来就是对的**，只是像素判定没让它说了算。
+  - `loginFormLocator.mjs` 在 motomoto 登录页返回 `form=1 ux=640 uy=484 px=640 py=554 sx=640 sy=610`，与脚本里的 `moto` 预设（484 / 554 / 609）逐位一致 —— 登录预设没有问题。
+- **四、改法（一行开关，复用已有机制）**
+  - `scripts/checkin-browser/newapi-x11-checkin.sh` 的 `moto)` 预设加 `DOM_PAGE_RULES=1`，让 `dom_measure()` 用 `checkinLocator.mjs` 的 DOM 结论覆盖像素结果（`supra` / `chinahk` 早就是这么处理的），`click_checkin()` 也会优先用 `DOM_CHECKIN_XY`。
+  - 预设里的 `CHECKIN_BADGE_BOX` / 像素带**保留不动**：DevTools 端口读不到时，它仍是唯一可用的兜底，与 supra / chinahk 的既有设计一致。
+- **五、验证**
+  - 端到端：`POST /api/checkin/trigger/16` → `{"success":true,"message":"already checked in (browser check-in)","status":"success"}`；`run.log` 记 `state1=CHECKED modal=0 profile=1` → `already checked in today` → `landed=19`；`checkin_logs` 新增 `success`（`2026-10-16 09:42:07`），账号 `status=active`、`balance=850`。
+  - 探针轮转掉的 cookie 已写回账号并复验（`POST /api/accounts/16/balance` 正常），探针用 Chromium 进程已全部回收。
+- **六、顺带把其余「签到不成功」的站过了一遍（结论：没有同类问题）**
+  - 全量口径：`checkin_enabled=1` 的 **39** 个账号里，**36** 个「最近一条日志就是 success」；只剩 3 个例外，逐条查清如下。
+  - `#39 Columbina`（`newapi.columbina.eu.org`，sub2api）：**站点真挂了**。域名解析到 `cl-gleed2b2bc.gcdn.co`（Gcore CDN），直连与走代理都 `code=000`，TLS 直接 `internal error`；连根域 `columbina.eu.org` 都已无 DNS 记录。日志里 `站点无法访问（网站可能挂了）：fetch failed` 是真实原因，等站点恢复即可，不是我们的问题。
+  - `#54 薄荷 API`（`x666.me`，外部签到站 `up.x666.me`）：**上游抖动**。7 天内 267 次 success、17 次 failed，失败集中在个别小时；现测 `up.x666.me` 返回 200，属站点侧偶发。
+  - `#27 l0veyou`（`l0veyou.com`，sub2api）：**站点确实没有签到接口**，报的是 `skipped: Check-in is not supported by Sub2API`（不是失败）。实测账号令牌有效（`/api/v1/auth/me` → 200，`last_active_at` 就是刚刚，保活正常），而 `/api/v1/check-in/status` 返回的是站点自己的 `404 page not found` —— 该 sub2api 发行版没带签到路由，我们报「不支持」是诚实的。之前「凭证已过期」的提示已不再出现。
+  - `#8 Any Router`（44 次失败 / 大量成功）、`#62 简直了`、`#49 Fengwind API`、`#43 辉哥` 等：都是单次或个位数的 `fetch failed` / `HTTP 522` 抖动，紧接着就恢复成功，无需处理。
+  - `checkin_enabled=0` 的 11 个账号（coee、aiinc、芙卡卡、霸气、Loveyy、君の公益、冰山、Mazal、皮皮旺、X-API、蛙蛙）**全是手动关闭的**（代码里除 `gwrelay` 同步上游字段外没有任何自动关闭 `checkin_enabled` 的路径），不是失败，也不动它们。
+  - 失败原因文案在这一轮没有改动：`fetch failed` / `HTTP 522` / `check-in status failed` 这类都已经带上前缀「站点无法访问（网站可能挂了）」，与实际可观测状态一致。
+- **主要文件**：`scripts/checkin-browser/newapi-x11-checkin.sh`
+- **交付物**：代码、本变更记录。
+- **状态**：已完成
+
+
 ### 117. chinahk（换肤后叫 `sunapi`）连续多天没签到：登录页改版坐标漂移 + 失败运行把旧 cookie 写回账号
 
 - **类型**：修复（浏览器签到 + 凭据轮换）
