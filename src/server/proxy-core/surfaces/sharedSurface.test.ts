@@ -630,6 +630,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
       model: 'gpt-5.2',
       reason: 'upstream returned HTTP 401',
+      client: { ip: null, session: null, kind: null, path: '/v1/responses', keyId: null },
     });
   });
 
@@ -731,6 +732,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
       model: 'gpt-5.2',
       reason: 'upstream failure',
+      client: { ip: null, session: null, kind: null, path: '/v1/chat/completions', keyId: null },
     });
     expect(recordOauthQuotaResetHintMock).not.toHaveBeenCalled();
   });
@@ -780,6 +782,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
       model: 'gpt-5.2',
       reason: 'socket hang up',
+      client: { ip: null, session: null, kind: null, path: '/v1/responses', keyId: null },
     });
   });
 

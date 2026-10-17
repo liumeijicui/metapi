@@ -1,3 +1,29 @@
+### 119. 「gpt-6-luna 没有配置转发规则」天天报警，但用户从没调用过：来源定位 + 通知带上调用方
+
+- **类型**：缺陷修复（可观测性）
+- **需求来源**：本会话（用户：「我从来没有调用 gpt-6-luna，为啥会报这个错」）
+- **一、现象**
+  - 用户反复收到「代理全部失败：模型=gpt-6-luna，原因=模型 gpt-6-luna 没有配置「模型转发」规则」，但他本人只在使用 `gpt-6-astra`。
+  - `model_forward_rules` 里确实只有 `gpt-6-astra` / `gpt-5.5` / `gpt-6.1-sol` 三条，`gpt-6-luna` 没有规则 —— 报错本身是真的。
+- **二、排查过程与结论**
+  - 先排除「我们自己的定时任务」：`proxy_logs` 里 luna 的 `client_family=internal` 只有 3 条（10-14 / 10-15），全部来自「模型监控 → 对话」的手工直连测试，`route_id` 为空、不走网关；服务端没有任何按规则/定时任务用 luna 打自己网关的调用点。
+  - 再看 nginx 访问日志（`access.log-20261017`，含 16/Oct 03:32 之前的数据）：`2026-10-16 16:32:00~16:32:17` 有 **25 笔** `POST /v1/responses` 返回 503（196 字节，正是「没有配置转发规则」的响应体），来源 IP `180.98.128.205`，UA 是 `Codex Desktop/0.163.0-alpha.10.2 (Windows 10.0.26200; x86_64)` —— 就是用户自己那台机器上的 Codex Desktop。
+  - 同一秒内还夹着 `gpt-6-astra` 的 200（响应体 224KB），`proxy_logs` 显示当时有两个 Codex 会话在跑（`01a1427b-…` 和 `01a143d6-…`）。也就是说：astra 正常跑着的同时，同一个 Codex Desktop 还在按 1 秒一次的节奏重试 `gpt-6-luna`。
+  - 结论：luna 的流量来自**客户端侧**（另一个 Codex 线程/标签页，或 CC Switch 这类本地代理的模型故障转移列表里带了 luna），不是服务端行为，也不是缓存。
+- **三、改法：让通知自己说清楚是谁在调用**
+  - `alertService.reportProxyAllFailed()` 新增可选的 `client` 信息（IP、UA、客户端类型、下游路径、下游 Key、会话/线程 ID），追加到事件与推送文案末尾，例如：
+    `…；来源：客户端=codex，路径=/v1/responses，Key=#2，会话=01a143d6-…，IP=180.98.128.205，UA=Codex Desktop/0.163.0-alpha.10.2`
+  - 会话 ID 取自 Codex 的 `session_id` 请求头（`downstreamClientContext` 已有解析），能直接定位到是哪一个对话在调用。
+  - 四个 surface（chat / responses / rerank / 共享 failure toolkit）全部接上；`createSurfaceFailureToolkit` 增加 `clientIp` / `clientSessionId` 入参。
+- **四、验证**
+  - 新增 `alertService.proxyFailureClient.test.ts` 3 例（完整字段、空信息、数组 UA + 截断）；`sharedSurface.test.ts` 的 3 处断言补上 `client` 字段；`tsc --noEmit -p tsconfig.server.json` 通过，29 例相关测试全绿。
+  - 重启服务后端到端复现：带 `session_id` 头 + Codex UA 请求一个不存在的模型，事件文案实际输出
+    `；来源：客户端=codex，路径=/v1/responses，Key=#2，会话=01a143d6-23bd-7b73-9b2f-6556932a5556，IP=127.0.0.1，UA=Codex Desktop/0.163.0-alpha.10.2`，验证后已删除探针事件。
+- **五、附带处理**
+  - 为 `gpt-6-luna` 建了转发规则 `#17`（咕咕嘎嘎 → 皮皮旺 → 小鸡毛，Codex 走的 `/v1/responses` 实测 200；胖猫/Mazal/luckyg 先停用），这样即使那个客户端继续发 luna 也不会再无意义地报错。用户若不需要 luna，可随时在「模型转发」里删掉这条。
+- **主要文件**：`src/server/services/alertService.ts`、`src/server/proxy-core/surfaces/{chatSurface,openAiResponsesSurface,rerankSurface,sharedSurface}.ts`、`src/server/services/alertService.proxyFailureClient.test.ts`
+- **状态**：已完成
+
 ### 118. motomoto 签到卡改版成「标签 + 日历」：已签到状态被像素判定读成空白，每天恒报失败
 
 - **类型**：缺陷修复（浏览器签到判定）

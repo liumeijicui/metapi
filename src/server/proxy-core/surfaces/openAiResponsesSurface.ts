@@ -317,6 +317,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
       warningScope: 'responses',
       downstreamPath,
       maxRetries,
+      clientIp: request.ip,
+      clientSessionId: clientContext.sessionId ?? null,
       clientContext,
       downstreamApiKeyId,
       reasoningEffort: resolveReasoningEffortFromBody(body),
@@ -378,6 +380,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
         await reportProxyAllFailed({
           model: requestedModel,
           reason: noChannelMessage,
+          client: {
+            ip: request.ip,
+            session: clientContext.sessionId ?? null,
+            userAgent: request.headers['user-agent'],
+            kind: clientContext.clientKind,
+            path: downstreamPath,
+            keyId: downstreamApiKeyId,
+          },
         });
         const payload = {
           error: { message: noChannelMessage, type: 'server_error' as const },

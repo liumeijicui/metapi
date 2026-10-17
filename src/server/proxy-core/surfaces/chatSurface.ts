@@ -359,6 +359,8 @@ export async function handleChatSurfaceRequest(
     warningScope: 'chat',
     downstreamPath,
     maxRetries,
+    clientIp: request.ip,
+    clientSessionId: clientContext.sessionId ?? null,
     clientContext,
     downstreamApiKeyId,
     reasoningEffort: resolveReasoningEffortFromBody(downstreamFormat === 'claude' ? claudeOriginalBody : request.body),
@@ -424,6 +426,14 @@ export async function handleChatSurfaceRequest(
       await reportProxyAllFailed({
         model: requestedModel,
         reason: noChannelMessage,
+        client: {
+          ip: request.ip,
+          session: clientContext.sessionId ?? null,
+          userAgent: request.headers['user-agent'],
+          kind: clientContext.clientKind,
+          path: downstreamPath,
+          keyId: downstreamApiKeyId,
+        },
       });
       const payload = {
         error: { message: noChannelMessage, type: 'server_error' as const },
@@ -1394,6 +1404,8 @@ export async function handleClaudeCountTokensSurfaceRequest(
     warningScope: 'chat',
     downstreamPath,
     maxRetries,
+    clientIp: request.ip,
+    clientSessionId: clientContext.sessionId ?? null,
     clientContext,
     downstreamApiKeyId,
     reasoningEffort: resolveReasoningEffortFromBody(rawBody),
@@ -1455,6 +1467,14 @@ export async function handleClaudeCountTokensSurfaceRequest(
       await reportProxyAllFailed({
         model: requestedModel,
         reason: noChannelMessage,
+        client: {
+          ip: request.ip,
+          session: clientContext.sessionId ?? null,
+          userAgent: request.headers['user-agent'],
+          kind: clientContext.clientKind,
+          path: downstreamPath,
+          keyId: getProxyAuthContext(request)?.keyId ?? null,
+        },
       });
       await finalizeDebugFailure(503, {
         error: { message: noChannelMessage, type: 'server_error' },

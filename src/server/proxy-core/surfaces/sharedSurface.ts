@@ -559,6 +559,10 @@ export function createSurfaceFailureToolkit(input: {
   warningScope: SurfaceWarningScope;
   downstreamPath: string;
   maxRetries: number;
+  /** 下游请求来源 IP：失败通知里要能看出是谁打进来的。 */
+  clientIp?: string | null;
+  /** 下游会话标识（Codex 的 thread id），用于定位是哪一个对话在调用。 */
+  clientSessionId?: string | null;
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
   /** 下游请求里的思考强度，由各 surface 从请求体里解出来后带进来。 */
@@ -673,6 +677,13 @@ export function createSurfaceFailureToolkit(input: {
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({
         model: args.requestedModel,
         reason: `upstream returned HTTP ${args.status}`,
+        client: {
+          ip: input.clientIp ?? null,
+          session: input.clientSessionId ?? null,
+          kind: input.clientContext?.clientKind ?? null,
+          path: input.downstreamPath,
+          keyId: input.downstreamApiKeyId ?? null,
+        },
       }));
 
       return {
@@ -730,6 +741,13 @@ export function createSurfaceFailureToolkit(input: {
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({
         model: args.requestedModel,
         reason: args.failure.reason,
+        client: {
+          ip: input.clientIp ?? null,
+          session: input.clientSessionId ?? null,
+          kind: input.clientContext?.clientKind ?? null,
+          path: input.downstreamPath,
+          keyId: input.downstreamApiKeyId ?? null,
+        },
       }));
 
       return {
@@ -776,6 +794,13 @@ export function createSurfaceFailureToolkit(input: {
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({
         model: args.requestedModel,
         reason: args.errorMessage || 'network failure',
+        client: {
+          ip: input.clientIp ?? null,
+          session: input.clientSessionId ?? null,
+          kind: input.clientContext?.clientKind ?? null,
+          path: input.downstreamPath,
+          keyId: input.downstreamApiKeyId ?? null,
+        },
       }));
 
       return {

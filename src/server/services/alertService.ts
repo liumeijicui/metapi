@@ -105,20 +105,62 @@ export async function reportTokenExpired(params: {
   );
 }
 
-export async function reportProxyAllFailed(params: { model: string; reason: string }) {
+export type ProxyFailureClientInfo = {
+  ip?: string | null;
+  userAgent?: unknown;
+  kind?: string | null;
+  path?: string | null;
+  keyId?: number | null;
+  /** Codex 的 thread/session id：同一个人可能开着多个会话，只有它能定位到具体那一个。 */
+  session?: string | null;
+};
+
+function firstHeaderValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    const first = value.find((entry) => typeof entry === 'string' && entry.trim());
+    return typeof first === 'string' ? first.trim() : '';
+  }
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
+/**
+ * 「代理全部失败」只说模型和原因，排障时完全看不出是谁在调用：用户明明只在自己
+ * 客户端里用 A 模型，却因为某个后台程序按 B 模型打进来而收到一堆通知，只能猜。
+ * 这里把来源 IP、客户端标识、请求路径和下游 Key 一起带上，下次再出现能直接定位。
+ */
+export function describeProxyFailureClient(client?: ProxyFailureClientInfo | null): string {
+  if (!client) return '';
+  const parts: string[] = [];
+  if (client.kind) parts.push(`客户端=${client.kind}`);
+  if (client.path) parts.push(`路径=${client.path}`);
+  if (typeof client.keyId === 'number' && client.keyId > 0) parts.push(`Key=#${client.keyId}`);
+  if (client.session) parts.push(`会话=${truncateText(client.session, 44)}`);
+  if (client.ip) parts.push(`IP=${client.ip}`);
+  const userAgent = truncateText(firstHeaderValue(client.userAgent), 90);
+  if (userAgent) parts.push(`UA=${userAgent}`);
+  if (parts.length === 0) return '';
+  return `；来源：${parts.join('，')}`;
+}
+
+export async function reportProxyAllFailed(params: {
+  model: string;
+  reason: string;
+  client?: ProxyFailureClientInfo | null;
+}) {
   const createdAt = formatUtcSqlDateTime(new Date());
+  const message = `模型=${params.model}, 原因=${params.reason}${describeProxyFailureClient(params.client)}`;
   await db.insert(schema.events).values({
     type: 'proxy',
     title: '代理全部失败',
-    message: `模型=${params.model}, 原因=${params.reason}`,
+    message,
     level: 'error',
     relatedType: 'route',
     createdAt,
   }).run();
 
-  await sendNotification(
-    '代理全部失败',
-    `模型=${params.model}, 原因=${params.reason}`,
-    'error',
-  );
+  await sendNotification('代理全部失败', message, 'error');
 }

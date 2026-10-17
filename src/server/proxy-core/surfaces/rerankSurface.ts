@@ -52,6 +52,8 @@ export async function handleRerankSurfaceRequest(
     warningScope: 'rerank',
     downstreamPath,
     maxRetries,
+    clientIp: request.ip,
+    clientSessionId: clientContext.sessionId ?? null,
     clientContext,
     downstreamApiKeyId,
   });
@@ -68,7 +70,18 @@ export async function handleRerankSurfaceRequest(
     });
     if (!selected) {
       const message = await buildModelUnavailableMessage(requestedModel, forcedChannelId);
-      await reportProxyAllFailed({ model: requestedModel, reason: message });
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: message,
+        client: {
+          ip: request.ip,
+          session: clientContext.sessionId ?? null,
+          userAgent: request.headers['user-agent'],
+          kind: clientContext.clientKind,
+          path: downstreamPath,
+          keyId: downstreamApiKeyId,
+        },
+      });
       return reply.code(503).send({ error: { message, type: 'server_error' } });
     }
 
