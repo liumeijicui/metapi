@@ -19,8 +19,12 @@ import {
 } from '../modelContextLengthCache.js';
 import { normalizeCheckinReward, quotaToUsd } from './quota.js';
 import { runMintWheelCheckin } from './mintWheelCheckin.js';
+import { runBrowserPowCheckin } from './browserPowCheckin.js';
 import { isCloudflareChallengeResponse, refreshCloudflareClearance } from '../cloudflareClearance.js';
-import { getExternalCheckinSessionFromExtraConfig } from '../accountExtraConfig.js';
+import {
+  getExternalCheckinModeFromExtraConfig,
+  getExternalCheckinSessionFromExtraConfig,
+} from '../accountExtraConfig.js';
 import { solveImageCaptcha } from './imageCaptcha.js';
 
 /**
@@ -2099,6 +2103,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
     // relay's own check-in route is not what the operator wants run.
     const externalCheckinUrl = (context?.externalCheckinUrl || '').trim();
     if (externalCheckinUrl) {
+      // Deployments built on the "小天签到系统" template gate their check-in with
+      // Turnstile plus a browser-side PoW, so their session lives in the managed
+      // profile rather than on the account. The mode marker is the only thing the
+      // account needs to hold for that path.
+      if (getExternalCheckinModeFromExtraConfig(context?.extraConfig) === 'browser-pow') {
+        return runBrowserPowCheckin(externalCheckinUrl);
+      }
       const session = getExternalCheckinSessionFromExtraConfig(context?.extraConfig);
       if (!session) {
         return {

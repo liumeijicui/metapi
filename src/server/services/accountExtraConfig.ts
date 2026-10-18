@@ -455,6 +455,22 @@ export type ManagedExternalCheckinSession = {
 };
 
 /**
+ * Reads the check-in protocol a site declared, even when no credential is
+ * stored for it.
+ *
+ * Browser-driven welfare sites keep their session in the managed profile
+ * instead of on the account, so `mode` is the only marker they need.
+ */
+export function getExternalCheckinModeFromExtraConfig(
+  extraConfig?: ExtraConfigInput,
+): string | undefined {
+  const parsed = parseExtraConfig(extraConfig);
+  const raw = parsed.externalCheckin;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  return normalizeNonEmptyString((raw as Record<string, unknown>).mode);
+}
+
+/**
  * Reads the session captured for a site's external check-in/welfare service.
  *
  * The session is not a Sub2API credential: it belongs to whatever separate
