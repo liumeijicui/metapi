@@ -260,7 +260,11 @@ if (existsSync(webDir)) {
   await app.register(fastifyStatic, {
     root: webDir,
     prefix: '/',
-    wildcard: false,
+    // 必须用通配路由，而不是启动时枚举文件：
+    // 前端每次构建都会换 hash 文件名，如果静态插件在启动时就把文件清单固定住，
+    // 新构建的资源要等下一次重启服务才认得，期间 `/assets/*.js` 会落到 SPA
+    // 回退里返回 index.html，浏览器按严格 MIME 检查直接拒绝执行 → 整页空白。
+    wildcard: true,
     setHeaders: (res, filePath) => {
       const normalizedPath = normalize(filePath);
       if (normalizedPath.includes(`${sep}assets${sep}`)) {

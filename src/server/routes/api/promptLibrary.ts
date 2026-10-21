@@ -8,11 +8,13 @@ import {
   deletePromptSuite,
   getPromptSuite,
   importBuiltinPromptPreset,
+  getDefaultSimplePromptCaseId,
   listBuiltinPromptPresets,
   listEnabledPromptCasesWithSuite,
   listPromptCases,
   listPromptSuites,
   listSimplePromptCases,
+  setDefaultSimplePromptCaseId,
   updateSimplePromptCase,
   updatePromptCase,
   updatePromptSuite,
@@ -117,9 +119,28 @@ export async function promptLibraryRoutes(app: FastifyInstance) {
 
   // 简化版提示词管理：一个平铺列表，只有题目名称 / 描述 / 答案。
   app.get('/api/prompt-library/cases', async () => {
-    const cases = await listSimplePromptCases();
-    return { success: true, cases };
+    const [cases, defaultCaseId] = await Promise.all([
+      listSimplePromptCases(),
+      getDefaultSimplePromptCaseId(),
+    ]);
+    return { success: true, cases, defaultCaseId };
   });
+
+  app.get('/api/prompt-library/default-case', async () => {
+    return { success: true, defaultCaseId: await getDefaultSimplePromptCaseId() };
+  });
+
+  app.put<{ Body: { caseId?: unknown } }>(
+    '/api/prompt-library/default-case',
+    async (request, reply) => {
+      try {
+        const defaultCaseId = await setDefaultSimplePromptCaseId(request.body?.caseId);
+        return { success: true, defaultCaseId };
+      } catch (error) {
+        return sendPromptLibraryError(reply, error);
+      }
+    },
+  );
 
   app.post<{ Body: SimplePromptCaseInput }>('/api/prompt-library/cases', async (request, reply) => {
     try {

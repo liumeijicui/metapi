@@ -1,4 +1,5 @@
 import { fetch } from 'undici';
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { isReadyAccountToken } from './accountTokenService.js';
@@ -14,6 +15,7 @@ import { executeEndpointFlow } from '../proxy-core/orchestration/endpointFlow.js
 import { getObservedResponseMeta } from '../proxy-core/firstByteTimeout.js';
 import { getRuntimeResponseReader } from '../proxy-core/executors/types.js';
 import { openAiChatTransformer } from '../transformers/openai/chat/index.js';
+import type { ModelChatApiMode } from './modelChatPreferenceService.js';
 
 /**
  * 模型监控的「对话」：用站点自己的账号 / 密钥直连上游，完全不经过网关路由。
@@ -153,6 +155,11 @@ export type SiteDirectChatInput = {
   model: string;
   messages: Array<{ role: string; content: string }>;
   stream?: boolean;
+  /**
+   * 直连上游走哪套接口。部分模型只在 `/v1/responses` 上可用，
+   * 另一些（以及大多数第三方中转）只认 `/v1/chat/completions`。
+   */
+  apiMode?: ModelChatApiMode;
   /** 总时长上限（毫秒）。到点必断，防止连接一直挂着。 */
   timeoutMs: number;
   /** 空闲上限（毫秒）：多久没有收到新数据才算卡死。推理模型首字很慢，所以单独给一份预算。 */
@@ -362,6 +369,7 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
   const { site, account, tokenValue } = resolved;
 
   const stream = input.stream !== false;
+  const apiMode: ModelChatApiMode = input.apiMode === 'responses' ? 'responses' : 'chat';
   // 页面选中的思考强度之类的字段，原样透传（openai 协议下就是 chat/completions 的顶层字段）。
   const extraBody = input.extraBody && typeof input.extraBody === 'object' ? input.extraBody : {};
   const openaiBody: Record<string, unknown> = {
@@ -413,20 +421,45 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
 
   const startedAt = Date.now();
   try {
-    // 固定按 OpenAI 协议发起：候选表里第一个就是 /v1/chat/completions，
-    // 我们只发这一个（见下面的 disableCrossProtocolFallback）。
-    const endpointCandidates = await resolveUpstreamEndpointCandidates(
-      { site, account },
-      input.model,
-      'openai',
-      input.model,
-    );
-    if (!endpointCandidates.length) {
-      return { ok: false, status: 502, message: '该站点没有可用的上游端点' };
+    // 页面上选了哪套协议就只发一个端点，不做跨协议降级：用户要验证的正是
+    // 「这个模型在该协议下到底能不能用」。
+    //
+    // chat 模式仍要走一次端点推导：Claude 原生 / anyrouter / antigravity 这类
+    // 站点真正可用的是 /v1/messages，死写成 /v1/chat/completions 会直接打不通。
+    // 只从候选里挑第一个非 responses 的端点；responses 模式则强制 /v1/responses。
+    let endpointCandidates: UpstreamEndpoint[];
+    if (apiMode === 'responses') {
+      endpointCandidates = ['responses'];
+    } else {
+      const derived = await resolveUpstreamEndpointCandidates(
+        { site, account },
+        input.model,
+        'openai',
+        input.model,
+      );
+      const nonResponsesEndpoint = derived.find((endpoint) => endpoint !== 'responses');
+      endpointCandidates = nonResponsesEndpoint
+        ? [nonResponsesEndpoint]
+        : derived.length > 0
+          ? [derived[0]]
+          : ['chat'];
     }
 
     const oauth = getOauthInfoFromAccount(account);
-    const providerHeaders = buildOauthProviderHeaders({ account, downstreamHeaders: {} });
+    // 模拟 Codex 的客户端指纹。部分站点按 Originator / Session_id / UA 识别
+    // 客户端，只有像 Codex 才放行；这和 Codex 自己发出来的头保持一致。
+    const codexSessionId = randomUUID();
+    const codexHeaders: Record<string, string> = {
+      'User-Agent': 'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464',
+      Originator: 'codex_cli_rs',
+      Session_id: codexSessionId,
+      Conversation_id: codexSessionId,
+      Accept: stream ? 'text/event-stream' : 'application/json',
+    };
+    const providerHeaders = {
+      ...buildOauthProviderHeaders({ account, downstreamHeaders: {} }),
+      Version: '0.101.0',
+    };
     const channelProxyUrl = resolveChannelProxyUrl(site, account.extraConfig);
 
     const buildRequest = (endpoint: UpstreamEndpoint) => {
@@ -440,8 +473,8 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
         sitePlatform: site.platform,
         siteUrl: site.url,
         openaiBody,
-        downstreamFormat: 'openai',
-        downstreamHeaders: {},
+        downstreamFormat: apiMode === 'responses' ? 'responses' : 'openai',
+        downstreamHeaders: codexHeaders,
         providerHeaders,
       });
       return {

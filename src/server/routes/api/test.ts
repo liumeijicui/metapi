@@ -64,6 +64,8 @@ type ProxyTestEnvelope = {
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
   multipartFiles?: ProxyTestMultipartFile[];
+  /** 模拟某个下游客户端的请求头（例如 Codex 的 Originator / Session_id）。 */
+  headers?: Record<string, string>;
 };
 
 type ValidatedProxyTestEnvelope = {
@@ -78,6 +80,7 @@ type ValidatedProxyTestEnvelope = {
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
   multipartFiles?: ProxyTestMultipartFile[];
+  headers?: Record<string, string>;
 };
 
 type TestJobStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled';
@@ -396,6 +399,35 @@ function validateProxyEnvelope(
     forcedChannelId: normalizeForcedChannelId(body.forcedChannelId),
   };
 
+  if (isRecord(body.headers)) {
+    // 只放行「客户端指纹」相关的头，避免把 Authorization / Cookie 之类的
+    // 凭据头从测试接口注入到网关请求里。当前用途是让对话测试看起来像 Codex。
+    const allowed = new Set([
+      'accept',
+      'accept-language',
+      'conversation-id',
+      'conversation_id',
+      'openai-beta',
+      'originator',
+      'session-id',
+      'session_id',
+      'user-agent',
+      'version',
+      'x-codex-beta-features',
+      'x-codex-turn-metadata',
+      'x-codex-turn-state',
+    ]);
+    const headers: Record<string, string> = {};
+    for (const [rawKey, rawValue] of Object.entries(body.headers)) {
+      const key = String(rawKey || '').trim();
+      if (!key || !allowed.has(key.toLowerCase())) continue;
+      if (typeof rawValue !== 'string') continue;
+      const value = rawValue.trim();
+      if (value) headers[key] = value;
+    }
+    if (Object.keys(headers).length > 0) envelope.headers = headers;
+  }
+
   if (requestKind === 'json') {
     if (typeof body.rawJsonText === 'string' && body.rawJsonText.trim().length > 0) {
       envelope.rawJsonText = body.rawJsonText;
@@ -509,7 +541,10 @@ async function buildUpstreamRequestInit(
   envelope: ValidatedProxyTestEnvelope,
   forceStream: boolean,
 ): Promise<UndiciRequestInit> {
-  const headers: Record<string, string> = createDefaultHeadersForPath(envelope.path);
+  const headers: Record<string, string> = {
+    ...(envelope.headers || {}),
+    ...createDefaultHeadersForPath(envelope.path),
+  };
   headers[TESTER_REQUEST_HEADER] = '1';
   if (typeof envelope.forcedChannelId === 'number' && envelope.forcedChannelId > 0) {
     headers[TESTER_FORCED_CHANNEL_HEADER] = String(envelope.forcedChannelId);

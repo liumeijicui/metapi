@@ -299,6 +299,8 @@ export type ProxyTestRequestEnvelope = {
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
   multipartFiles?: ProxyTestMultipartFile[];
+  /** 模拟下游客户端的请求头（Codex 指纹等）。 */
+  headers?: Record<string, string>;
 };
 
 const DEFAULT_PROXY_TEST_TIMEOUT_MS = 30_000;
@@ -332,6 +334,8 @@ async function directChatStreamRequest(
     messages: Array<{ role: string; content: string }>;
     /** 思考强度（reasoning_effort）；留空表示按站点默认。 */
     reasoningEffort?: string;
+    /** 直连协议：部分模型只在 Responses 端点可用。 */
+    apiMode?: 'chat' | 'responses';
   },
   signal?: AbortSignal,
 ) {
@@ -1089,6 +1093,11 @@ export const api = {
   },
   getProxyLogDetail: (id: number) =>
     request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
+  clearProxyLogs: () =>
+    request<{ success: boolean }>("/api/stats/proxy-logs", {
+      method: "DELETE",
+      timeoutMs: 60_000,
+    }),
   getProxyDebugTraces: (params?: { limit?: number }) =>
     request(
       `/api/stats/proxy-debug/traces${buildQueryString(params)}`,
@@ -1464,10 +1473,36 @@ export const api = {
       }>;
       requestedModel?: string;
       direct?: boolean;
+      preference?: {
+        apiMode: 'chat' | 'responses';
+        reasoningEffort: string | null;
+      } | null;
     }>(
       `/api/model-monitor/chat-channels?siteId=${encodeURIComponent(String(siteId))}&model=${encodeURIComponent(model)}`,
       { timeoutMs: 30_000 },
     ),
+  getModelChatPreference: (siteId: number, model: string) =>
+    request<{
+      success: boolean;
+      preference: { apiMode: 'chat' | 'responses'; reasoningEffort: string | null } | null;
+    }>(
+      `/api/model-monitor/chat-preference?siteId=${encodeURIComponent(String(siteId))}&model=${encodeURIComponent(model)}`,
+      { timeoutMs: 30_000 },
+    ),
+  saveModelChatPreference: (payload: {
+    siteId: number;
+    model: string;
+    apiMode: 'chat' | 'responses';
+    reasoningEffort?: string | null;
+  }) =>
+    request<{
+      success: boolean;
+      preference: { apiMode: 'chat' | 'responses'; reasoningEffort: string | null };
+    }>("/api/model-monitor/chat-preference", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      timeoutMs: 30_000,
+    }),
 
   // 提示词管理：题库（suite）+ 题目（case），题目可带标准答案或评分要点
   getPromptSuites: () =>
@@ -1520,7 +1555,13 @@ export const api = {
     }),
   // 简化版提示词管理：平铺列表，只有题目名称 / 描述 / 答案
   getSimplePromptCases: () =>
-    request<{ success: boolean; cases: any[] }>("/api/prompt-library/cases", {
+    request<{ success: boolean; cases: any[]; defaultCaseId?: number | null }>("/api/prompt-library/cases", {
+      timeoutMs: 30_000,
+    }),
+  setDefaultPromptCase: (caseId: number | null) =>
+    request<{ success: boolean; defaultCaseId: number | null }>("/api/prompt-library/default-case", {
+      method: "PUT",
+      body: JSON.stringify({ caseId }),
       timeoutMs: 30_000,
     }),
   createSimplePromptCase: (payload: Record<string, unknown>) =>

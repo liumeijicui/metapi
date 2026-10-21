@@ -99,6 +99,47 @@ describe('testRoutes proxy tester transport', () => {
     });
   });
 
+  it('forwards Codex fingerprint headers but never injects credential headers', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      object: 'response',
+      output_text: 'ok',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/test/proxy',
+      payload: {
+        method: 'POST',
+        path: '/v1/responses',
+        requestKind: 'json',
+        stream: false,
+        rawJsonText: JSON.stringify({ model: 'gpt-5.5', input: 'hi' }),
+        headers: {
+          'User-Agent': 'codex_cli_rs/0.101.0',
+          Originator: 'codex_cli_rs',
+          Session_id: 'session-1',
+          Version: '0.101.0',
+          Authorization: 'Bearer stolen',
+          Cookie: 'session=stolen',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers['User-Agent']).toBe('codex_cli_rs/0.101.0');
+    expect(headers.Originator).toBe('codex_cli_rs');
+    expect(headers.Session_id).toBe('session-1');
+    expect(headers.Version).toBe('0.101.0');
+    // 默认 Authorization 是测试网关自己的本地 key，绝不能被请求体里的值覆盖。
+    expect(headers.Authorization).not.toBe('Bearer stolen');
+    expect(headers.Cookie).toBeUndefined();
+  });
+
   it('translates legacy claude chat tests through the compatibility wrapper', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       type: 'message',

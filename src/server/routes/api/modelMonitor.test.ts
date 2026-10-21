@@ -91,6 +91,38 @@ describe('model monitor routes', () => {
     expect(matched.json().modelOptions.map((row: any) => row.modelName)).toEqual(['gpt-5.5', 'grok-4.5']);
   });
 
+  it('按站点 + 模型保存并恢复对话协议与思考强度', async () => {
+    const site = await db.select().from(schema.sites).get();
+    expect(site?.id).toBeGreaterThan(0);
+
+    const save = await app.inject({
+      method: 'PUT',
+      url: '/api/model-monitor/chat-preference',
+      payload: {
+        siteId: site!.id,
+        model: 'gpt-5.5',
+        apiMode: 'responses',
+        reasoningEffort: 'high',
+      },
+    });
+    expect(save.statusCode).toBe(200);
+    expect(save.json().preference).toEqual({ apiMode: 'responses', reasoningEffort: 'high' });
+
+    const load = await app.inject({
+      method: 'GET',
+      url: `/api/model-monitor/chat-preference?siteId=${site!.id}&model=gpt-5.5`,
+    });
+    expect(load.statusCode).toBe(200);
+    expect(load.json().preference).toEqual({ apiMode: 'responses', reasoningEffort: 'high' });
+
+    // 另一个模型互不影响
+    const other = await app.inject({
+      method: 'GET',
+      url: `/api/model-monitor/chat-preference?siteId=${site!.id}&model=grok-4.5`,
+    });
+    expect(other.json().preference).toBeNull();
+  });
+
   it('rejects unknown sort keys by falling back to success rate', async () => {
     const response = await app.inject({
       method: 'GET',

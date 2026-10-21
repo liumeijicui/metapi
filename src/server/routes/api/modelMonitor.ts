@@ -15,6 +15,11 @@ import {
   resolveChatTargetForSiteModel,
   runModelMonitorFetch,
 } from '../../services/modelMonitorService.js';
+import {
+  getModelChatPreference,
+  normalizeModelChatApiMode,
+  saveModelChatPreference,
+} from '../../services/modelChatPreferenceService.js';
 
 function parseOptionalNumber(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
@@ -97,19 +102,58 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       }
       // 对话只做直连：该站点自己的凭据（账号 JWT / sk- 令牌），不参与网关
       // 的新路由 / 老路由选路。凭据与路由配置无关，站点有账号或密钥就能聊。
-      const [target, credentials] = await Promise.all([
+      const [target, credentials, preference] = await Promise.all([
         resolveChatTargetForSiteModel(siteId, model),
         listSiteDirectChatTargets(siteId),
+        getModelChatPreference(siteId, model),
       ]);
       return {
         success: true,
         channels: target.channels,
         credentials,
+        preference,
         requestedModel: target.requestedModel,
         direct: true,
       };
     },
   );
+
+  // 每个「站点 + 模型」记住上一回选的接口协议（chat / responses）和思考强度。
+  app.get<{ Querystring: { siteId?: string; model?: string } }>(
+    '/api/model-monitor/chat-preference',
+    async (request, reply) => {
+      const siteId = Math.trunc(parseOptionalNumber(request.query.siteId) ?? 0);
+      const model = String(request.query.model || '').trim();
+      if (siteId <= 0 || !model) {
+        return reply.code(400).send({ success: false, message: 'siteId 和 model 不能为空' });
+      }
+      return {
+        success: true,
+        preference: await getModelChatPreference(siteId, model),
+      };
+    },
+  );
+
+  app.put<{
+    Body: { siteId?: number; model?: string; apiMode?: string; reasoningEffort?: string | null };
+  }>('/api/model-monitor/chat-preference', async (request, reply) => {
+    const body = request.body || {};
+    const siteId = Math.trunc(Number(body.siteId) || 0);
+    const model = String(body.model || '').trim();
+    if (siteId <= 0 || !model) {
+      return reply.code(400).send({ success: false, message: 'siteId 和 model 不能为空' });
+    }
+    if (!normalizeModelChatApiMode(body.apiMode)) {
+      return reply.code(400).send({ success: false, message: '接口协议只支持 chat / responses' });
+    }
+    const preference = await saveModelChatPreference({
+      siteId,
+      model,
+      apiMode: body.apiMode,
+      reasoningEffort: body.reasoningEffort,
+    });
+    return { success: true, preference };
+  });
 
   /**
    * 直连对话：用「站点 + 账号 + 凭据」直接打上游，和路由配置完全无关。
@@ -123,6 +167,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model?: string;
       messages?: Array<{ role?: string; content?: unknown }>;
       reasoningEffort?: string;
+      apiMode?: string;
     };
   }>('/api/model-monitor/chat/stream', async (request, reply) => {
     const body = request.body || {};
@@ -144,6 +189,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     if (reasoningEffort && !allowedReasoningEfforts.includes(reasoningEffort)) {
       return reply.code(400).send({ error: { message: `思考强度不合法：${reasoningEffort}` } });
     }
+    const apiMode = normalizeModelChatApiMode(body.apiMode) || 'chat';
     if (siteId <= 0 || accountId <= 0 || !model) {
       return reply.code(400).send({ error: { message: 'siteId / accountId / model 不能为空' } });
     }
@@ -164,6 +210,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       model,
       messages,
       stream: true,
+      apiMode,
       // 0 = 不限制（默认）；设成正数则恢复「空闲 / 总时长」两条硬线。
       timeoutMs: config.modelMonitorChatTimeoutMs,
       idleTimeoutMs: config.modelMonitorChatIdleTimeoutMs,

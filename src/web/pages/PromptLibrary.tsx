@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import Combobox from '../components/Combobox.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -28,6 +29,8 @@ type SimpleCase = {
 export default function PromptLibrary() {
   const toast = useToast();
   const [cases, setCases] = useState<SimpleCase[]>([]);
+  const [defaultCaseId, setDefaultCaseId] = useState<number | null>(null);
+  const [savingDefault, setSavingDefault] = useState(false);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [editor, setEditor] = useState<{ open: boolean; promptCase: SimpleCaseDraft | null }>({
@@ -54,6 +57,12 @@ export default function PromptLibrary() {
         updatedAt: item?.updatedAt ?? null,
       }));
       setCases(list);
+      const defaultId = Number(response?.defaultCaseId);
+      setDefaultCaseId(
+        Number.isFinite(defaultId) && list.some((item) => item.id === defaultId)
+          ? Math.trunc(defaultId)
+          : null,
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : tr('加载题目失败'));
     } finally {
@@ -105,6 +114,10 @@ export default function PromptLibrary() {
     setDeleting(true);
     try {
       await api.deletePromptCase(deleteTarget.id);
+      if (deleteTarget.id === defaultCaseId) {
+        await api.setDefaultPromptCase(null).catch(() => undefined);
+        setDefaultCaseId(null);
+      }
       toast.success('题目已删除');
       setDeleteTarget(null);
       await loadCases();
@@ -113,7 +126,7 @@ export default function PromptLibrary() {
     } finally {
       setDeleting(false);
     }
-  }, [deleteTarget, loadCases, toast]);
+  }, [deleteTarget, defaultCaseId, loadCases, toast]);
 
   const handleCopy = useCallback(async (promptCase: SimpleCase) => {
     try {
@@ -121,6 +134,20 @@ export default function PromptLibrary() {
       toast.success('题目描述已复制');
     } catch {
       toast.error('复制失败，请手动选择文本');
+    }
+  }, [toast]);
+
+  const handleDefaultCaseChange = useCallback(async (value: string) => {
+    const nextId = value ? Number(value) : null;
+    setSavingDefault(true);
+    try {
+      await api.setDefaultPromptCase(nextId);
+      setDefaultCaseId(nextId);
+      toast.success(nextId ? '默认测试提示词已设置' : '已取消默认测试提示词');
+    } catch (error: any) {
+      toast.error(error?.message || '设置默认提示词失败');
+    } finally {
+      setSavingDefault(false);
     }
   }, [toast]);
 
@@ -199,6 +226,42 @@ export default function PromptLibrary() {
         </div>
       </div>
 
+      <div className="card" style={{ padding: '14px 16px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+              {tr('默认测试提示词')}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12.5, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              {tr('模型监控里点「测试」时，会自动把这道题的描述发给模型，不需要再手动选择。')}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 1 340px', minWidth: 220 }}>
+            <Combobox
+              value={defaultCaseId == null ? '' : String(defaultCaseId)}
+              onChange={(value) => void handleDefaultCaseChange(value)}
+              options={cases.map((item) => ({
+                value: String(item.id),
+                label: item.title,
+                description: item.description.slice(0, 80),
+              }))}
+              placeholder={tr('搜索并选择默认题目')}
+              disabled={savingDefault || loading}
+              emptyLabel={tr('没有匹配的题目')}
+              className="prompt-library-default-combobox"
+            />
+            <button
+              type="button"
+              className="btn btn-ghost prompt-library-btn-sm"
+              onClick={() => void handleDefaultCaseChange('')}
+              disabled={savingDefault || defaultCaseId == null}
+            >
+              {tr('清除')}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="toolbar">
         <div className="toolbar-search">
           <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -235,14 +298,19 @@ export default function PromptLibrary() {
                   <th style={{ width: '22%' }}>{tr('题目名称')}</th>
                   <th>{tr('题目描述')}</th>
                   <th style={{ width: '24%' }}>{tr('答案')}</th>
-                  <th style={{ width: 150 }}>{tr('操作')}</th>
+                  <th style={{ width: 210 }}>{tr('操作')}</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredCases.map((promptCase) => (
                   <tr key={promptCase.id}>
                     <td>
-                      <div className="prompt-library-case-title">{promptCase.title}</div>
+                      <div className="prompt-library-case-title">
+                        {promptCase.title}
+                        {promptCase.id === defaultCaseId ? (
+                          <span className="badge badge-info" style={{ marginLeft: 6 }}>{tr('默认')}</span>
+                        ) : null}
+                      </div>
                     </td>
                     <td>
                       <div className="prompt-library-case-prompt">{promptCase.description}</div>
@@ -256,6 +324,14 @@ export default function PromptLibrary() {
                     </td>
                     <td>
                       <div className="prompt-library-row-actions">
+                        <button
+                          className="btn btn-ghost prompt-library-btn-sm"
+                          onClick={() => void handleDefaultCaseChange(String(promptCase.id))}
+                          disabled={savingDefault || promptCase.id === defaultCaseId}
+                          title={tr('设为「测试」按钮的默认题目')}
+                        >
+                          {promptCase.id === defaultCaseId ? tr('默认') : tr('设默认')}
+                        </button>
                         <button
                           className="btn btn-ghost prompt-library-btn-sm"
                           onClick={() => void handleCopy(promptCase)}

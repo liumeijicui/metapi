@@ -842,6 +842,8 @@ export default function ProxyLogs() {
     [],
   );
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [clearingLogs, setClearingLogs] = useState(false);
   const [showDebugSettingsModal, setShowDebugSettingsModal] = useState(false);
   const [debugPanelLoading, setDebugPanelLoading] = useState(false);
   const [debugPanelSaving, setDebugPanelSaving] = useState(false);
@@ -1132,6 +1134,28 @@ export default function ProxyLogs() {
   useEffect(() => {
     void loadMeta();
   }, [loadMeta]);
+
+  const handleClearLogs = useCallback(async () => {
+    if (clearingLogs) return;
+    setClearingLogs(true);
+    try {
+      await api.clearProxyLogs();
+      toast.success("使用日志已清空");
+      setClearConfirmOpen(false);
+      setExpanded(null);
+      setDetailById({});
+      if (page === 1) {
+        await load(true);
+        await loadMeta(true);
+      } else {
+        setPage(1);
+      }
+    } catch (error: any) {
+      toast.error(error?.message || "清空使用日志失败");
+    } finally {
+      setClearingLogs(false);
+    }
+  }, [clearingLogs, load, loadMeta, page, toast]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -2160,6 +2184,26 @@ export default function ProxyLogs() {
               />
             </svg>
             {loading ? "加载中..." : "刷新"}
+          </button>
+          <button
+            onClick={() => setClearConfirmOpen(true)}
+            className="btn btn-ghost"
+            style={{
+              border: "1px solid var(--color-border)",
+              padding: "6px 14px",
+              color: "var(--color-danger)",
+            }}
+            title="清空全部使用日志（不可恢复）"
+          >
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
+            </svg>
+            清空日志
           </button>
         </div>
       </div>
@@ -3870,6 +3914,42 @@ export default function ProxyLogs() {
           </div>
         </div>
       )}
+
+      <CenteredModal
+        open={clearConfirmOpen}
+        onClose={() => { if (!clearingLogs) setClearConfirmOpen(false); }}
+        title="清空使用日志"
+        maxWidth={460}
+        closeOnBackdrop={!clearingLogs}
+        closeOnEscape={!clearingLogs}
+        footer={(
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setClearConfirmOpen(false)}
+              disabled={clearingLogs}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => void handleClearLogs()}
+              disabled={clearingLogs}
+            >
+              {clearingLogs ? "清空中..." : "确认清空"}
+            </button>
+          </div>
+        )}
+      >
+        <div style={{ padding: "8px 4px", lineHeight: 1.7 }}>
+          <div>将删除全部代理调用日志（含详情与计费明细），删除后不可恢复。</div>
+          <div style={{ marginTop: 8, color: "var(--color-text-muted)" }}>
+            站点、密钥、余额和用量汇总不会被删除。
+          </div>
+        </div>
+      </CenteredModal>
     </div>
   );
 }

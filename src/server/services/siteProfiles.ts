@@ -32,6 +32,9 @@ export const SITES_REQUIRING_SYSTEM_PROXY: readonly string[] = [
   // brunhild.challenges.cloudflare.com, which does not resolve on this network.
   // The browser check-in therefore needs the proxy for the challenge script.
   'chinahk.qzz.io',
+  // chinahk moved to sunapi.5201201314.top; the new host still loads Turnstile
+  // from the same blocked challenge host.
+  '5201201314.top',
   // Direct connections return empty responses for everything except the
   // status endpoint (even the sign-in page transfers zero bytes), while the
   // proxy receives the normal pages and API replies.

@@ -211,6 +211,7 @@ export default function ModelMonitor() {
   const [attachModelName, setAttachModelName] = useState('');
   const [attachBusy, setAttachBusy] = useState(false);
   const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);
+  const [chatAutoTest, setChatAutoTest] = useState(false);
   // 「导入到 CC Switch」：先把原站的 base 地址与 sk- 密钥取回来，再打开弹窗。
   // 这是「原站直连」配置，模型名必须用该站自己的模型名，所以把该站的模型清单
   // 一并带进弹窗，避免误选我们的对外模型名（源站会直接回 503）。
@@ -807,9 +808,17 @@ export default function ModelMonitor() {
                   type="button"
                   className="btn model-monitor-action-btn"
                   title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
-                  onClick={() => setChatTarget(model)}
+                  onClick={() => { setChatAutoTest(false); setChatTarget(model); }}
                 >
                   {tr('对话')}
+                </button>
+                <button
+                  type="button"
+                  className="btn model-monitor-action-btn"
+                  title={tr('使用提示词管理中的默认提示词，自动对这个模型发起一轮测试')}
+                  onClick={() => { setChatAutoTest(true); setChatTarget(model); }}
+                >
+                  {tr('测试')}
                 </button>
                 <button
                   type="button"
@@ -888,9 +897,17 @@ export default function ModelMonitor() {
                         type="button"
                         className="btn model-monitor-action-btn"
                         title={tr('直接对这个站点的这个模型发一条对话，日志里会标记为测试')}
-                        onClick={() => setChatTarget(model)}
+                        onClick={() => { setChatAutoTest(false); setChatTarget(model); }}
                       >
                         {tr('对话')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn model-monitor-action-btn"
+                        title={tr('使用提示词管理中的默认提示词，自动对这个模型发起一轮测试')}
+                        onClick={() => { setChatAutoTest(true); setChatTarget(model); }}
+                      >
+                        {tr('测试')}
                       </button>
                       <button
                         type="button"
@@ -931,13 +948,14 @@ export default function ModelMonitor() {
 
       <ModelChatModal
         open={chatTarget !== null}
+        autoTest={chatAutoTest}
         target={chatTarget ? {
           modelName: chatTarget.modelName,
           siteId: chatTarget.siteId,
           siteName: chatTarget.siteName,
           siteUrl: chatTarget.siteUrl,
         } : null}
-        onClose={() => setChatTarget(null)}
+        onClose={() => { setChatTarget(null); setChatAutoTest(false); }}
       />
 
       <DownstreamKeyCcSwitchModal

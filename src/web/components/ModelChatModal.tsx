@@ -111,12 +111,35 @@ export function buildCredentialKey(credential: { accountId: number; tokenId: num
   return `${credential.accountId}:${credential.tokenId ?? 0}`;
 }
 
-/** 从一帧 SSE JSON 里取增量文本。这里只处理 OpenAI 风格的 chunk。 */
+/** 生成一个会话 ID，用来模拟 Codex 的 Session_id / Conversation_id。 */
+function createCodexSessionId(): string {
+  const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID();
+  }
+  return `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** 从一帧 SSE JSON 里取增量文本。同时兼容 Chat Completions 与 Responses 两种事件。 */
 function readOpenAiDelta(payload: any): { content?: string; reasoning?: string; done?: boolean } {
   if (!payload || typeof payload !== 'object') return {};
+  const type = typeof payload.type === 'string' ? payload.type : '';
+  // Responses API 的文本增量：event 名和 JSON 里的 type 是同一套。
+  if (type === 'response.output_text.delta') {
+    return { content: typeof payload.delta === 'string' ? payload.delta : undefined };
+  }
+  if (
+    type === 'response.reasoning_summary_text.delta'
+    || type === 'response.reasoning_text.delta'
+    || type === 'response.reasoning.delta'
+  ) {
+    return { reasoning: typeof payload.delta === 'string' ? payload.delta : undefined };
+  }
+  if (type === 'response.completed' || type === 'response.incomplete') {
+    return { done: true };
+  }
   const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
   if (!choice) {
-    if (payload?.type === 'response.completed') return { done: true };
     return {};
   }
   const delta = choice.delta || {};
@@ -163,25 +186,34 @@ export default function ModelChatModal({
   target,
   onClose,
   mode = 'direct',
+  autoTest = false,
 }: {
   open: boolean;
   target: ModelChatTarget | null;
   onClose: () => void;
   mode?: ModelChatMode;
+  /** 从「测试」按钮打开：自动选用提示词管理里的默认题目并立即发送一轮。 */
+  autoTest?: boolean;
 }) {
   const toast = useToast();
   const isGateway = mode === 'gateway';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // 接口协议：部分模型只认 /v1/responses（Codex 那套），部分只认 Chat Completions。
+  // 选了哪套就只发哪套，不做跨协议降级——这样测出来的才是真实可用性。
+  const [apiMode, setApiMode] = useState<'chat' | 'responses'>('chat');
   // 直连凭据：站点自己的账号 / sk- 令牌。选一条就直接打目标站，
   // 完全不走网关的新路由 / 老路由，所以和「有没有配路由」无关。
   const [credentials, setCredentials] = useState<DirectCredentialOption[]>([]);
   const [credentialKey, setCredentialKey] = useState('');
+  const [credentialsLoading, setCredentialsLoading] = useState(false);
   // 思考强度：直接作为 OpenAI 协议的 reasoning_effort 字段透传给上游。
   // 上游不支持时会忽略这个字段，所以默认留空（按站点默认）。
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [promptCases, setPromptCases] = useState<PromptCaseOption[]>([]);
+  const [promptCasesLoading, setPromptCasesLoading] = useState(false);
+  const [defaultPromptCaseId, setDefaultPromptCaseId] = useState<number | null>(null);
   const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [promptQuery, setPromptQuery] = useState('');
   // 网关模式：这条对外模型名现在会派发到哪个目标。发之前先看一眼，发完再刷新一次，
@@ -190,6 +222,10 @@ export default function ModelChatModal({
   const [routePreviewError, setRoutePreviewError] = useState('');
   const [routePreviewLoading, setRoutePreviewLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const autoTestStartedRef = useRef(false);
+  const credentialsLoadedRef = useRef(false);
+  const promptCasesLoadedRef = useRef(false);
+  const codexSessionIdRef = useRef(createCodexSessionId());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const reasoningScrollRef = useRef<HTMLPreElement | null>(null);
   // 是否跟随最新。默认跟随；用户自己往上翻时暂停，滚回底部（或点「回到最新」）
@@ -206,8 +242,15 @@ export default function ModelChatModal({
     setMessages([]);
     setInput('');
     setSending(false);
+    setApiMode('chat');
+    setReasoningEffort('');
+    setDefaultPromptCaseId(null);
     setPromptQuery('');
     setPromptPickerOpen(false);
+    autoTestStartedRef.current = false;
+    credentialsLoadedRef.current = isGateway;
+    promptCasesLoadedRef.current = false;
+    codexSessionIdRef.current = createCodexSessionId();
     followLatestRef.current = true;
     followReasoningRef.current = true;
     setFollowingLatest(true);
@@ -221,6 +264,7 @@ export default function ModelChatModal({
     const siteId = target.siteId;
     if (typeof siteId !== 'number' || siteId <= 0) return;
     let cancelled = false;
+    setCredentialsLoading(true);
     setCredentials([]);
     setCredentialKey('');
     void api.getModelMonitorChatChannels(siteId, target.modelName)
@@ -238,11 +282,23 @@ export default function ModelChatModal({
           .filter((item: DirectCredentialOption) => Number.isFinite(item.accountId) && item.accountId > 0) as DirectCredentialOption[];
         setCredentials(list);
         setCredentialKey(list.length ? buildCredentialKey(list[0]) : '');
+        // 上次在这个站点 + 模型上选过的协议与思考强度，直接恢复。
+        const preference = res?.preference;
+        if (preference) {
+          setApiMode(preference.apiMode === 'responses' ? 'responses' : 'chat');
+          setReasoningEffort(preference.reasoningEffort || '');
+        }
       })
       .catch(() => {
         if (!cancelled) {
           setCredentials([]);
           setCredentialKey('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          credentialsLoadedRef.current = true;
+          setCredentialsLoading(false);
         }
       });
     return () => { cancelled = true; };
@@ -301,9 +357,12 @@ export default function ModelChatModal({
 
   // 快捷提示词：提示词管理里的题目（图名称 → 描述）。
   useEffect(() => {
-    if (!open || promptCases.length) return;
+    if (!open) return;
+    let cancelled = false;
+    setPromptCasesLoading(true);
     void api.getSimplePromptCases()
       .then((res) => {
+        if (cancelled) return;
         const list: PromptCaseOption[] = (Array.isArray(res?.cases) ? res.cases : [])
           .map((item: any) => ({
             id: Number(item?.id),
@@ -313,9 +372,27 @@ export default function ModelChatModal({
           }))
           .filter((item: PromptCaseOption) => item.prompt);
         setPromptCases(list);
+        const defaultId = Number(res?.defaultCaseId);
+        setDefaultPromptCaseId(
+          Number.isFinite(defaultId) && list.some((item) => item.id === defaultId)
+            ? Math.trunc(defaultId)
+            : null,
+        );
       })
-      .catch(() => setPromptCases([]));
-  }, [open, promptCases.length]);
+      .catch(() => {
+        if (!cancelled) {
+          setPromptCases([]);
+          setDefaultPromptCaseId(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          promptCasesLoadedRef.current = true;
+          setPromptCasesLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [open]);
 
   /**
    * 把「消息列表」和「思考过程」都钉到底部。
@@ -423,8 +500,8 @@ export default function ModelChatModal({
     ));
   }, [promptCases, promptQuery]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (textOverride?: string) => {
+    const text = (textOverride ?? input).trim();
     if (!text || sending || !target) return;
     const credential = isGateway
       ? null
@@ -465,19 +542,35 @@ export default function ModelChatModal({
       // 直连模式：站点 + 账号 + 凭据直接打上游，和路由配置无关；
       // 网关模式：用对外模型名打我们自己的网关（test 通道会标记「模型测试」），
       // 所以这里看到的回复就是真实派发的结果。
+      const codexHeaders = {
+        'User-Agent': 'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464',
+        Originator: 'codex_cli_rs',
+        Session_id: codexSessionIdRef.current,
+        Conversation_id: codexSessionIdRef.current,
+        Version: '0.101.0',
+        Accept: 'text/event-stream',
+      };
       const response = isGateway
         ? await api.proxyTestStream(
           {
             method: 'POST',
-            path: '/v1/chat/completions',
+            path: apiMode === 'responses' ? '/v1/responses' : '/v1/chat/completions',
             requestKind: 'json',
             stream: true,
-            jsonBody: {
-              model: target.modelName,
-              messages: history,
-              stream: true,
-              ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-            },
+            headers: codexHeaders,
+            jsonBody: apiMode === 'responses'
+              ? {
+                model: target.modelName,
+                input: history,
+                stream: true,
+                ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+              }
+              : {
+                model: target.modelName,
+                messages: history,
+                stream: true,
+                ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+              },
           },
           controller.signal,
         )
@@ -488,6 +581,7 @@ export default function ModelChatModal({
             tokenId: credential!.tokenId,
             model: target.modelName,
             messages: history,
+            apiMode,
             ...(reasoningEffort ? { reasoningEffort } : {}),
           },
           controller.signal,
@@ -526,16 +620,40 @@ export default function ModelChatModal({
             continue;
           }
           if (payload?.error) throw new Error(String(payload.error?.message || payload.error));
+          const eventType = typeof payload?.type === 'string' ? payload.type : parsed.event;
+          const responseObject = payload?.response && typeof payload.response === 'object'
+            ? payload.response
+            : null;
+          if (eventType === 'response.failed') {
+            const failure = responseObject?.error || payload?.error;
+            throw new Error(String(failure?.message || failure || tr('上游返回 response.failed')));
+          }
           // 上游自报的模型名 = 实际被调用的模型。网关模式下这是最直接的证据。
           if (typeof payload?.model === 'string' && payload.model.trim()) {
             responseModel = payload.model.trim();
+          }
+          if (typeof responseObject?.model === 'string' && responseObject.model.trim()) {
+            responseModel = responseObject.model.trim();
+          }
+          if (eventType === 'response.completed' || eventType === 'response.incomplete') {
+            sawDone = true;
+            const status = typeof responseObject?.status === 'string' ? responseObject.status : eventType.slice(9);
+            finishReason = status || eventType.slice(9);
+            if (typeof responseObject?.usage?.output_tokens === 'number') {
+              completionTokens = responseObject.usage.output_tokens;
+            }
+            if (typeof responseObject?.usage?.total_tokens === 'number' && completionTokens == null) {
+              completionTokens = responseObject.usage.total_tokens;
+            }
           }
           const finishChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
           if (finishChoice?.finish_reason) finishReason = String(finishChoice.finish_reason);
           if (typeof payload?.usage?.completion_tokens === 'number') {
             completionTokens = payload.usage.completion_tokens;
           }
-          const delta = readOpenAiDelta(payload);
+          const delta = readOpenAiDelta(
+            eventType && !payload?.type ? { ...payload, type: eventType } : payload,
+          );
           if (delta.content || delta.reasoning) applyDelta(delta);
         }
       }
@@ -567,7 +685,7 @@ export default function ModelChatModal({
       abortRef.current = null;
       setSending(false);
     }
-  }, [input, sending, target, messages, credentials, credentialKey, toast, isGateway, reasoningEffort, loadRoutePreview]);
+  }, [input, sending, target, messages, credentials, credentialKey, toast, isGateway, reasoningEffort, apiMode, loadRoutePreview]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -580,6 +698,56 @@ export default function ModelChatModal({
     setPromptPickerOpen(false);
     setPromptQuery('');
   }, []);
+
+  // 按「站点 + 模型」记住协议与思考强度。网关模式没有具体站点，不保存。
+  const persistChatPreference = useCallback((
+    nextApiMode: 'chat' | 'responses',
+    nextReasoningEffort: string,
+  ) => {
+    if (isGateway) return;
+    const siteId = target?.siteId;
+    if (typeof siteId !== 'number' || siteId <= 0) return;
+    void api.saveModelChatPreference({
+      siteId,
+      model: target!.modelName,
+      apiMode: nextApiMode,
+      reasoningEffort: nextReasoningEffort || null,
+    }).catch(() => undefined);
+  }, [isGateway, target?.siteId, target?.modelName]);
+
+  const handleApiModeChange = useCallback((next: string) => {
+    const nextMode: 'chat' | 'responses' = next === 'responses' ? 'responses' : 'chat';
+    setApiMode(nextMode);
+    persistChatPreference(nextMode, reasoningEffort);
+  }, [persistChatPreference, reasoningEffort]);
+
+  const handleReasoningEffortChange = useCallback((next: string) => {
+    setReasoningEffort(next);
+    persistChatPreference(apiMode, next);
+  }, [apiMode, persistChatPreference]);
+
+  // 「测试」按钮：等凭据和提示词都加载完，自动选默认题目并发送一轮。
+  useEffect(() => {
+    if (!open || !autoTest || autoTestStartedRef.current) return;
+    if (!credentialsLoadedRef.current || !promptCasesLoadedRef.current) return;
+    autoTestStartedRef.current = true;
+    const configured = defaultPromptCaseId == null
+      ? null
+      : promptCases.find((item) => item.id === defaultPromptCaseId) || null;
+    // 没设置默认题目时不再要求用户先选：直接用列表第一道题发出去，
+    // 并在界面上说明用的是哪一道。「测试」的目标是一键验证模型是否可用，
+    // 不该卡在「请先选择题」这一步上。
+    const promptCase = configured || promptCases[0] || null;
+    if (!promptCase) {
+      toast.error(tr('提示词管理里还没有题目，请先新增一道题'));
+      return;
+    }
+    if (!configured) {
+      toast.info(`${tr('未设置默认提示词，已自动使用')}「${promptCase.title}」`);
+    }
+    setInput(promptCase.prompt);
+    void send(promptCase.prompt);
+  }, [open, autoTest, defaultPromptCaseId, promptCases, send, toast]);
 
   const activeCredential = credentials.find((item) => buildCredentialKey(item) === credentialKey) || null;
 
@@ -645,10 +813,22 @@ export default function ModelChatModal({
             <span className="model-chat-route-hint">{tr('该站点没有可用于直连的账号或密钥')}</span>
           )}
           <label className="model-chat-route">
+            <span>{tr('接口协议')}</span>
+            <select
+              value={apiMode}
+              onChange={(event) => handleApiModeChange(event.target.value)}
+              disabled={sending}
+              title={tr('部分模型只在 Responses 端点可用；选择会按站点 + 模型记住')}
+            >
+              <option value="chat">Chat Completions</option>
+              <option value="responses">Responses</option>
+            </select>
+          </label>
+          <label className="model-chat-route">
             <span>{tr('思考强度')}</span>
             <select
               value={reasoningEffort}
-              onChange={(event) => setReasoningEffort(event.target.value)}
+              onChange={(event) => handleReasoningEffortChange(event.target.value)}
               disabled={sending}
               title={tr('作为 reasoning_effort 透传给上游；上游不支持时会被忽略')}
             >
@@ -724,7 +904,7 @@ export default function ModelChatModal({
         ) : (
           <div className="model-chat-route-note">
             {activeCredential ? (
-              <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}{reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}</>
+              <>{tr('直连目标站点')} {target?.siteName || ''}{tr('，用「')}{activeCredential.label}{tr('」的凭据直接调用，不经过新路由 / 老路由，也不会转发到其它站点。')}{tr('接口协议')}：{apiMode === 'responses' ? 'Responses' : 'Chat Completions'}。{reasoningEffort ? `${tr('思考强度')}：${reasoningEffort}。` : ''}</>
             ) : (
               <>{tr('该站点还没有可用凭据（账号或 sk- 密钥），先去「站点」里补一个再来对话。')}</>
             )}

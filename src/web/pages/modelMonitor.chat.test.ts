@@ -10,10 +10,13 @@ describe('ModelMonitor 对话按钮', () => {
     expect(page).toContain("import ModelChatModal from '../components/ModelChatModal.js';");
     expect(page).toContain('const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);');
     // 卡片视图与表格视图各有一处
-    expect(page.split("onClick={() => setChatTarget(model)}").length - 1).toBe(2);
+    expect(page.split("onClick={() => { setChatAutoTest(false); setChatTarget(model); }}").length - 1).toBe(2);
+    expect(page.split("onClick={() => { setChatAutoTest(true); setChatTarget(model); }}").length - 1).toBe(2);
     expect(page).toContain("tr('对话')");
+    expect(page).toContain("tr('测试')");
+    expect(page).toContain('autoTest={chatAutoTest}');
     // 入口按钮与「挂到转发 / 导入到 CC Switch」用同一套行内按钮样式。
-    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(6);
+    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(8);
     expect(page).toContain('<ModelChatModal');
   });
 
@@ -43,12 +46,48 @@ describe('ModelMonitor 对话按钮', () => {
 
   it('对话支持选择思考强度，并按 reasoning_effort 透传', () => {
     expect(modal).toContain("tr('思考强度')");
-    expect(modal).toContain("setReasoningEffort(event.target.value)");
+    expect(modal).toContain("handleReasoningEffortChange(event.target.value)");
     // 留空 = 站点默认，不往请求里塞字段。
     expect(modal).toContain('...(reasoningEffort ? { reasoningEffort } : {}),');
     for (const level of ['minimal', 'low', 'medium', 'high', 'max']) {
       expect(modal).toContain(`<option value="${level}">${level}</option>`);
     }
+  });
+
+  it('对话支持 chat / responses 协议，并按站点 + 模型记住选择', () => {
+    expect(modal).toContain("const [apiMode, setApiMode] = useState<'chat' | 'responses'>('chat');");
+    expect(modal).toContain("tr('接口协议')");
+    expect(modal).toContain('<option value="chat">Chat Completions</option>');
+    expect(modal).toContain('<option value="responses">Responses</option>');
+    expect(modal).toContain('api.saveModelChatPreference({');
+    expect(modal).toContain('apiMode,');
+    // 打开时从 chat-channels 的 preference 恢复。
+    expect(modal).toContain('const preference = res?.preference;');
+    expect(modal).toContain("setApiMode(preference.apiMode === 'responses' ? 'responses' : 'chat');");
+  });
+
+  it('Responses 流式事件也能解析成正文与思考过程', () => {
+    expect(modal).toContain("type === 'response.output_text.delta'");
+    expect(modal).toContain("type === 'response.reasoning_summary_text.delta'");
+    expect(modal).toContain("eventType === 'response.completed'");
+    expect(modal).toContain("eventType === 'response.failed'");
+  });
+
+  it('对话与测试请求都带 Codex 客户端请求头', () => {
+    expect(modal).toContain('codex_cli_rs/0.101.0');
+    expect(modal).toContain("Originator: 'codex_cli_rs'");
+    expect(modal).toContain('Session_id: codexSessionIdRef.current');
+    expect(modal).toContain('headers: codexHeaders,');
+  });
+
+  it('「测试」会使用提示词管理里的默认题目自动发送', () => {
+    expect(modal).toContain('autoTest = false,');
+    expect(modal).toContain('const [defaultPromptCaseId, setDefaultPromptCaseId]');
+    expect(modal).toContain('if (!open || !autoTest || autoTestStartedRef.current) return;');
+    expect(modal).toContain('void send(promptCase.prompt);');
+    // 没有设置默认题目时也要能一键测试：退回列表第一道题，而不是让用户先选。
+    expect(modal).toContain('const promptCase = configured || promptCases[0] || null;');
+    expect(modal).toContain("tr('提示词管理里还没有题目，请先新增一道题')");
   });
 
   it('日志里会标明是测试流量', () => {

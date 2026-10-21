@@ -639,6 +639,13 @@ export async function proxyLogRoutes(app: FastifyInstance) {
     };
   });
 
+  // 清空「使用日志」。只删 proxy_logs 本身，不动站点余额 / 用量汇总；
+  // 页面上的按钮带二次确认，避免误触把手上的排查记录一起抹掉。
+  app.delete("/api/stats/proxy-logs", async () => {
+    await db.delete(schema.proxyLogs).run();
+    return { success: true };
+  });
+
   app.get<{ Params: { id: string } }>(
     "/api/stats/proxy-logs/:id",
     async (request, reply) => {

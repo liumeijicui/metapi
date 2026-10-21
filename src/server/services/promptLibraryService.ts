@@ -1,6 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 
 export class PromptLibraryError extends Error {
   constructor(message: string) {
@@ -685,6 +686,47 @@ export async function listSimplePromptCases(): Promise<SimplePromptCase[]> {
     .orderBy(asc(schema.promptCases.sortOrder), asc(schema.promptCases.id))
     .all();
   return rows.map((row) => toSimplePromptCase(toCaseRow(row)));
+}
+
+export const DEFAULT_SIMPLE_PROMPT_CASE_SETTING_KEY = 'prompt_library_default_case_id_v1';
+
+/** 「测试」按钮默认发送哪道题；未设置时返回 null。 */
+export async function getDefaultSimplePromptCaseId(): Promise<number | null> {
+  const row = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(eq(schema.settings.key, DEFAULT_SIMPLE_PROMPT_CASE_SETTING_KEY))
+    .get();
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(String(row.value));
+    const id = Number(parsed);
+    return Number.isFinite(id) && id > 0 ? Math.trunc(id) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 设置 / 清除默认测试提示词。设置时校验题目确实存在。 */
+export async function setDefaultSimplePromptCaseId(id: unknown): Promise<number | null> {
+  if (id === null || id === undefined || id === '') {
+    await upsertSetting(DEFAULT_SIMPLE_PROMPT_CASE_SETTING_KEY, null);
+    return null;
+  }
+  const promptCaseId = Math.trunc(Number(id));
+  if (!Number.isFinite(promptCaseId) || promptCaseId <= 0) {
+    throw new PromptLibraryError('默认提示词 ID 不合法');
+  }
+  const existing = await db
+    .select({ id: schema.promptCases.id })
+    .from(schema.promptCases)
+    .where(eq(schema.promptCases.id, promptCaseId))
+    .get();
+  if (!existing) {
+    throw new PromptLibraryError('默认提示词对应的题目不存在');
+  }
+  await upsertSetting(DEFAULT_SIMPLE_PROMPT_CASE_SETTING_KEY, promptCaseId);
+  return promptCaseId;
 }
 
 export async function createSimplePromptCase(input: SimplePromptCaseInput): Promise<SimplePromptCase> {

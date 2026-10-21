@@ -183,4 +183,33 @@ describe('prompt library routes', () => {
     const casesAfter = await app.inject({ method: 'GET', url: `/api/prompt-suites/${imported.suiteId}/cases` });
     expect(casesAfter.json().cases).toHaveLength(0);
   });
+
+  it('可以设置 / 清除默认测试提示词', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/prompt-library/cases',
+      payload: { title: '默认题', description: '请回答 1+1', answer: '2' },
+    });
+    expect(created.statusCode).toBe(201);
+    const caseId = created.json().case.id;
+
+    const setDefault = await app.inject({
+      method: 'PUT',
+      url: '/api/prompt-library/default-case',
+      payload: { caseId },
+    });
+    expect(setDefault.statusCode).toBe(200);
+    expect(setDefault.json().defaultCaseId).toBe(caseId);
+
+    const listed = await app.inject({ method: 'GET', url: '/api/prompt-library/cases' });
+    expect(listed.json().defaultCaseId).toBe(caseId);
+
+    const cleared = await app.inject({
+      method: 'PUT',
+      url: '/api/prompt-library/default-case',
+      payload: { caseId: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().defaultCaseId).toBeNull();
+  });
 });

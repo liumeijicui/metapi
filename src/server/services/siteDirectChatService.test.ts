@@ -145,6 +145,32 @@ describe('siteDirectChatService', () => {
     expect(body.stream).toBe(true);
   });
 
+  it('选择 responses 时只请求 /v1/responses，并模拟 Codex 请求头', async () => {
+    const { site, account, tokenId } = await seed();
+    const { chatCalls } = mockUpstreamFetch();
+    const outcome = await service.requestSiteDirectChat({
+      siteId: site.id,
+      accountId: account.id,
+      tokenId,
+      model: 'gpt-5.5',
+      messages: [{ role: 'user', content: 'hi' }],
+      apiMode: 'responses',
+      timeoutMs: 30_000,
+    });
+
+    if (!outcome.ok) throw new Error(`直连失败：${outcome.message}`);
+    expect(chatCalls()).toHaveLength(1);
+    expect(chatCalls()[0].url).toBe('https://direct.example.com/v1/responses');
+    const headers = new Headers(chatCalls()[0].init.headers as HeadersInit);
+    expect(headers.get('originator')).toBe('codex_cli_rs');
+    expect(headers.get('session_id')).toBeTruthy();
+    expect(headers.get('version')).toBe('0.101.0');
+    expect(headers.get('user-agent')).toContain('codex_cli_rs');
+    const body = JSON.parse(String(chatCalls()[0].init.body));
+    expect(body.model).toBe('gpt-5.5');
+    expect(body.input).toBeTruthy();
+  });
+
   it('把「首字耗时」带回给调用方，供日志记录', async () => {
     const { site, account, tokenId } = await seed();
     mockUpstreamFetch();
