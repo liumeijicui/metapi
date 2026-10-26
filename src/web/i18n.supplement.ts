@@ -953,6 +953,11 @@ export const zhToEnSupplemental: Record<string, string> = {
   // ==== CC Switch 导入（下游密钥） ====
   '导入 CC Switch': 'Import to CC Switch',
   '导入到 CC Switch': 'Import to CC Switch',
+  '设为 Codex': 'Use in Codex',
+  '切换中…': 'Switching…',
+  '该站点没有可用于直连的账号或密钥': 'This site has no account or API key available for direct connection.',
+  '更新服务器 Codex 配置失败': 'Failed to update the server Codex configuration.',
+  '让服务器 vibe 用户的 Codex 直连这个站点的这个模型': 'Make the server Codex for user vibe connect directly to this site and model.',
   '打开 CC Switch': 'Open CC Switch',
   '复制导入链接': 'Copy import link',
   '已复制链接': 'Link copied',

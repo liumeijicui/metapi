@@ -20,6 +20,10 @@ import {
   normalizeModelChatApiMode,
   saveModelChatPreference,
 } from '../../services/modelChatPreferenceService.js';
+import {
+  CodexConfigSyncError,
+  syncCodexDirectConfig,
+} from '../../services/codexConfigSyncService.js';
 
 function parseOptionalNumber(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
@@ -363,5 +367,29 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       () => runModelMonitorFetch('manual'),
     );
     return { success: true, queued: !reused, reused, running: true, taskId: task.id };
+  });
+
+  /** 模型监控一键切换服务器 Codex：直连该站，不经过 Metapi 网关。 */
+  app.post<{
+    Body: { siteId?: number; accountId?: number; tokenId?: number | null; model?: string };
+  }>('/api/model-monitor/codex-config', async (request, reply) => {
+    try {
+      return {
+        success: true,
+        ...(await syncCodexDirectConfig({
+          siteId: Math.trunc(Number(request.body?.siteId) || 0),
+          accountId: Math.trunc(Number(request.body?.accountId) || 0),
+          tokenId: request.body?.tokenId == null ? null : Math.trunc(Number(request.body.tokenId)),
+          model: String(request.body?.model || ''),
+        })),
+      };
+    } catch (error) {
+      if (error instanceof CodexConfigSyncError) {
+        return reply.code(error.statusCode).send({ error: { message: error.message } });
+      }
+      return reply.code(500).send({
+        error: { message: `更新 Codex 配置失败：${error instanceof Error ? error.message : '未知错误'}` },
+      });
+    }
   });
 }

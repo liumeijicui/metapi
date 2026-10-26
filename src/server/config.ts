@@ -169,6 +169,8 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // 必须大于空闲上限，否则会是 nginx 先断、错误信息也变成没头没尾的 504。
     modelMonitorChatTimeoutMs: Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_CHAT_TIMEOUT_MS, 0))),
     modelMonitorChatIdleTimeoutMs: Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_CHAT_IDLE_TIMEOUT_MS, 0))),
+    /** 模型监控一键写入 Codex 时，目标用户的 Codex 配置目录；留空则禁用该操作。 */
+    codexConfigSyncUser: String(env.CODEX_CONFIG_SYNC_USER || '').trim(),
     modelMonitorWindowStartHour: Math.min(23, Math.max(0, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_START_HOUR, 7)))),
     modelMonitorWindowEndHour: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.MODEL_MONITOR_WINDOW_END_HOUR, 23)))),
     // 没有监控接口、只能用密钥列模型的站点（models_only），模型列表变化很少，

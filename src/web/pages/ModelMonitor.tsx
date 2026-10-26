@@ -221,6 +221,7 @@ export default function ModelMonitor() {
     siteModels: string[];
   } | null>(null);
   const [ccSwitchBusyKey, setCcSwitchBusyKey] = useState<string | null>(null);
+  const [codexSyncBusyKey, setCodexSyncBusyKey] = useState<string | null>(null);
   const [forwardNames, setForwardNames] = useState<string[]>([]);
   const [forwardNamesLoaded, setForwardNamesLoaded] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -269,6 +270,33 @@ export default function ModelMonitor() {
       setCcSwitchBusyKey(null);
     }
   }, [overview?.models, toast]);
+
+  /** 把该站点模型直接写入服务器 vibe 用户的 Codex 配置，不经过 Metapi 网关。 */
+  const syncCodexConfig = useCallback(async (model: ModelRow) => {
+    const busyKey = `${model.siteId}:${model.modelName}`;
+    setCodexSyncBusyKey(busyKey);
+    try {
+      const res = await api.getModelMonitorChatChannels(model.siteId, model.modelName);
+      const credential = (Array.isArray(res?.credentials) ? res.credentials : []).find(
+        (item) => Number(item?.accountId) > 0,
+      );
+      if (!credential) {
+        toast.error(tr('该站点没有可用于直连的账号或密钥'));
+        return;
+      }
+      const result = await api.syncCodexConfig({
+        siteId: model.siteId,
+        accountId: Number(credential.accountId),
+        tokenId: credential.tokenId == null ? null : Number(credential.tokenId),
+        model: model.modelName,
+      });
+      toast.success(tr(`已切换服务器 Codex 到 ${result.model}`));
+    } catch (error: any) {
+      toast.error(error?.message || tr('更新服务器 Codex 配置失败'));
+    } finally {
+      setCodexSyncBusyKey(null);
+    }
+  }, [toast]);
 
   // 打开「挂到转发」弹窗时再拉一次对外模型清单，保证是当前的。
   const openAttach = useCallback(async (model: ModelRow) => {
@@ -837,6 +865,15 @@ export default function ModelMonitor() {
                 >
                   {ccSwitchBusyKey === `${model.siteId}:${model.modelName}` ? tr('读取中…') : tr('导入到 CC Switch')}
                 </button>
+                <button
+                  type="button"
+                  className="btn model-monitor-action-btn"
+                  title={tr('让服务器 vibe 用户的 Codex 直连这个站点的这个模型')}
+                  disabled={codexSyncBusyKey === `${model.siteId}:${model.modelName}`}
+                  onClick={() => void syncCodexConfig(model)}
+                >
+                  {codexSyncBusyKey === `${model.siteId}:${model.modelName}` ? tr('切换中…') : tr('设为 Codex')}
+                </button>
               </div>
             </div>
             );
@@ -925,6 +962,15 @@ export default function ModelMonitor() {
                         onClick={() => void openCcSwitch(model)}
                       >
                         {ccSwitchBusyKey === `${model.siteId}:${model.modelName}` ? tr('读取中…') : tr('导入到 CC Switch')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn model-monitor-action-btn"
+                        title={tr('让服务器 vibe 用户的 Codex 直连这个站点的这个模型')}
+                        disabled={codexSyncBusyKey === `${model.siteId}:${model.modelName}`}
+                        onClick={() => void syncCodexConfig(model)}
+                      >
+                        {codexSyncBusyKey === `${model.siteId}:${model.modelName}` ? tr('切换中…') : tr('设为 Codex')}
                       </button>
                     </div>
                   </td>

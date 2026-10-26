@@ -10,9 +10,9 @@ describe('模型监控行内操作按钮', () => {
   );
   const css = readFileSync(resolve(process.cwd(), 'src/web/index.css'), 'utf8');
 
-  it('「对话 / 挂到转发 / 导入到 CC Switch」都是细边框淡色底的按钮，两种视图一致', () => {
-    // 卡片视图 + 表格视图，三个按钮各一处 = 6 处
-    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(6);
+  it('「对话 / 挂到转发 / 导入到 CC Switch / 设为 Codex」都是细边框淡色底的按钮，两种视图一致', () => {
+    // 卡片视图 + 表格视图，五个按钮各一处 = 10 处
+    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(10);
     expect(page).not.toContain('model-monitor-ccswitch-btn');
     // 不再用纯文字链接样式
     expect(page).not.toContain('btn btn-link');
@@ -44,7 +44,16 @@ describe('模型监控行内操作按钮', () => {
   });
 
   it('「对话 / 挂到转发」入口仍然可用', () => {
-    expect(page.split('onClick={() => setChatTarget(model)}').length - 1).toBe(2);
+    expect(page.split('onClick={() => { setChatAutoTest(false); setChatTarget(model); }}').length - 1).toBe(2);
+    expect(page.split('onClick={() => { setChatAutoTest(true); setChatTarget(model); }}').length - 1).toBe(2);
     expect(page.split('onClick={() => void openAttach(model)}').length - 1).toBe(2);
+  });
+
+  it('「设为 Codex」使用原站直连账号，并调用服务器配置同步接口', () => {
+    expect(page.split('onClick={() => void syncCodexConfig(model)}').length - 1).toBe(2);
+    expect(page).toContain('api.getModelMonitorChatChannels(model.siteId, model.modelName)');
+    expect(page).toContain('api.syncCodexConfig({');
+    expect(page).toContain('tokenId: credential.tokenId == null ? null : Number(credential.tokenId)');
+    expect(page).not.toContain('baseUrl: resolveDefaultGatewayBaseUrl');
   });
 });

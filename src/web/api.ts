@@ -1459,6 +1459,26 @@ export const api = {
   },
   refreshModelMonitor: () =>
     request("/api/model-monitor/refresh", { method: "POST" }),
+  syncCodexConfig: (payload: {
+    siteId: number;
+    accountId: number;
+    tokenId?: number | null;
+    model: string;
+  }) =>
+    request<{
+      success: boolean;
+      user: string;
+      model: string;
+      provider: string;
+      baseUrl: string;
+      configPath: string;
+      backupPath: string | null;
+      codexVersion: string | null;
+    }>("/api/model-monitor/codex-config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 60_000,
+    }),
   getModelMonitorChatChannels: (siteId: number, model: string) =>
     request<{
       success: boolean;

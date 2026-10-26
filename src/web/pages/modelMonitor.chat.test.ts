@@ -15,8 +15,8 @@ describe('ModelMonitor 对话按钮', () => {
     expect(page).toContain("tr('对话')");
     expect(page).toContain("tr('测试')");
     expect(page).toContain('autoTest={chatAutoTest}');
-    // 入口按钮与「挂到转发 / 导入到 CC Switch」用同一套行内按钮样式。
-    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(8);
+    // 入口按钮与「挂到转发 / 导入到 CC Switch / 设为 Codex」用同一套行内按钮样式。
+    expect(page.split('className="btn model-monitor-action-btn"').length - 1).toBe(10);
     expect(page).toContain('<ModelChatModal');
   });
 

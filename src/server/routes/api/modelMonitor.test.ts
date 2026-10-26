@@ -3,11 +3,16 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const requestSiteDirectChatMock = vi.hoisted(() => vi.fn());
+const syncCodexDirectConfigMock = vi.hoisted(() => vi.fn());
 
 // 只替换「发请求」那一步：凭据解析等仍走真实实现。
 vi.mock('../../services/siteDirectChatService.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/siteDirectChatService.js')>();
   return { ...actual, requestSiteDirectChat: requestSiteDirectChatMock };
+});
+vi.mock('../../services/codexConfigSyncService.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/codexConfigSyncService.js')>();
+  return { ...actual, syncCodexDirectConfig: syncCodexDirectConfigMock };
 });
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -543,5 +548,55 @@ describe('model monitor routes', () => {
     const body = response.json();
     expect(body.success).toBe(true);
     expect(typeof body.taskId).toBe('string');
+  });
+
+  it('把站点模型直连配置写入服务器 Codex', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'codex-direct',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+    syncCodexDirectConfigMock.mockReset();
+    syncCodexDirectConfigMock.mockResolvedValue({
+      user: 'vibe',
+      model: 'gpt-5.5',
+      provider: 'custom',
+      baseUrl: 'https://demo.example.com/v1',
+      configPath: '/home/vibe/.codex/config.toml',
+      backupPath: '/home/vibe/.codex/backups/config-before-direct-sync.toml',
+      codexVersion: 'codex-cli 0.164.0',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/codex-config',
+      payload: { siteId: site.id, accountId: account.id, tokenId: null, model: 'gpt-5.5' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: true, user: 'vibe', model: 'gpt-5.5' });
+    expect(syncCodexDirectConfigMock).toHaveBeenCalledWith({
+      siteId: site.id,
+      accountId: account.id,
+      tokenId: null,
+      model: 'gpt-5.5',
+    });
+  });
+
+  it('Codex 配置同步失败时返回可直接展示的业务错误', async () => {
+    const { CodexConfigSyncError } = await import('../../services/codexConfigSyncService.js');
+    syncCodexDirectConfigMock.mockReset();
+    syncCodexDirectConfigMock.mockRejectedValue(new CodexConfigSyncError('账号不存在', 404));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/model-monitor/codex-config',
+      payload: { siteId: 1, accountId: 2, model: 'gpt-5.5' },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: { message: '账号不存在' } });
   });
 });
