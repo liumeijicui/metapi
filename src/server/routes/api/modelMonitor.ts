@@ -200,9 +200,21 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     const startedAt = Date.now();
     // 对话默认不设时间上限，所以「客户端断开」就成了唯一的兜底：页面关掉 / 点了停止
     // 之后，这条 signal 会把上游请求一起中断，不让它挂在那儿白跑。
+    // 注意不能监听 request.raw 的 close：请求体读完后它也会正常触发，会把每轮对话
+    // 都误判成用户中断。请求阶段只认 aborted，响应阶段才看 reply.raw 的 close。
     const clientAbort = new AbortController();
-    const onClientClose = () => clientAbort.abort(new Error('client disconnected'));
-    request.raw.once('close', onClientClose);
+    const onClientAborted = () => clientAbort.abort(new Error('client disconnected'));
+    const onClientClosed = () => {
+      if (!reply.raw.writableEnded) {
+        clientAbort.abort(new Error('client disconnected'));
+      }
+    };
+    const cleanupClientAbortListeners = () => {
+      request.raw.off('aborted', onClientAborted);
+      reply.raw.off('close', onClientClosed);
+    };
+    request.raw.once('aborted', onClientAborted);
+    reply.raw.once('close', onClientClosed);
     const outcome = await requestSiteDirectChat({
       siteId,
       accountId,
@@ -237,7 +249,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
         reasoningEffort,
         errorMessage: failure.message,
       }).catch(() => undefined);
-      request.raw.off('close', onClientClose);
+      cleanupClientAbortListeners();
       return reply.code(failure.status).send({ error: { message: failure.message } });
     }
 
@@ -317,7 +329,7 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
       reply.raw.end();
       return reply;
     } finally {
-      request.raw.off('close', onClientClose);
+      cleanupClientAbortListeners();
     }
     reply.raw.end();
 

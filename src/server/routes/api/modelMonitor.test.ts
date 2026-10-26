@@ -20,6 +20,7 @@ describe('model monitor routes', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let dataDir = '';
+  let appUrl = '';
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-model-monitor-routes-'));
@@ -36,7 +37,8 @@ describe('model monitor routes', () => {
 
     app = Fastify();
     await app.register(routesModule.modelMonitorRoutes);
-  });
+    appUrl = await app.listen({ port: 0, host: '127.0.0.1' });
+  }, 30_000);
 
   beforeEach(async () => {
     await db.delete(schema.siteModelMonitorModels).run();
@@ -69,7 +71,7 @@ describe('model monitor routes', () => {
     try {
       rmSync(dataDir, { recursive: true, force: true });
     } catch {}
-  });
+  }, 30_000);
 
   it('returns the overview with server-side filters and last update time', async () => {
     const all = await app.inject({ method: 'GET', url: '/api/model-monitor/overview' });
@@ -490,6 +492,49 @@ describe('model monitor routes', () => {
 
     const log = await latestDirectChatLog();
     expect(log).toMatchObject({ status: 'failed', firstByteLatencyMs: null });
+  });
+
+  it('真实 HTTP 请求体读完后不会把正常对话误判成用户中断', async () => {
+    const [site] = await db.select().from(schema.sites).all();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'request-close-regression',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).returning().get();
+
+    let abortedBeforeDispatch = false;
+    const sse = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+    requestSiteDirectChatMock.mockReset();
+    requestSiteDirectChatMock.mockImplementation(async (input: { signal?: AbortSignal }) => {
+      // 给 Node 足够时间派发 request.raw 的正常 close；这里若已 abort，
+      // 就是复现「请求体读完 = 用户中断」的回归。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      abortedBeforeDispatch = input.signal?.aborted === true;
+      return {
+        ok: true,
+        response: new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        latencyMs: 30,
+        firstByteLatencyMs: 30,
+        touch: () => {},
+        timeoutReason: () => null,
+      };
+    });
+
+    const response = await fetch(`${appUrl}/api/model-monitor/chat/stream`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        siteId: site.id,
+        accountId: account.id,
+        model: 'agnes-2.5-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"content":"ok"');
+    expect(abortedBeforeDispatch).toBe(false);
   });
 
   it('queues a collection run when refresh is requested', async () => {
