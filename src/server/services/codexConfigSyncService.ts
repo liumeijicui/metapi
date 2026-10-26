@@ -231,6 +231,10 @@ export async function syncCodexDirectConfig(input: SyncInput): Promise<CodexConf
   }
   const authText = `${JSON.stringify({ ...existingAuth, OPENAI_API_KEY: credential.apiKey }, null, 2)}\n`;
 
+  // 先确认新内容已完整生成，再替换原文件；避免生成阶段异常留下半套配置。
+  await assertWritable(configPath);
+  await assertWritable(authPath);
+
   const backupDir = join(codexHome, 'backups');
   await mkdir(backupDir, { recursive: true, mode: 0o770 });
   // mkdir 的 mode 会受 umask 影响；目录由当前进程创建时显式补回组权限。
@@ -248,14 +252,6 @@ export async function syncCodexDirectConfig(input: SyncInput): Promise<CodexConf
     throw new CodexConfigSyncError(`写入 Codex 配置失败：${error instanceof Error ? error.message : '未知错误'}`, 500);
   }
 
-  let codexVersion: string | null = null;
-  try {
-    const result = await execFileAsync('su', ['-', user, '-c', 'codex --version']);
-    codexVersion = String(result.stdout || '').trim() || null;
-  } catch {
-    // 版本探测失败不影响已完成的配置写入，但页面会显示未验证。
-  }
-
   return {
     user,
     model,
@@ -263,6 +259,17 @@ export async function syncCodexDirectConfig(input: SyncInput): Promise<CodexConf
     baseUrl,
     configPath,
     backupPath,
-    codexVersion,
+    // 不在写入后启动目标用户的 codex 启动器：部分环境会在启动时初始化配置，
+    // 二次执行会把刚写入的文件覆盖回模板。
+    codexVersion: null,
   };
+}
+
+/** 预检写入目标，错误信息只包含路径，不包含文件内容。 */
+async function assertWritable(path: string): Promise<void> {
+  try {
+    await access(path, constants.R_OK | constants.W_OK);
+  } catch {
+    throw new CodexConfigSyncError(`当前进程无权修改 ${path}`, 503);
+  }
 }

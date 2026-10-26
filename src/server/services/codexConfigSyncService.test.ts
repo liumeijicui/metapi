@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { mergeCodexConfig } from './codexConfigSyncService.js';
 
@@ -45,5 +47,14 @@ describe('Codex 直连配置合并', () => {
       baseUrl: 'https://example.com/v1',
     });
     expect(merged).toContain('name = "A \\"quoted\\" provider"');
+  });
+
+  it('写入后不启动目标用户 Codex 启动器，避免启动脚本把配置覆盖回模板', () => {
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/server/services/codexConfigSyncService.ts'),
+      'utf8',
+    );
+    expect(source).not.toContain("execFileAsync('su', ['-', user, '-c', 'codex --version'])");
+    expect(source).toContain('codexVersion: null');
   });
 });
