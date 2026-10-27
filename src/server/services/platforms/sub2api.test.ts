@@ -136,6 +136,125 @@ describe('Sub2ApiAdapter', () => {
     expect(result.message).toContain('今日已签到');
   });
 
+  it('checks in through the checkin-spelling routes used by customized Sub2API forks', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/v1/checkin/status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, checked_in: false, amount: 50 } }));
+        return;
+      }
+      if (req.url === '/api/v1/checkin' && req.method === 'POST') {
+        posted = true;
+        expect(req.headers.authorization).toBe('Bearer jwt-token');
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          expect(rawBody).toBe('');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 0, data: { amount: 50 } }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(true);
+    expect(result).toMatchObject({ success: true, reward: '50' });
+    expect(result.message).toContain('50');
+  });
+
+  it('checks in through the /user/check-in route used by loxo.cc', async () => {
+    let postedBody = '';
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status' || req.url === '/api/v1/checkin/status') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/v1/user/check-in' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { enabled: true, captcha_required: false, checked_in_today: false, reward_min: 1, reward_max: 5 },
+        }));
+        return;
+      }
+      if (req.url === '/api/v1/user/check-in' && req.method === 'POST') {
+        expect(req.headers.authorization).toBe('Bearer jwt-token');
+        let rawBody = '';
+        req.on('data', (chunk) => { rawBody += chunk; });
+        req.on('end', () => {
+          postedBody = rawBody;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 0, message: 'success', data: { reward: 3, streak_days: 2 } }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    // 无验证码时不发送任何请求体。
+    expect(postedBody).toBe('');
+    expect(result.success).toBe(true);
+    expect(result.reward).toBe('3');
+    expect(result.message).toContain('3');
+  });
+
+  it('reports the captcha gate on the /user/check-in route', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status' || req.url === '/api/v1/checkin/status') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/v1/user/check-in' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, captcha_required: true, checked_in_today: false } }));
+        return;
+      }
+      if (req.url === '/api/v1/user/check-in' && req.method === 'POST') posted = true;
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('人机校验');
+  });
+
+  it('reports an already-checked-in day on checkin-spelling forks without posting', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in/status') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/v1/checkin/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { enabled: true, checked_in: true, amount: 50, awarded_amount: 50 } }));
+        return;
+      }
+      if (req.url === '/api/v1/checkin') posted = true;
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('今日已签到');
+  });
+
   it('reports the Turnstile gate on the platform check-in', async () => {
     await startServer((req, res) => {
       if (req.url === '/api/v1/check-in/status') {

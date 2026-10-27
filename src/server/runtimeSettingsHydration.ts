@@ -4,6 +4,7 @@ import {
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
+import { setAdminPasswordHash } from './services/adminAuthService.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
   const raw = settingsMap.get(key);
@@ -41,6 +42,13 @@ function toStringList(value: unknown): string[] {
 export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const authToken = parseSettingFromMap<string>(settingsMap, 'auth_token');
   if (typeof authToken === 'string' && authToken) config.authToken = authToken;
+
+  const authUsername = parseSettingFromMap<string>(settingsMap, 'auth_username');
+  if (typeof authUsername === 'string' && authUsername.trim()) config.adminUsername = authUsername.trim();
+
+  // 交互登录使用独立的 scrypt 哈希；没有哈希时回退到 AUTH_TOKEN 作为引导密码。
+  const authPasswordHash = parseSettingFromMap<string>(settingsMap, 'auth_password_hash');
+  setAdminPasswordHash(typeof authPasswordHash === 'string' ? authPasswordHash : null);
 
   const proxyToken = parseSettingFromMap<string>(settingsMap, 'proxy_token');
   if (typeof proxyToken === 'string' && proxyToken) config.proxyToken = proxyToken;
@@ -116,6 +124,14 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const checkinIntervalHours = parseSettingFromMap<number>(settingsMap, 'checkin_interval_hours');
   if (typeof checkinIntervalHours === 'number' && Number.isFinite(checkinIntervalHours) && checkinIntervalHours >= 1 && checkinIntervalHours <= 24) {
     config.checkinIntervalHours = Math.trunc(checkinIntervalHours);
+  }
+
+  const checkinRandomWindowMinutes = parseSettingFromMap<number>(settingsMap, 'checkin_random_window_minutes');
+  if (typeof checkinRandomWindowMinutes === 'number'
+    && Number.isFinite(checkinRandomWindowMinutes)
+    && checkinRandomWindowMinutes >= 0
+    && checkinRandomWindowMinutes <= 12 * 60) {
+    config.checkinRandomWindowMinutes = Math.trunc(checkinRandomWindowMinutes);
   }
 
   const balanceRefreshCron = parseSettingFromMap<string>(settingsMap, 'balance_refresh_cron');

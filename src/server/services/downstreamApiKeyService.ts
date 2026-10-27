@@ -7,6 +7,10 @@ import {
   type DownstreamExcludedCredentialRef,
   type DownstreamRoutingPolicy,
 } from './downstreamPolicyTypes.js';
+import {
+  isDownstreamKeySignatureValid,
+  looksLikeSignedDownstreamSkKey,
+} from './downstreamKeyService.js';
 
 export type DownstreamApiKeyRow = typeof schema.downstreamApiKeys.$inferSelect;
 
@@ -423,6 +427,18 @@ export async function authorizeDownstreamToken(token: string): Promise<Downstrea
       statusCode: 401,
       error: 'Missing Authorization or x-api-key header',
       reason: 'missing',
+    };
+  }
+
+  // 新格式 sk-<random>.<signature> 的签名由服务端种子派生。签名不符时不再查库，
+  // 直接按无效密钥处理，让代理层累计爆破次数。
+  if (looksLikeSignedDownstreamSkKey(normalizedToken)
+    && !isDownstreamKeySignatureValid(normalizedToken)) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: 'Invalid API key',
+      reason: 'invalid',
     };
   }
 

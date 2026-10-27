@@ -5,6 +5,7 @@ import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings }
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
+import { setAdminPasswordHash } from './adminAuthService.js';
 
 export const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 
@@ -16,6 +17,7 @@ type FactoryResetDependencies = {
 
 type PreservedInfrastructureState = {
   authToken: string;
+  authUsername: string;
   proxyToken: string;
   systemProxyUrl: string;
   dbType: 'sqlite' | 'mysql' | 'postgres';
@@ -45,6 +47,7 @@ async function clearAllBusinessData() {
 function captureInfrastructureState(): PreservedInfrastructureState {
   return {
     authToken: config.authToken,
+    authUsername: config.adminUsername,
     proxyToken: config.proxyToken,
     systemProxyUrl: config.systemProxyUrl,
     dbType: config.dbType,
@@ -61,6 +64,10 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
   const baseline = buildConfig(process.env);
   Object.assign(config, baseline);
   config.authToken = preserved.authToken || baseline.authToken || FACTORY_RESET_ADMIN_TOKEN;
+  config.adminUsername = preserved.authUsername || baseline.adminUsername || 'admin';
+  // 数据库里的 auth_password_hash 已被清空，内存中的旧哈希也必须同步清掉，
+  // 否则重置后旧密码仍然可用。
+  setAdminPasswordHash(null);
   config.proxyToken = preserved.proxyToken || baseline.proxyToken;
   config.systemProxyUrl = preserved.systemProxyUrl || baseline.systemProxyUrl;
   if (shouldPreserveExternalRuntime(preserved)) {
@@ -86,6 +93,7 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
 
 async function restoreInfrastructureSettings(preserved: PreservedInfrastructureState): Promise<void> {
   await upsertSetting('auth_token', preserved.authToken || FACTORY_RESET_ADMIN_TOKEN);
+  await upsertSetting('auth_username', preserved.authUsername || 'admin');
   await upsertSetting('proxy_token', preserved.proxyToken);
   await upsertSetting('system_proxy_url', preserved.systemProxyUrl);
 

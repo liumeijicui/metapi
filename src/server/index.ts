@@ -5,7 +5,7 @@ import {
   buildFastifyOptions,
   config,
 } from './config.js';
-import { authMiddleware } from './middleware/auth.js';
+import { authMiddleware, getClientIp } from './middleware/auth.js';
 import { sitesRoutes } from './routes/api/sites.js';
 import { accountsRoutes } from './routes/api/accounts.js';
 import { checkinRoutes } from './routes/api/checkin.js';
@@ -28,6 +28,7 @@ import {
 } from './services/assistedLogin/watchers.js';
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
+import { securityRoutes } from './routes/api/security.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { promptLibraryRoutes } from './routes/api/promptLibrary.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
@@ -45,6 +46,8 @@ import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackf
 import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { startSiteAnnouncementPolling, stopSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
 import { ensureBuiltinPromptPresets } from './services/promptLibraryService.js';
+import { isIpBlocked } from './services/ipBlocklistService.js';
+import { getSecuritySeedSource } from './services/securitySeedService.js';
 import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
@@ -216,9 +219,53 @@ try {
   console.warn(`Failed to load runtime settings overrides: ${(error as Error)?.message || 'unknown error'}`);
 }
 
+try {
+  if (getSecuritySeedSource() === 'local') {
+    console.warn('[security] ACCOUNT_CREDENTIAL_SECRET 未配置或强度不足，已使用本机随机种子 data/.metapi-security-seed；请把它和数据库一起备份，丢失后已加密的账号凭证无法恢复。');
+  }
+} catch (error) {
+  console.warn(`[security] Failed to initialize local security seed: ${(error as Error)?.message || 'unknown error'}`);
+}
+
 const app = Fastify(buildFastifyOptions(config));
 
-await app.register(cors);
+await app.register(cors, {
+  // Same-origin is the normal deployment. Cross-origin browser callers must be
+  // listed explicitly; the previous wildcard let any web page probe this admin
+  // API with a stolen token.
+  origin: config.corsAllowedOrigins.length > 0 ? config.corsAllowedOrigins : false,
+  credentials: false,
+});
+
+app.addHook('onSend', async (request, reply, payload) => {
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('X-Frame-Options', 'DENY');
+  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  reply.header('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+  if (request.protocol === 'https') {
+    reply.header('Strict-Transport-Security', 'max-age=31536000');
+  }
+  if (request.url.startsWith('/api/')) {
+    // Admin responses can contain balances, keys, cookies and session
+    // material. Never let a shared proxy or browser cache retain them.
+    reply.header('Cache-Control', 'no-store');
+    reply.header('Pragma', 'no-cache');
+  }
+  return payload;
+});
+
+// 全局 IP 黑名单：页面、管理 API、/v1 代理一律拦截。环回地址在服务层永久豁免，
+// 避免误封本机后连 SSH 隧道都进不来。
+app.addHook('onRequest', async (request, reply) => {
+  if (await isIpBlocked(getClientIp(request))) {
+    reply
+      .code(403)
+      .header('Cache-Control', 'no-store')
+      .send({ success: false, error: 'IP blocked', message: '当前 IP 已被禁止访问' });
+    return;
+  }
+});
 
 // Auth middleware for /api routes
 app.addHook('onRequest', async (request, reply) => {
@@ -250,6 +297,7 @@ await app.register(edgeSyncRoutes);
 await app.register(assistedLoginRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
+await app.register(securityRoutes);
 
 // Register OpenAI-compatible proxy routes
 await app.register(proxyRoutes);
@@ -268,11 +316,11 @@ if (existsSync(webDir)) {
     setHeaders: (res, filePath) => {
       const normalizedPath = normalize(filePath);
       if (normalizedPath.includes(`${sep}assets${sep}`)) {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.header('Cache-Control', 'public, max-age=31536000, immutable');
         return;
       }
       if (normalizedPath.endsWith(`${sep}index.html`)) {
-        res.setHeader('Cache-Control', 'no-cache');
+        res.header('Cache-Control', 'no-cache');
       }
     },
   });

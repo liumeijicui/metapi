@@ -32,8 +32,12 @@ export function buildStartupEndpoints(input: StartupSummaryInput): StartupEndpoi
     adminDashboardUrl: baseUrl,
     adminApiExample,
     proxyApiExample,
-    adminApiCurl: `curl '${adminApiExample}' -H 'Authorization: Bearer ${input.authToken}'`,
-    proxyApiCurl: `curl '${proxyApiExample}' -H 'Authorization: Bearer ${input.proxyToken}' -H 'Content-Type: application/json' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'`,
+    // Never print the live credential: this summary lands in systemd/journal
+    // logs, which are often readable far more widely than the admin console.
+    adminApiCurl: `AUTH_TOKEN='your-admin-password' curl '${adminApiExample}' -H "Authorization: Bearer $AUTH_TOKEN"`,
+    // The proxy key is a live credential too. Keep the copy-ready command while
+    // masking the value that lands in journald.
+    proxyApiCurl: `PROXY_TOKEN='your-proxy-key' curl '${proxyApiExample}' -H "Authorization: Bearer $PROXY_TOKEN" -H 'Content-Type: application/json' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'`,
   };
 }
 

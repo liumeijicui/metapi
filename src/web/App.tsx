@@ -14,6 +14,7 @@ import {
 } from './appLocalState.js';
 import { I18nProvider, useI18n } from './i18n.js';
 import { resolveLoginErrorMessage } from './loginError.js';
+import { getBrowserFingerprint } from './fingerprint.js';
 import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
@@ -43,6 +44,7 @@ const Settings = lazy(() => import('./pages/Settings.js'));
 const DownstreamKeys = lazy(() => import('./pages/DownstreamKeys.js'));
 const ImportExport = lazy(() => import('./pages/ImportExport.js'));
 const NotificationSettings = lazy(() => import('./pages/NotificationSettings.js'));
+const Security = lazy(() => import('./pages/Security.js'));
 const ProgramLogs = lazy(() => import('./pages/ProgramLogs.js'));
 const Models = lazy(() => import('./pages/Models.js'));
 const About = lazy(() => import('./pages/About.js'));
@@ -145,7 +147,7 @@ function resolveStoredProfile(): UserProfile {
 }
 
 export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
-  onLogin: (token: string) => void;
+  onLogin: (token: string, expiresAt?: number) => void;
   t: (text: string) => string;
   /** 边缘版（exe）：登录页下方要填从哪台服务器拉配置，令牌就是那台服务器的管理员令牌。 */
   edgeMode?: boolean;
@@ -153,6 +155,7 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
   edgeServerUrl?: string;
 }) {
   const [token, setToken] = useState('');
+  const [username, setUsername] = useState('admin');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const savedParts = splitServerAddress(edgeServerUrl);
@@ -228,11 +231,26 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
         return;
       }
 
-      const res = await fetch('/api/settings/auth/info', {
-        headers: { Authorization: `Bearer ${token}` },
+      // 指纹仅用于登录审计与风控；采集失败不影响登录。
+      const fingerprint = await getBrowserFingerprint().catch(() => null);
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          password: token,
+          ...(fingerprint ? { fingerprint: fingerprint.hash, fingerprintDetail: fingerprint.detail } : {}),
+        }),
       });
       if (res.ok) {
-        onLogin(token);
+        const payload = await res.json() as { token?: unknown; expiresAt?: unknown };
+        if (typeof payload.token !== 'string' || !payload.token) {
+          setError(t('登录响应缺少会话令牌'));
+          setLoading(false);
+          return;
+        }
+        const expiresAt = Number(payload.expiresAt);
+        onLogin(payload.token, Number.isFinite(expiresAt) ? expiresAt : undefined);
       } else {
         let reason = '';
         try {
@@ -362,12 +380,32 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
           <div className="login-auth-panel">
             <div className="login-auth-eyebrow">{t('管理员入口')}</div>
             <h2 className="login-auth-title">{t('登录')}</h2>
-            <p className="login-auth-copy">{t('请输入管理员令牌后继续。')}</p>
-            <label className="login-auth-label" htmlFor="admin-token-input">{t('管理员令牌')}</label>
+            <p className="login-auth-copy">{edgeMode ? t('请输入管理员令牌后继续。') : t('请输入管理员用户名和密码后继续。')}</p>
+            {!edgeMode && (
+              <>
+                <label className="login-auth-label" htmlFor="admin-username-input">{t('用户名')}</label>
+                <input
+                  id="admin-username-input"
+                  type="text"
+                  autoComplete="username"
+                  placeholder={t('管理员用户名')}
+                  value={username}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    setError('');
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                  className="login-auth-input"
+                  style={{ marginBottom: 12 }}
+                />
+              </>
+            )}
+            <label className="login-auth-label" htmlFor="admin-token-input">{edgeMode ? t('管理员令牌') : t('密码')}</label>
             <input
               id="admin-token-input"
               type="password"
-              placeholder={t('管理员令牌')}
+              autoComplete={edgeMode ? 'off' : 'current-password'}
+              placeholder={edgeMode ? t('管理员令牌') : t('管理员密码')}
               value={token}
               onChange={(e) => {
                 setToken(e.target.value);
@@ -383,7 +421,7 @@ export function Login({ onLogin, t, edgeMode = false, edgeServerUrl = '' }: {
             )}
             <button
               onClick={handleLogin}
-              disabled={loading || !token}
+              disabled={loading || !token || (!edgeMode && !username.trim())}
               className="btn btn-primary login-auth-submit"
             >
               {loading ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />{t('验证中...')}</> : t('登录')}
@@ -600,6 +638,7 @@ export const sidebarGroups = [
     label: '系统',
     items: [
       { to: '/settings', label: '设置', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg> },
+      { to: '/security', label: '安全中心', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 3l7 4v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V7l7-4z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12l2 2 4-4" /></svg> },
       { to: '/events', label: '程序日志', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg> },
       { to: '/settings/import-export', label: '导入/导出', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 7h10M7 12h6m-6 5h10M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z" /></svg> },
       { to: '/settings/notify', label: '通知设置', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg> },
@@ -865,8 +904,9 @@ function AppShell() {
       t={t}
       edgeMode={edgeMode}
       edgeServerUrl={edgeStatus?.configSource.url || ''}
-      onLogin={(token) => {
-        persistAuthSession(localStorage, token);
+      onLogin={(token, expiresAt) => {
+        const ttlMs = expiresAt ? Math.max(1_000, expiresAt - Date.now()) : undefined;
+        persistAuthSession(localStorage, token, ttlMs);
         setAuthed(true);
       }}
     />;
@@ -1157,6 +1197,7 @@ function AppShell() {
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/downstream-keys" element={<DownstreamKeys />} />
                 <Route path="/events" element={<ProgramLogs />} />
+                <Route path="/security" element={<Security />} />
                 <Route path="/settings/import-export" element={<ImportExport />} />
                 <Route path="/settings/notify" element={<NotificationSettings />} />
                 <Route path="/models" element={<Models />} />

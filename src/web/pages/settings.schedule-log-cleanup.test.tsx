@@ -107,6 +107,7 @@ describe('Settings log cleanup schedule', () => {
         checkinCron: '0 8 * * *',
         checkinScheduleMode: 'interval',
         checkinIntervalHours: 6,
+        checkinRandomWindowMinutes: 90,
         balanceRefreshCron: '0 * * * *',
         logCleanupCron: '15 4 * * *',
         logCleanupUsageLogsEnabled: true,

@@ -480,6 +480,93 @@ export const settings = sqliteTable('settings', {
   value: text('value'), // JSON
 });
 
+// 自动封禁或人工封禁的客户端 IP。记录落库，避免进程重启后攻击者立刻恢复访问。
+export const ipBlocklist = sqliteTable('ip_blocklist', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  ip: text('ip').notNull(),
+  source: text('source').notNull().default('manual'), // 'manual' | 'admin_login' | 'proxy_auth'
+  reason: text('reason').notNull(),
+  note: text('note'),
+  failureCount: integer('failure_count').notNull().default(0),
+  blockedAt: text('blocked_at').default(sql`(datetime('now'))`),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  ipUnique: uniqueIndex('ip_blocklist_ip_unique').on(table.ip),
+  blockedAtIdx: index('ip_blocklist_blocked_at_idx').on(table.blockedAt),
+  sourceIdx: index('ip_blocklist_source_idx').on(table.source),
+}));
+
+// 按浏览器指纹封禁的设备名单。
+//
+// 只封 IP 挡不住换出口 IP 的爆破；指纹由服务端根据 UA/屏幕/canvas/WebGL 等
+// 特征重新计算，攻击者无法通过改 IP 绕过。与 ip_blocklist 一样落库，
+// 进程重启后依然有效。
+export const fingerprintBlocklist = sqliteTable('fingerprint_blocklist', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  fingerprint: text('fingerprint').notNull(),
+  /** 人类可读标签，例如「Chrome / Windows · 192.168.1.5」。 */
+  label: text('label'),
+  source: text('source').notNull().default('manual'), // 'manual' | 'admin_login'
+  reason: text('reason').notNull(),
+  note: text('note'),
+  lastIp: text('last_ip'),
+  lastUserAgent: text('last_user_agent'),
+  failureCount: integer('failure_count').notNull().default(0),
+  blockedAt: text('blocked_at').default(sql`(datetime('now'))`),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  fingerprintUnique: uniqueIndex('fingerprint_blocklist_fingerprint_unique').on(table.fingerprint),
+  blockedAtIdx: index('fingerprint_blocklist_blocked_at_idx').on(table.blockedAt),
+  sourceIdx: index('fingerprint_blocklist_source_idx').on(table.source),
+}));
+
+// 机主自己的设备（可信指纹）。
+//
+// 标记为可信后，该浏览器即使连续输错密码也不会触发指纹锁定或自动永久拉黑，
+// 避免本人换网络、清缓存后把自己误判成攻击者；IP 维度的风控仍然照常生效。
+export const trustedFingerprints = sqliteTable('trusted_fingerprints', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  fingerprint: text('fingerprint').notNull(),
+  label: text('label'),
+  note: text('note'),
+  lastIp: text('last_ip'),
+  lastUserAgent: text('last_user_agent'),
+  lastSeenAt: text('last_seen_at'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  fingerprintUnique: uniqueIndex('trusted_fingerprints_fingerprint_unique').on(table.fingerprint),
+  createdAtIdx: index('trusted_fingerprints_created_at_idx').on(table.createdAt),
+}));
+
+// 管理后台登录审计。无论成功失败都记录，便于后续排查撞库、爆破和异常来源。
+export const adminLoginLogs = sqliteTable('admin_login_logs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  username: text('username'),
+  ip: text('ip').notNull(),
+  userAgent: text('user_agent'),
+  success: integer('success', { mode: 'boolean' }).notNull().default(false),
+  reason: text('reason'),
+  /** socket 对端地址：与 ip 不同说明经过了反向代理，可用于识别伪造 XFF。 */
+  peerIp: text('peer_ip'),
+  /** 客户端声明的 X-Forwarded-For 原始链，仅审计用。 */
+  ipChain: text('ip_chain'),
+  /** 服务端根据浏览器特征重新计算的指纹哈希。 */
+  fingerprint: text('fingerprint'),
+  /** 指纹采集到的原始特征（受限 JSON），用于人工比对。 */
+  fingerprintDetail: text('fingerprint_detail'),
+  /** IP 链或指纹与服务端计算不一致时置位。 */
+  spoofSuspect: integer('spoof_suspect', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  createdAtIdx: index('admin_login_logs_created_at_idx').on(table.createdAt),
+  ipCreatedIdx: index('admin_login_logs_ip_created_at_idx').on(table.ip, table.createdAt),
+  successCreatedIdx: index('admin_login_logs_success_created_at_idx').on(table.success, table.createdAt),
+  fingerprintCreatedIdx: index('admin_login_logs_fingerprint_created_at_idx').on(table.fingerprint, table.createdAt),
+}));
+
 export const adminSnapshots = sqliteTable('admin_snapshots', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   namespace: text('namespace').notNull(),

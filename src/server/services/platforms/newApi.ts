@@ -382,18 +382,24 @@ export class NewApiAdapter extends BasePlatformAdapter {
    * when the credential is not a refresh cookie or the exchange fails.
    */
   private async exchangeRefreshCookie(baseUrl: string, token: string): Promise<string | null> {
-    // Cache on the secret *the caller passed in*, not on the newest one this
-    // process has seen. Exchanging rolls the secret, so keying on the live value
-    // makes every later call with the same credential a cache miss: a flow that
-    // touches the API many times (listing sessions, then deleting each one)
-    // would roll the credential once per request. Each roll is a chance to lose
-    // the replacement, and a rolled secret presented again after the server's
-    // replay window looks like theft. One exchange per credential, reused for its
-    // 15 minute lifetime, keeps the chain short.
+    // Cache on the *session* the credential belongs to, not on the secret itself.
+    //
+    // A flow that touches the API many times (listing sessions, then deleting
+    // each one) must not roll the credential once per request: every roll is a
+    // chance to lose the replacement, and a retired secret presented again looks
+    // like theft. Keying on the presented secret avoided the double exchange
+    // *within* one call chain, but every exchange replaces the stored value, so
+    // the next request presented a different secret, missed the cache, and rolled
+    // again. Sites that throttle the exchange then answered the second call with
+    // a 429 — hyxware rejected nearly every request after the first one that way.
+    //
+    // The value is `<sessionId>.<rotating-hash>`, so the session id is the stable
+    // half: keying on it keeps one exchange per session for the access token's
+    // 15 minute lifetime, across any number of rotations.
     const presentedValue = this.extractRefreshCookie(token);
     if (!presentedValue) return null;
 
-    const cacheKey = `${baseUrl}::${presentedValue}`;
+    const cacheKey = this.buildRefreshCacheKey(baseUrl, presentedValue);
     const cached = REFRESH_TOKEN_CACHE.get(cacheKey);
     if (cached && cached.expiresAtMs - Date.now() > REFRESH_TOKEN_CACHE_LEAD_MS) {
       return cached.accessToken;
@@ -447,6 +453,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
     // Thrown outside the swallow above: a throttle is not a failure to hide.
     if (edgeRateLimited) throw new SiteThrottledError();
     return null;
+  }
+
+  /**
+   * Cache key for a refresh credential: the site plus the session it belongs to.
+   *
+   * Values look like `8cde86e5-...-aace8a2cd73f.9e101ad2...`: a session uuid, a
+   * dot, then the rotating secret. Only the uuid is stable, so only the uuid may
+   * take part in the key — anything else would miss on every rotation. Values
+   * that do not carry that shape are keyed verbatim, which is the old behaviour.
+   */
+  private buildRefreshCacheKey(baseUrl: string, refreshValue: string): string {
+    const sessionId = (refreshValue.split('.')[0] || '').trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
+    return `${baseUrl}::${isUuid ? sessionId : refreshValue}`;
   }
 
   /**
@@ -687,6 +707,71 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     return candidates;
+  }
+
+  /**
+   * Reads every page of the token list.
+   *
+   * Forks cap `page_size` server-side — hyxware answers 10 rows whatever `size`
+   * is asked for — so one `size=100` request silently returns a prefix of the
+   * account's keys. That matters most on sites that partition their catalogue by
+   * group: there is one key per group, so a truncated list leaves whole groups
+   * unsynced and every model behind them looks unavailable.
+   *
+   * The first page is passed in because the caller already paid for it. Paging
+   * stops on the advertised `total`, on an empty page, or on a page that adds
+   * nothing new, so a server that ignores `p` cannot make this spin.
+   */
+  private async fetchAllTokenItems(
+    firstPage: any,
+    fetchPage: (page: number) => Promise<any>,
+  ): Promise<any[]> {
+    const collected: any[] = [];
+    const seen = new Set<string>();
+    const remember = (items: any[]): number => {
+      let added = 0;
+      for (const item of items) {
+        const identity = String(item?.id ?? item?.key ?? JSON.stringify(item));
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        collected.push(item);
+        added += 1;
+      }
+      return added;
+    };
+    remember(this.parseTokenItems(firstPage));
+
+    const totalRaw = Number(firstPage?.data?.total ?? firstPage?.total ?? NaN);
+    const total = Number.isFinite(totalRaw) && totalRaw > 0 ? totalRaw : 0;
+
+    // The page index is not standardised across forks. New API counts from 0, so
+    // `p=1` is the second page; hyxware counts from 1 and also coerces `p=0` to
+    // the first page, so `p=1` repeats the rows already collected. Breaking on
+    // the first page that adds nothing therefore stopped at ten rows on exactly
+    // the sites whose catalogue is split into one key per group.
+    //
+    // Two empty pages in a row is the real end of the list under both
+    // conventions, and costs one redundant request at most.
+    let emptyStreak = 0;
+    // 50 pages is far past any hand-managed account; the bound only exists so a
+    // page parameter the server ignores cannot turn this into a loop.
+    for (let page = 1; page < 50; page += 1) {
+      if (total > 0 && collected.length >= total) break;
+      let next: any;
+      try {
+        next = await fetchPage(page);
+      } catch {
+        break;
+      }
+      if (!next) break;
+      if (remember(this.parseTokenItems(next)) === 0) {
+        emptyStreak += 1;
+        if (emptyStreak >= 2) break;
+      } else {
+        emptyStreak = 0;
+      }
+    }
+    return collected;
   }
 
   private parseTokenItems(payload: any): any[] {
@@ -1708,7 +1793,10 @@ export class NewApiAdapter extends BasePlatformAdapter {
         const headers: Record<string, string> = { Cookie: cookie };
         this.appendUserIdCompatibilityHeaders(headers, userId);
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
-        const rawItems = this.parseTokenItems(res);
+        const rawItems = await this.fetchAllTokenItems(
+          res,
+          (page) => this.fetchJsonRaw<any>(`${baseUrl}/api/token/?p=${page}&size=100`, { headers }),
+        );
         await this.revealMaskedTokenKeys(baseUrl, headers, rawItems);
         const normalized = this.normalizeTokenItems(rawItems);
         if (normalized.length > 0) return normalized;
@@ -2741,7 +2829,10 @@ export class NewApiAdapter extends BasePlatformAdapter {
     try {
       const headers = this.authHeaders(accessToken, userId || undefined);
       const res = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
-      const rawItems = this.parseTokenItems(res);
+      const rawItems = await this.fetchAllTokenItems(
+        res,
+        (page) => this.fetchJson<any>(`${baseUrl}/api/token/?p=${page}&size=100`, { headers }),
+      );
       await this.revealMaskedTokenKeys(baseUrl, headers, rawItems);
       const normalized = this.normalizeTokenItems(rawItems);
       if (normalized.length > 0) return normalized;

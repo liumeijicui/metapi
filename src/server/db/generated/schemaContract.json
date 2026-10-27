@@ -206,6 +206,82 @@
         }
       }
     },
+    "admin_login_logs": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "username": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "ip": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "user_agent": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "success": {
+          "logicalType": "boolean",
+          "notNull": true,
+          "defaultValue": "false",
+          "primaryKey": false
+        },
+        "reason": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "peer_ip": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "ip_chain": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fingerprint": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fingerprint_detail": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "spoof_suspect": {
+          "logicalType": "boolean",
+          "notNull": true,
+          "defaultValue": "false",
+          "primaryKey": false
+        }
+      }
+    },
     "admin_snapshots": {
       "columns": {
         "id": {
@@ -585,6 +661,140 @@
           "primaryKey": false
         },
         "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "fingerprint_blocklist": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "fingerprint": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "label": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'manual'",
+          "primaryKey": false
+        },
+        "reason": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "note": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_ip": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_user_agent": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "failure_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "blocked_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "ip_blocklist": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "ip": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'manual'",
+          "primaryKey": false
+        },
+        "reason": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "note": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "failure_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "blocked_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
           "logicalType": "datetime",
           "notNull": false,
           "defaultValue": "datetime('now')",
@@ -2729,6 +2939,64 @@
           "primaryKey": false
         }
       }
+    },
+    "trusted_fingerprints": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "fingerprint": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "label": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "note": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_ip": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_user_agent": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_seen_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
     }
   },
   "indexes": [
@@ -2797,6 +3065,41 @@
       "table": "accounts",
       "columns": [
         "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "admin_login_logs_created_at_idx",
+      "table": "admin_login_logs",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "admin_login_logs_fingerprint_created_at_idx",
+      "table": "admin_login_logs",
+      "columns": [
+        "fingerprint",
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "admin_login_logs_ip_created_at_idx",
+      "table": "admin_login_logs",
+      "columns": [
+        "ip",
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "admin_login_logs_success_created_at_idx",
+      "table": "admin_login_logs",
+      "columns": [
+        "success",
+        "created_at"
       ],
       "unique": false
     },
@@ -2921,6 +3224,54 @@
       "columns": [
         "type",
         "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "fingerprint_blocklist_blocked_at_idx",
+      "table": "fingerprint_blocklist",
+      "columns": [
+        "blocked_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "fingerprint_blocklist_fingerprint_unique",
+      "table": "fingerprint_blocklist",
+      "columns": [
+        "fingerprint"
+      ],
+      "unique": true
+    },
+    {
+      "name": "fingerprint_blocklist_source_idx",
+      "table": "fingerprint_blocklist",
+      "columns": [
+        "source"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ip_blocklist_blocked_at_idx",
+      "table": "ip_blocklist",
+      "columns": [
+        "blocked_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "ip_blocklist_ip_unique",
+      "table": "ip_blocklist",
+      "columns": [
+        "ip"
+      ],
+      "unique": true
+    },
+    {
+      "name": "ip_blocklist_source_idx",
+      "table": "ip_blocklist",
+      "columns": [
+        "source"
       ],
       "unique": false
     },
@@ -3596,6 +3947,22 @@
         "model_pattern"
       ],
       "unique": false
+    },
+    {
+      "name": "trusted_fingerprints_created_at_idx",
+      "table": "trusted_fingerprints",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "trusted_fingerprints_fingerprint_unique",
+      "table": "trusted_fingerprints",
+      "columns": [
+        "fingerprint"
+      ],
+      "unique": true
     }
   ],
   "uniques": [
@@ -3612,6 +3979,20 @@
       "table": "downstream_api_keys",
       "columns": [
         "key"
+      ]
+    },
+    {
+      "name": "fingerprint_blocklist_fingerprint_unique",
+      "table": "fingerprint_blocklist",
+      "columns": [
+        "fingerprint"
+      ]
+    },
+    {
+      "name": "ip_blocklist_ip_unique",
+      "table": "ip_blocklist",
+      "columns": [
+        "ip"
       ]
     },
     {
@@ -3776,6 +4157,13 @@
       "columns": [
         "token_id",
         "model_name"
+      ]
+    },
+    {
+      "name": "trusted_fingerprints_fingerprint_unique",
+      "table": "trusted_fingerprints",
+      "columns": [
+        "fingerprint"
       ]
     }
   ],

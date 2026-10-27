@@ -63,11 +63,26 @@ function parseListenHost(env: NodeJS.ProcessEnv): string {
   return (env.HOST || '0.0.0.0').trim() || '0.0.0.0';
 }
 
+function parseTrustProxy(env: NodeJS.ProcessEnv): boolean | string[] {
+  const raw = (env.TRUST_PROXY || '127.0.0.1,::1').trim();
+  if (raw === 'true') return true;
+  if (raw === 'false' || raw === '0') return false;
+  return parseCsvList(raw);
+}
+
 export function buildConfig(env: NodeJS.ProcessEnv) {
   const dataDir = env.DATA_DIR || './data';
 
   return {
     authToken: env.AUTH_TOKEN || 'change-me-admin-token',
+    adminUsername: (env.ADMIN_USERNAME || 'admin').trim() || 'admin',
+    adminSessionTtlMs: Math.max(
+      10 * 60 * 1000,
+      Math.min(
+        30 * 24 * 60 * 60 * 1000,
+        Math.trunc(parseNumber(env.ADMIN_SESSION_TTL_HOURS, 12) * 60 * 60 * 1000),
+      ),
+    ),
     proxyToken: env.PROXY_TOKEN || 'change-me-proxy-sk-token',
     deployHelperToken: parseOptionalSecret(env.DEPLOY_HELPER_TOKEN || env.UPDATE_CENTER_HELPER_TOKEN),
     codexClientId: parseOptionalSecret(env.CODEX_CLIENT_ID) || DEFAULT_CODEX_CLIENT_ID,
@@ -76,12 +91,18 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID) || DEFAULT_GEMINI_CLI_CLIENT_ID,
     geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET) || DEFAULT_GEMINI_CLI_CLIENT_SECRET,
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
+    trustProxy: parseTrustProxy(env),
+    corsAllowedOrigins: parseCsvList(env.CORS_ALLOWED_ORIGINS),
     accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
     checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'
       ? 'interval' as const
       : 'cron' as const,
     checkinIntervalHours: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.CHECKIN_INTERVAL_HOURS, 6)))),
+    checkinRandomWindowMinutes: Math.min(
+      12 * 60,
+      Math.max(0, Math.trunc(parseNumber(env.CHECKIN_RANDOM_WINDOW_MINUTES, 90))),
+    ),
     balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
     logCleanupCron: env.LOG_CLEANUP_CRON || '0 6 * * *',
     logCleanupConfigured: false,
@@ -212,7 +233,10 @@ export function buildFastifyOptions(
 ): FastifyServerOptions {
   return {
     logger: true,
-    trustProxy: true,
+    // Only reverse proxies we explicitly trust may supply X-Forwarded-For.
+    // Trusting every hop turned the admin IP allowlist into a header the caller
+    // could choose for themselves.
+    trustProxy: appConfig.trustProxy,
     bodyLimit: appConfig.requestBodyLimit,
   };
 }

@@ -71,7 +71,11 @@ describe('Login surface', () => {
       ));
       const tokenInput = root.root.find((node) => (
         node.type === 'input'
-        && node.props.placeholder === '管理员令牌'
+        && node.props.placeholder === '管理员密码'
+      ));
+      const usernameInput = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.placeholder === '管理员用户名'
       ));
       const githubLink = root.root.find((node) => (
         node.type === 'a'
@@ -82,6 +86,7 @@ describe('Login surface', () => {
       expect(githubLink.props['aria-label']).toBe('GitHub');
       expect(githubLink.props.target).toBe('_blank');
       expect(tokenInput.props.type).toBe('password');
+      expect(usernameInput.props.type).toBe('text');
     } finally {
       root?.unmount();
     }

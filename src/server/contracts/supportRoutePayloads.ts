@@ -5,6 +5,17 @@ const updateCenterVersionSourceSchema = z.enum(['docker-hub-tag', 'github-releas
 const authChangePayloadSchema = z.object({
   oldToken: z.string().optional(),
   newToken: z.string().optional(),
+  newUsername: z.string().optional(),
+  fingerprint: z.string().max(128).optional(),
+  fingerprintDetail: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+}).passthrough();
+
+const adminLoginPayloadSchema = z.object({
+  username: z.string().optional(),
+  password: z.string().optional(),
+  // 浏览器指纹只用于登录审计与风控；服务端会用 detail 重新计算 hash。
+  fingerprint: z.string().max(128).optional(),
+  fingerprintDetail: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 }).passthrough();
 
 const assistedLoginCapturePayloadSchema = z.object({
@@ -87,6 +98,7 @@ const updateCenterRollbackPayloadSchema = z.object({
 }).passthrough();
 
 export type AuthChangePayload = z.output<typeof authChangePayloadSchema>;
+export type AdminLoginPayload = z.output<typeof adminLoginPayloadSchema>;
 export type AssistedLoginCapturePayload = z.output<typeof assistedLoginCapturePayloadSchema>;
 /** @deprecated kept for back-compat with the original Linux.do-only routes. */
 export type LinuxdoCapturePayload = AssistedLoginCapturePayload;
@@ -117,6 +129,15 @@ function formatSupportRoutePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'newToken') {
     return 'Invalid newToken. Expected string.';
+  }
+  if (firstPath === 'newUsername') {
+    return 'Invalid newUsername. Expected string.';
+  }
+  if (firstPath === 'username') {
+    return 'Invalid username. Expected string.';
+  }
+  if (firstPath === 'password') {
+    return 'Invalid password. Expected string.';
   }
   if (firstPath === 'accountId') {
     return 'Invalid accountId. Expected positive number.';
@@ -225,6 +246,11 @@ function parseSupportRoutePayload<T extends z.ZodTypeAny>(
 export function parseAuthChangePayload(input: unknown):
 { success: true; data: AuthChangePayload } | { success: false; error: string } {
   return parseSupportRoutePayload(authChangePayloadSchema, input);
+}
+
+export function parseAdminLoginPayload(input: unknown):
+{ success: true; data: AdminLoginPayload } | { success: false; error: string } {
+  return parseSupportRoutePayload(adminLoginPayloadSchema, input);
 }
 
 export function parseAssistedLoginCapturePayload(input: unknown):

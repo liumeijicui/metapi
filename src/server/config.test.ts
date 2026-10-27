@@ -86,7 +86,7 @@ describe('buildConfig', () => {
     await app.close();
   });
 
-  it('trusts forwarded client IP headers for reverse-proxy deployments', async () => {
+  it('trusts forwarded client IP headers only from the configured loopback proxy', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
 
     app.get('/ip', async (request) => ({
@@ -96,14 +96,33 @@ describe('buildConfig', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/ip',
-      remoteAddress: '10.0.0.8',
+      remoteAddress: '127.0.0.1',
       headers: {
-        'x-forwarded-for': '203.0.113.5, 10.0.0.8',
+        'x-forwarded-for': '203.0.113.5, 127.0.0.1',
       },
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ ip: '203.0.113.5' });
+    await app.close();
+  });
+
+  it('ignores spoofed forwarded headers from an untrusted peer', async () => {
+    const app = Fastify(buildFastifyOptions(buildConfig({})));
+
+    app.get('/ip', async (request) => ({ ip: request.ip }));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '10.0.0.8',
+      headers: {
+        'x-forwarded-for': '203.0.113.5',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ip: '10.0.0.8' });
     await app.close();
   });
 });

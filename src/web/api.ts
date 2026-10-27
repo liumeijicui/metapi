@@ -421,6 +421,7 @@ export type RuntimeSettingsPayload = {
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;
+  checkinRandomWindowMinutes?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -461,6 +462,82 @@ export type RuntimeSettingsPayload = {
 export type ProxyLogStatusFilter = "all" | "success" | "failed";
 export type ProxyLogClientConfidence = "exact" | "heuristic" | "unknown" | null;
 export type ProxyLogUsageSource = "upstream" | "self-log" | "unknown" | null;
+
+export type IpBlocklistRecord = {
+  id: number;
+  ip: string;
+  source: "manual" | "admin_login" | "proxy_auth";
+  reason: string;
+  note: string | null;
+  failureCount: number;
+  blockedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type FingerprintBlocklistRecord = {
+  id: number;
+  fingerprint: string;
+  label: string | null;
+  source: "manual" | "admin_login";
+  reason: string;
+  note: string | null;
+  lastIp: string | null;
+  lastUserAgent: string | null;
+  failureCount: number;
+  blockedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type TrustedFingerprintRecord = {
+  id: number;
+  fingerprint: string;
+  label: string | null;
+  note: string | null;
+  lastIp: string | null;
+  lastUserAgent: string | null;
+  lastSeenAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type AdminLoginLogRecord = {
+  id: number;
+  username: string | null;
+  ip: string;
+  userAgent: string | null;
+  success: boolean;
+  reason: string | null;
+  peerIp?: string | null;
+  ipChain?: string | null;
+  fingerprint?: string | null;
+  fingerprintDetail?: string | null;
+  spoofSuspect?: boolean;
+  createdAt: string | null;
+};
+
+export type AdminLoginLogSummary = {
+  total: number;
+  success: number;
+  failed: number;
+  trusted: number;
+  trustedSuccess: number;
+  other: number;
+  otherSuccess: number;
+  uniqueFingerprints: number;
+  today: {
+    total: number;
+    success: number;
+    failed: number;
+    trusted: number;
+    trustedSuccess: number;
+    other: number;
+    otherSuccess: number;
+    uniqueFingerprints: number;
+    localDay: string;
+  };
+};
 
 export type ProxyLogBillingDetails = {
   quotaType: number;
@@ -834,6 +911,36 @@ export const api = {
     }),
   getSiteDisabledModels: (siteId: number) =>
     request(`/api/sites/${siteId}/disabled-models`),
+  getSiteInventory: (siteId: number) =>
+    request<{
+      success: boolean;
+      site: { id: number; name: string; platform: string | null };
+      accounts: Array<{
+        id: number;
+        username: string | null;
+        status: string | null;
+        oauthProvider: string | null;
+        balance: number | null;
+        checkinEnabled: boolean;
+        lastBalanceRefresh: string | null;
+        lastCheckinAt: string | null;
+        createdAt: string | null;
+        tokenCount: number;
+        enabledTokenCount: number;
+        tokens: Array<{
+          id: number;
+          name: string;
+          tokenMasked: string;
+          tokenGroup: string | null;
+          valueStatus: string;
+          source: string | null;
+          enabled: boolean;
+          isDefault: boolean;
+          createdAt: string | null;
+          updatedAt: string | null;
+        }>;
+      }>;
+    }>(`/api/sites/${siteId}/inventory`),
   updateSiteDisabledModels: (siteId: number, models: string[]) =>
     request(`/api/sites/${siteId}/disabled-models`, {
       method: "PUT",
@@ -1251,11 +1358,112 @@ export const api = {
 
   // Auth management
   getAuthInfo: () => request("/api/settings/auth/info"),
-  changeAuthToken: (oldToken: string, newToken: string) =>
+  generateSecurityKey: (kind: "downstream" | "proxy") =>
+    request<{ success: boolean; key: string }>("/api/security/generate-key", {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    }),
+  listIpBlocklist: (params?: { query?: string; source?: string; limit?: number }) => {
+    const search = new URLSearchParams();
+    if (params?.query) search.set("query", params.query);
+    if (params?.source) search.set("source", params.source);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return request<{ success: boolean; items: IpBlocklistRecord[] }>(
+      `/api/security/ip-blocklist${qs ? `?${qs}` : ""}`,
+    );
+  },
+  blockIp: (payload: { ip: string; reason?: string; note?: string }) =>
+    request<{ success: boolean; item: IpBlocklistRecord }>("/api/security/ip-blocklist", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  unblockIp: (id: number) =>
+    request<{ success: boolean }>(`/api/security/ip-blocklist/${id}`, { method: "DELETE" }),
+  listFingerprintBlocklist: (params?: { query?: string; source?: string; limit?: number }) => {
+    const search = new URLSearchParams();
+    if (params?.query) search.set("query", params.query);
+    if (params?.source) search.set("source", params.source);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return request<{ success: boolean; items: FingerprintBlocklistRecord[] }>(
+      `/api/security/fingerprint-blocklist${qs ? `?${qs}` : ""}`,
+    );
+  },
+  blockFingerprint: (payload: {
+    fingerprint: string;
+    reason?: string;
+    note?: string;
+    label?: string;
+    lastIp?: string;
+    lastUserAgent?: string;
+    failureCount?: number;
+  }) =>
+    request<{ success: boolean; item: FingerprintBlocklistRecord }>("/api/security/fingerprint-blocklist", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  unblockFingerprint: (id: number) =>
+    request<{ success: boolean }>(`/api/security/fingerprint-blocklist/${id}`, { method: "DELETE" }),
+  listTrustedFingerprints: (params?: { query?: string; limit?: number }) => {
+    const search = new URLSearchParams();
+    if (params?.query) search.set("query", params.query);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return request<{ success: boolean; items: TrustedFingerprintRecord[] }>(
+      `/api/security/trusted-fingerprints${qs ? `?${qs}` : ""}`,
+    );
+  },
+  trustFingerprint: (payload: {
+    fingerprint: string;
+    label?: string;
+    note?: string;
+    lastIp?: string;
+    lastUserAgent?: string;
+  }) =>
+    request<{
+      success: boolean;
+      item: TrustedFingerprintRecord;
+      autoUnblocked: boolean;
+      stillBlocked: boolean;
+      message: string;
+    }>("/api/security/trusted-fingerprints", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  untrustFingerprint: (id: number) =>
+    request<{ success: boolean }>(`/api/security/trusted-fingerprints/${id}`, { method: "DELETE" }),
+  getLoginLogs: (params?: {
+    ip?: string;
+    success?: boolean;
+    fingerprint?: string;
+    spoofOnly?: boolean;
+    limit?: number;
+  }) => {
+    const search = new URLSearchParams();
+    if (params?.ip) search.set("ip", params.ip);
+    if (typeof params?.success === "boolean") search.set("success", String(params.success));
+    if (params?.fingerprint) search.set("fingerprint", params.fingerprint);
+    if (params?.spoofOnly) search.set("spoofOnly", "true");
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return request<{ success: boolean; items: AdminLoginLogRecord[]; summary: AdminLoginLogSummary }>(
+      `/api/security/login-logs${qs ? `?${qs}` : ""}`,
+    );
+  },
+  clearLoginFingerprintLocks: () =>
+    request<{ success: boolean; cleared: number }>("/api/security/login-locks", { method: "DELETE" }),
+  changeAuthToken: (
+    oldToken: string,
+    newToken: string,
+    newUsername?: string,
+    fingerprint?: { fingerprint: string; fingerprintDetail: Record<string, string | number | boolean> },
+  ) =>
     request("/api/settings/auth/change", {
       method: "POST",
-      body: JSON.stringify({ oldToken, newToken }),
+      body: JSON.stringify({ oldToken, newToken, newUsername, ...(fingerprint || {}) }),
     }),
+  logout: () => request("/api/auth/logout", { method: "POST" }),
   getRuntimeSettings: () => request("/api/settings/runtime"),
   getBrandList: () => request("/api/settings/brand-list"),
   updateRuntimeSettings: (data: RuntimeSettingsPayload) =>

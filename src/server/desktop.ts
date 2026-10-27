@@ -9,6 +9,7 @@ import { config } from './config.js';
 const DESKTOP_HEALTH_ROUTE = '/api/desktop/health';
 const DESKTOP_RELEASES_ROUTE = '/api/desktop/releases';
 const DESKTOP_RELEASE_DOWNLOAD_ROUTE = '/api/desktop/releases/download';
+const ADMIN_LOGIN_ROUTE = '/api/auth/login';
 
 /**
  * 下载链接用「带签名的临时 URL」而不是 Authorization 头：
@@ -35,6 +36,7 @@ export interface DesktopReleaseArtifact {
 
 export function isPublicApiRoute(url: string): boolean {
   if (url === DESKTOP_HEALTH_ROUTE) return true;
+  if (url === ADMIN_LOGIN_ROUTE) return true;
   if (url.startsWith('/api/oauth/callback/')) return true;
   // 下载走签名校验，凭据在 query 上，不再是全局 auth 中间件能覆盖的形式。
   return url.startsWith(`${DESKTOP_RELEASE_DOWNLOAD_ROUTE}?`);

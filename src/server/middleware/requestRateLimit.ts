@@ -24,16 +24,8 @@ function normalizeIp(rawIp: string | null | undefined): string {
 }
 
 function extractClientIp(request: FastifyRequest): string {
-  const forwarded = request.headers['x-forwarded-for'];
-  if (Array.isArray(forwarded)) {
-    const first = forwarded.find((value) => typeof value === 'string' && value.trim().length > 0);
-    if (first) return normalizeIp(first.split(',')[0]);
-  }
-
-  if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
-    return normalizeIp(forwarded.split(',')[0]);
-  }
-
+  // `request.ip` is already resolved through the configured trustProxy list.
+  // Reading X-Forwarded-For here made the rate-limit key caller-controlled.
   return normalizeIp(request.ip);
 }
 

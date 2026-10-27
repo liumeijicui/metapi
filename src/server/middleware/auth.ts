@@ -3,6 +3,17 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config.js';
 import { authorizeDownstreamToken, consumeManagedKeyRequest } from '../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
+import {
+  clearAdminAuthFailures,
+  getAdminAuthBlockRemainingMs,
+  getSessionFingerprint,
+  parseAdminSessionToken,
+  recordAdminAuthFailure,
+  verifyAdminSessionToken,
+  verifyLegacyAdminToken,
+} from '../services/adminAuthService.js';
+import { registerAuthFailure } from '../services/ipBlocklistService.js';
+import { isFingerprintBlocked } from '../services/fingerprintBlocklistService.js';
 
 export interface ProxyAuthContext {
   token: string;
@@ -91,6 +102,16 @@ export function extractClientIp(remoteIp: string | null | undefined, xForwardedF
   return normalizeIp(remoteIp);
 }
 
+/**
+ * Use Fastify's resolved address. `request.ip` already honours
+ * X-Forwarded-For only when the socket comes from a proxy listed in
+ * `TRUST_PROXY`; reading the header directly let any caller choose their own
+ * address and bypass the admin allowlist.
+ */
+export function getClientIp(request: FastifyRequest): string {
+  return normalizeIp(request.ip);
+}
+
 export function isIpAllowed(clientIp: string, allowlist: string[]): boolean {
   if (!allowlist || allowlist.length === 0) return true;
   const normalizedClientIp = normalizeIp(clientIp);
@@ -107,9 +128,18 @@ export function isIpAllowed(clientIp: string, allowlist: string[]): boolean {
 }
 
 export async function authMiddleware(request: FastifyRequest, reply: FastifyReply) {
-  const clientIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+  const clientIp = getClientIp(request);
   if (!isIpAllowed(clientIp, config.adminIpAllowlist)) {
     reply.code(403).send({ error: 'IP not allowed' });
+    return;
+  }
+
+  const blockedForMs = getAdminAuthBlockRemainingMs(clientIp);
+  if (blockedForMs > 0) {
+    reply
+      .code(429)
+      .header('retry-after', String(Math.max(1, Math.ceil(blockedForMs / 1000))))
+      .send({ error: 'Too many failed authentication attempts' });
     return;
   }
 
@@ -118,11 +148,34 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
     reply.code(401).send({ error: 'Missing Authorization header' });
     return;
   }
-  const token = auth.replace('Bearer ', '');
-  if (token !== config.authToken) {
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  const sessionInfo = token && !verifyLegacyAdminToken(token)
+    ? verifyAdminSessionToken(token)
+    : null;
+  if (!token || (!verifyLegacyAdminToken(token) && !sessionInfo)) {
+    // An expired/revoked session is a normal logout path, not a password guess.
+    // Counting it would let a burst of background requests lock the operator out
+    // of the login page on the same IP.
+    if (parseAdminSessionToken(token)) {
+      reply.code(401).send({ error: 'Session expired' });
+      return;
+    }
+    recordAdminAuthFailure(clientIp);
     reply.code(403).send({ error: 'Invalid token' });
     return;
   }
+
+  // 会话创建时绑定了浏览器指纹。指纹一旦被拉黑，它的既有会话立即失效，
+  // 不需要等 12 小时自然过期。
+  if (sessionInfo) {
+    const fingerprint = getSessionFingerprint(sessionInfo.sessionId);
+    if (fingerprint && await isFingerprintBlocked(fingerprint)) {
+      reply.code(403).send({ error: 'Fingerprint blocked', message: '当前浏览器已被禁止访问' });
+      return;
+    }
+  }
+
+  clearAdminAuthFailures(clientIp);
 }
 
 export async function proxyAuthMiddleware(request: FastifyRequest, reply: FastifyReply) {
@@ -153,6 +206,17 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
 
   const authResult = await authorizeDownstreamToken(token);
   if (!authResult.ok) {
+    // 只有“密钥无效”才计入爆破；停用、过期、超额度属于正常业务拒绝，
+    // 不能让持有人在额度用尽后把自己的出口 IP 拉黑。
+    if (authResult.reason === 'invalid') {
+      await registerAuthFailure({
+        kind: 'proxy_auth',
+        ip: getClientIp(request),
+        threshold: 20,
+        reason: '下游 API Key 连续错误达到阈值',
+        note: 'invalid_downstream_api_key',
+      });
+    }
     reply.code(authResult.statusCode).send({ error: authResult.error });
     return;
   }

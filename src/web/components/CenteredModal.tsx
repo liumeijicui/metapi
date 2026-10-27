@@ -9,6 +9,11 @@ type CenteredModalProps = {
   children: React.ReactNode;
   footer?: React.ReactNode;
   maxWidth?: number;
+  /**
+   * 显式宽度。`.modal-content` 默认是 `min(90vw, 500px)`，只给 maxWidth 是撑不开的；
+   * 需要更宽的弹窗（例如批量测试的两栏布局）用这个字段。
+   */
+  width?: number;
   bodyStyle?: React.CSSProperties;
   closeOnBackdrop?: boolean;
   closeOnEscape?: boolean;
@@ -22,6 +27,7 @@ export default function CenteredModal({
   children,
   footer,
   maxWidth = 860,
+  width,
   bodyStyle,
   closeOnBackdrop = false,
   closeOnEscape = false,
@@ -62,7 +68,10 @@ export default function CenteredModal({
     >
       <div
         className={`modal-content ${presence.isVisible ? '' : 'is-closing'}`.trim()}
-        style={{ maxWidth }}
+        style={{
+          maxWidth,
+          ...(width ? { width: `min(${width}px, calc(100vw - 32px))` } : {}),
+        }}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-header">

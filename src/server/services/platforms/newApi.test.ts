@@ -1170,6 +1170,48 @@ describe('NewApiAdapter', () => {
     expect(revealCalls).toEqual(['POST /api/token/10384/key']);
   });
 
+  it('pages through a token list the site caps at ten rows', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+    // hyxware answers 10 rows whatever `size` says, and partitions its catalogue
+    // by group: one key per group. Reading only page 0 silently dropped half the
+    // groups and every model behind them.
+    //
+    // It also counts pages from 1 while `p=0` is coerced to page 1, so `p=1`
+    // replays the rows already collected. Breaking on that first empty page was
+    // the second half of the bug.
+    const requested: string[] = [];
+    const makePage = (page: number) => Array.from({ length: 10 }, (_, index) => {
+      const id = (page - 1) * 10 + index + 1;
+      return { id, name: `g-${id}`, key: `KEY-${id}`, status: 1, group: `G${id}` };
+    });
+    server = createServer((req, res) => {
+      const url = req.url || '';
+      if (url.startsWith('/api/token/?')) {
+        requested.push(url);
+        const asked = Number(new URLSearchParams(url.split('?')[1] || '').get('p') || 0);
+        const page = Math.max(1, asked);
+        const items = page <= 2 ? makePage(page) : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { page, page_size: 10, total: 20, items } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, 'session-token', 6597);
+
+    expect(tokens).toHaveLength(20);
+    expect(tokens.map((token) => token.key)).toContain('KEY-20');
+    expect(requested[0]).toBe('/api/token/?p=0&size=100');
+    expect(requested).toContain('/api/token/?p=2&size=100');
+  });
+
   it('keeps the masked placeholder when the fork has no reveal endpoint', async () => {
     await new Promise<void>((resolve, reject) => {
       server.close((err?: Error) => (err ? reject(err) : resolve()));
@@ -1194,6 +1236,56 @@ describe('NewApiAdapter', () => {
     const tokens = await adapter.getApiTokens(baseUrl, 'session-token', 6597);
 
     expect(tokens.map((t) => t.key)).toEqual(['FULL-PLAINTEXT-KEY', 'C5XJ**********Lemx']);
+  });
+
+  it('exchanges a rolling refresh cookie once per session, not once per rotation', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+    // hyxware rotates the secret on every exchange and throttles the endpoint, so
+    // re-exchanging after each rotation turned every later call into a 429. The
+    // session uuid is the stable half of the value and is what the cache keys on.
+    const sessionId = '8cde86e5-b483-4e1e-be9f-aace8a2cd73f';
+    let exchanges = 0;
+    let issued = 0;
+    server = createServer((req, res) => {
+      if (req.url === '/api/user/auth/refresh') {
+        exchanges += 1;
+        issued += 1;
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': [
+            `new_api_refresh=${sessionId}.rotated${issued}; Path=/api/user/auth`,
+            'new_api_has_session=1; Path=/',
+          ],
+        });
+        res.end(JSON.stringify({
+          data: { access_token: `access-${issued}`, access_expires_at: Math.floor(Date.now() / 1000) + 900 },
+          success: true,
+        }));
+        return;
+      }
+      if (req.url === '/api/user/self') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { id: 1562, username: 'u' }, success: true }));
+        return;
+      }
+      if ((req.url || '').startsWith('/api/token/')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { items: [], total: 0 }, success: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    await adapter.getApiTokens(baseUrl, `new_api_refresh=${sessionId}.original`, 1562);
+    await adapter.getApiTokens(baseUrl, `new_api_refresh=${sessionId}.rotated1`, 1562);
+
+    expect(exchanges).toBe(1);
   });
 
   it('reports a throttled refresh exchange as a rate limit instead of a dead credential', async () => {

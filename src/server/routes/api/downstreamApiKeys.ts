@@ -22,15 +22,12 @@ import {
   parseDownstreamApiKeyBatchPayload,
   parseDownstreamApiKeyPayload,
 } from '../../contracts/downstreamApiKeyRoutePayloads.js';
+import { validateDownstreamKeyValue } from '../../services/downstreamKeyService.js';
 
 function parseRouteId(raw: string): number | null {
   const id = Number.parseInt(raw, 10);
   if (!Number.isFinite(id) || id <= 0) return null;
   return id;
-}
-
-function validateKeyShape(key: string): boolean {
-  return key.startsWith('sk-') && key.length >= 6;
 }
 
 type ErrorLike = {
@@ -491,8 +488,9 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     if (!normalized.key) {
       return reply.code(400).send({ success: false, message: 'key 不能为空' });
     }
-    if (!validateKeyShape(normalized.key)) {
-      return reply.code(400).send({ success: false, message: 'key 必须以 sk- 开头且长度至少 6' });
+    const keyValidation = validateDownstreamKeyValue(normalized.key);
+    if (!keyValidation.ok) {
+      return reply.code(400).send({ success: false, message: keyValidation.error });
     }
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
@@ -596,8 +594,9 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     if (!normalized.key) {
       return reply.code(400).send({ success: false, message: 'key 不能为空' });
     }
-    if (!validateKeyShape(normalized.key)) {
-      return reply.code(400).send({ success: false, message: 'key 必须以 sk- 开头且长度至少 6' });
+    const keyValidation = validateDownstreamKeyValue(normalized.key);
+    if (!keyValidation.ok) {
+      return reply.code(400).send({ success: false, message: keyValidation.error });
     }
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,

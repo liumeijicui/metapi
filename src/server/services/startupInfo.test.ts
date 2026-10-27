@@ -28,5 +28,9 @@ describe('startupInfo', () => {
     expect(lines.some((line) => line.includes('Dashboard: http://127.0.0.1:4000'))).toBe(true);
     expect(lines.some((line) => line.includes('/api/stats/dashboard'))).toBe(true);
     expect(lines.some((line) => line.includes('/v1/chat/completions'))).toBe(true);
+    expect(lines.join('\n')).not.toContain("Bearer admin-token'");
+    expect(lines.join('\n')).not.toContain('admin-token');
+    expect(lines.join('\n')).not.toContain("Bearer proxy-token'");
+    expect(lines.join('\n')).not.toContain('proxy-token');
   });
 });

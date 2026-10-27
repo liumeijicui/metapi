@@ -239,6 +239,34 @@
       "when": 1791892911735,
       "tag": "0033_marvelous_pestilence",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1793035295391,
+      "tag": "0034_previous_vindicator",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1793061454884,
+      "tag": "0035_skinny_puma",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1793061942465,
+      "tag": "0036_orange_vision",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1793062595925,
+      "tag": "0037_lazy_luckman",
+      "breakpoints": true
     }
   ]
 }

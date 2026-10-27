@@ -1,5 +1,6 @@
 import { pbkdf2Sync, randomUUID } from 'node:crypto';
 import { inferCodexOfficialOriginator } from '../../shared/codexClientFamily.js';
+import { deriveSecuritySeed } from '../../services/securitySeedService.js';
 
 const CODEX_CLIENT_VERSION = '0.101.0';
 const CODEX_DEFAULT_USER_AGENT = 'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464';
@@ -54,7 +55,9 @@ function normalizeLowerCaseHeaderMap(
 }
 
 export function uuidFromSeed(seed: string): string {
-  const derived = pbkdf2Sync(seed, 'metapi-runtime-header-seed', 10_000, 16, 'sha256');
+  // 每套部署使用独立盐值，避免所有 Metapi 实例生成完全相同的设备 UUID。
+  const runtimeSalt = deriveSecuritySeed('runtime-header-uuid').toString('base64url');
+  const derived = pbkdf2Sync(seed, runtimeSalt, 10_000, 16, 'sha256');
   const bytes = new Uint8Array(derived);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;

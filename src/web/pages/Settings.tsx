@@ -28,7 +28,6 @@ import {
 import { clearAuthSession } from '../authSession.js';
 import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
-import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
@@ -62,6 +61,7 @@ type RuntimeSettings = {
   checkinCron: string;
   checkinScheduleMode: 'cron' | 'interval';
   checkinIntervalHours: number;
+  checkinRandomWindowMinutes: number;
   balanceRefreshCron: string;
   logCleanupCron: string;
   logCleanupUsageLogsEnabled: boolean;
@@ -344,6 +344,7 @@ export default function Settings() {
     checkinCron: '0 8 * * *',
     checkinScheduleMode: 'cron',
     checkinIntervalHours: 6,
+    checkinRandomWindowMinutes: 90,
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
@@ -365,8 +366,11 @@ export default function Settings() {
     proxyEmptyContentFailEnabled: false,
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
+  const [generatingProxyToken, setGeneratingProxyToken] = useState(false);
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPasswordSet, setAuthPasswordSet] = useState(true);
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [testingCheckin, setTestingCheckin] = useState(false);
@@ -662,6 +666,8 @@ export default function Settings() {
         api.getRuntimeDatabaseConfig(),
       ]);
       setMaskedToken(authInfo.masked || '****');
+      setAuthUsername(typeof authInfo.username === 'string' ? authInfo.username : '');
+      setAuthPasswordSet(authInfo.passwordSet !== false);
       const routeCooldownInput = resolveRouteCooldownInput(runtimeInfo.tokenRouterFailureCooldownMaxSec);
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
@@ -669,6 +675,9 @@ export default function Settings() {
         checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
           ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
           : 6,
+        checkinRandomWindowMinutes: Number.isFinite(Number(runtimeInfo.checkinRandomWindowMinutes))
+          ? Math.min(720, Math.max(0, Math.trunc(Number(runtimeInfo.checkinRandomWindowMinutes))))
+          : 90,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
@@ -788,6 +797,7 @@ export default function Settings() {
         checkinCron: runtime.checkinCron,
         checkinScheduleMode: runtime.checkinScheduleMode,
         checkinIntervalHours: runtime.checkinIntervalHours,
+        checkinRandomWindowMinutes: runtime.checkinRandomWindowMinutes,
         balanceRefreshCron: runtime.balanceRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
@@ -1132,7 +1142,6 @@ export default function Settings() {
     }
   };
 
-
   const handleClearCache = async () => {
     if (!window.confirm('确认清理模型缓存并重建路由？')) return;
     setClearingCache(true);
@@ -1307,16 +1316,24 @@ export default function Settings() {
 
       <div style={{ maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div className="card animate-slide-up stagger-1" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>管理员登录令牌</div>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>管理员账号</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>用户名</div>
+          <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
+            {authUsername || 'admin'}
+          </code>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>密码</div>
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
             {maskedToken || '****'}
           </code>
-          <button onClick={() => setShowChangeKey(true)} className="btn btn-primary">修改登录令牌</button>
+          <button onClick={() => setShowChangeKey(true)} className="btn btn-primary">修改用户名和密码</button>
           <ChangeKeyModal
             open={showChangeKey}
             onClose={() => {
               setShowChangeKey(false);
-              api.getAuthInfo().then((r: any) => setMaskedToken(r.masked || '****')).catch(() => { });
+              api.getAuthInfo().then((r: any) => {
+                setMaskedToken(r.masked || '****');
+                setAuthUsername(typeof r.username === 'string' ? r.username : '');
+              }).catch(() => { });
             }}
           />
         </div>
@@ -1373,6 +1390,31 @@ export default function Settings() {
                 onChange={(e) => setRuntime((prev) => ({ ...prev, balanceRefreshCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '180px 1fr', gap: 12, alignItems: 'start', marginTop: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>站点随机窗口（分钟）</div>
+              <input
+                type="number"
+                min={0}
+                max={720}
+                value={runtime.checkinRandomWindowMinutes}
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    checkinRandomWindowMinutes: Number.isFinite(nextValue)
+                      ? Math.min(720, Math.max(0, Math.trunc(nextValue)))
+                      : 0,
+                  }));
+                }}
+                style={inputStyle}
+                disabled={runtime.checkinScheduleMode !== 'cron'}
+              />
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6, paddingTop: isMobile ? 0 : 24 }}>
+              每个站点在 Cron 触发后的窗口内独立随机一个签到时刻，例如 90 表示 8:00–9:30 之间分散执行；每天重新随机。填 0 关闭。
             </div>
           </div>
           <div
@@ -2007,9 +2049,18 @@ export default function Settings() {
                 gap: 8,
                 alignSelf: 'stretch',
               }}
-              onClick={() => {
-                const full = generateDownstreamSkKey(PROXY_TOKEN_PREFIX);
-                setProxyTokenSuffix(full.slice(PROXY_TOKEN_PREFIX.length));
+              disabled={generatingProxyToken}
+              onClick={async () => {
+                setGeneratingProxyToken(true);
+                try {
+                  const res = await api.generateSecurityKey('proxy');
+                  const full = String(res?.key || '');
+                  if (full) setProxyTokenSuffix(full.slice(PROXY_TOKEN_PREFIX.length));
+                } catch (error: any) {
+                  toast.error(error?.message || '生成访问令牌失败');
+                } finally {
+                  setGeneratingProxyToken(false);
+                }
               }}
             >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden>
@@ -2019,7 +2070,7 @@ export default function Settings() {
                   d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z"
                 />
               </svg>
-              随机生成
+              {generatingProxyToken ? '生成中...' : '随机生成'}
             </button>
           </div>
           <button onClick={saveProxyToken} disabled={savingToken} className="btn btn-primary">
@@ -2589,6 +2640,11 @@ export default function Settings() {
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
             当前识别到的管理端 IP（由服务端判定）：
           </div>
+          {!authPasswordSet ? (
+            <div style={{ fontSize: 12, color: 'var(--color-warning, #b45309)', marginBottom: 10, lineHeight: 1.7 }}>
+              当前尚未设置独立登录密码，仍使用 AUTH_TOKEN 作为引导密码。建议点击上方“修改用户名和密码”立即设置独立密码。
+            </div>
+          ) : null}
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 10 }}>
             {runtime.currentAdminIp || '未知'}
           </code>
@@ -2605,13 +2661,24 @@ export default function Settings() {
             </button>
             <button
               onClick={() => {
-                clearAuthSession(localStorage);
-                window.location.reload();
+                void api.logout().catch(() => undefined).finally(() => {
+                  clearAuthSession(localStorage);
+                  window.location.reload();
+                });
               }}
               className="btn btn-danger"
             >
               退出登录
             </button>
+          </div>
+
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--color-border-light)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', flex: '1 1 260px', lineHeight: 1.7 }}>
+              IP 黑名单与登录审计已独立成页：查看被封禁的 IP、解除封禁、按 IP / 来源 / 结果筛选登录记录。
+            </div>
+            <a href="/security" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              打开安全中心
+            </a>
           </div>
         </div>
       </div>

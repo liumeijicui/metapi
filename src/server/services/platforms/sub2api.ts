@@ -857,51 +857,96 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     const normalizedBase = normalizeBaseUrl(baseUrl);
     const headers = this.buildAuthHeader(accessToken);
 
+    // Sub2API deployments disagree on the check-in route and payload:
+    //   - `/check-in/status` + `POST /check-in` with `{turnstile_token}`
+    //   - `/checkin/status` + `POST /checkin` with no body
+    //   - `/user/check-in` for both status and claim (loxo.cc and newer builds)
+    // Try them in order and keep the first that answers; only a 404 means
+    // "this deployment uses another dialect", any other error is a real failure.
+    const dialects: Array<{
+      label: string;
+      statusPath: string;
+      claimPath: string;
+      claimBody?: Record<string, unknown>;
+    }> = [
+      { label: 'check-in', statusPath: '/api/v1/check-in/status', claimPath: '/api/v1/check-in', claimBody: { turnstile_token: '' } },
+      { label: 'checkin', statusPath: '/api/v1/checkin/status', claimPath: '/api/v1/checkin' },
+      { label: 'user', statusPath: '/api/v1/user/check-in', claimPath: '/api/v1/user/check-in' },
+    ];
+
     let status: any;
-    try {
-      status = this.parseSub2ApiEnvelope<any>(
-        await this.fetchJson<any>(`${normalizedBase}/api/v1/check-in/status`, { headers }),
-        '/api/v1/check-in/status',
-      );
-    } catch (error) {
-      const raw = error instanceof Error ? error.message : String(error);
-      if (raw.includes('HTTP 404')) {
-        return { success: false, message: 'Check-in is not supported by Sub2API' };
+    let dialect: (typeof dialects)[number] | null = null;
+    let lastError = '';
+    for (const candidate of dialects) {
+      try {
+        status = this.parseSub2ApiEnvelope<any>(
+          await this.fetchJson<any>(`${normalizedBase}${candidate.statusPath}`, { headers }),
+          candidate.statusPath,
+        );
+        dialect = candidate;
+        break;
+      } catch (error) {
+        const raw = error instanceof Error ? error.message : String(error);
+        lastError = raw;
+        if (!raw.includes('HTTP 404')) {
+          return { success: false, message: `check-in status failed: ${raw}` };
+        }
       }
-      return { success: false, message: `check-in status failed: ${raw}` };
+    }
+    if (!dialect) {
+      return {
+        success: false,
+        message: lastError.includes('HTTP 404')
+          ? 'Check-in is not supported by Sub2API'
+          : `check-in status failed: ${lastError}`,
+      };
     }
 
     if (status?.enabled === false) {
       return { success: false, message: '站点签到未启用' };
     }
-    if (status?.checked_in_today === true) {
+    if (status?.checked_in_today === true || status?.checked_in === true) {
       return { success: false, message: '今日已签到' };
     }
     if (status?.turnstile_required === true) {
       return { success: false, message: '站点开启了 Turnstile 校验，需要人工签到' };
     }
+    if (status?.captcha_required === true) {
+      return { success: false, message: '站点开启了人机校验，需要人工完成签到' };
+    }
 
     let payload: any;
     try {
-      payload = this.parseSub2ApiEnvelope<any>(
-        await this.fetchJson<any>(`${normalizedBase}/api/v1/check-in`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ turnstile_token: '' }),
-        }),
-        '/api/v1/check-in',
-      );
+      payload = this.parseSub2ApiEnvelope<any>(await this.fetchJson<any>(`${normalizedBase}${dialect.claimPath}`, {
+        method: 'POST',
+        headers,
+        ...(dialect.claimBody ? { body: JSON.stringify(dialect.claimBody) } : {}),
+      }), dialect.claimPath);
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes('CHECK_IN_ALREADY_DONE')
+        || raw.includes('CHECKIN_ALREADY_DONE')
+        || raw.toLowerCase().includes('already checked in')) {
+        return { success: false, message: '今日已签到' };
+      }
+      if (raw.includes('CHECK_IN_DISABLED')) {
+        return { success: false, message: '站点签到未启用' };
+      }
+      if (raw.includes('CHECK_IN_CAPTCHA') || raw.includes('CAPTCHA_REQUIRED')) {
+        return { success: false, message: '站点开启了人机校验，需要人工完成签到' };
+      }
       return { success: false, message: `check-in failed: ${raw}` };
     }
 
-    if (payload?.checked_in_today !== true) {
+    // 只有 `/check-in` 这个方言会回传 `checked_in_today`；其余方言用奖励字段
+    // 表示已领取，不要因为缺这个布尔值就把成功判成失败。
+    if (dialect.label === 'check-in' && payload?.checked_in_today !== true) {
       return { success: false, message: 'check-in did not register' };
     }
-    const reward = typeof payload.today_reward === 'number' && Number.isFinite(payload.today_reward)
-      ? payload.today_reward
-      : 0;
+    const rawReward = dialect.label === 'check-in'
+      ? payload?.today_reward
+      : payload?.reward ?? payload?.amount ?? payload?.awarded_amount ?? payload?.today_reward;
+    const reward = typeof rawReward === 'number' && Number.isFinite(rawReward) ? rawReward : 0;
     return {
       success: true,
       message: reward > 0 ? `签到成功，获得 $${reward}` : '签到成功',

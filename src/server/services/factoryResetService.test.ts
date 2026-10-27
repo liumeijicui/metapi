@@ -45,6 +45,9 @@ describe('factoryResetService', () => {
     await db.delete(schema.settings).run();
 
     config.authToken = 'external-reset-token';
+    config.adminUsername = 'external-reset-admin';
+    config.proxyToken = 'sk-external-reset-proxy-token';
+    config.systemProxyUrl = 'http://127.0.0.1:7890';
     config.dbType = 'postgres';
     config.dbUrl = 'postgres://user:pass@127.0.0.1:5432/metapi';
     config.dbSsl = true;
@@ -62,6 +65,7 @@ describe('factoryResetService', () => {
     }).run();
     await db.insert(schema.settings).values([
       { key: 'auth_token', value: JSON.stringify('external-reset-token') },
+      { key: 'auth_username', value: JSON.stringify('external-reset-admin') },
       { key: 'db_type', value: JSON.stringify('postgres') },
       { key: 'db_url', value: JSON.stringify('postgres://user:pass@127.0.0.1:5432/metapi') },
       { key: 'db_ssl', value: JSON.stringify(true) },
@@ -87,8 +91,9 @@ describe('factoryResetService', () => {
     expect(await db.select().from(schema.sites).all()).toHaveLength(0);
     expect(await db.select().from(schema.settings).all()).toEqual([
       { key: 'auth_token', value: JSON.stringify('external-reset-token') },
-      { key: 'proxy_token', value: JSON.stringify('change-me-proxy-sk-token') },
-      { key: 'system_proxy_url', value: JSON.stringify('') },
+      { key: 'auth_username', value: JSON.stringify('external-reset-admin') },
+      { key: 'proxy_token', value: JSON.stringify(config.proxyToken) },
+      { key: 'system_proxy_url', value: JSON.stringify(config.systemProxyUrl) },
       { key: 'db_type', value: JSON.stringify('postgres') },
       { key: 'db_url', value: JSON.stringify('postgres://user:pass@127.0.0.1:5432/metapi') },
       { key: 'db_ssl', value: JSON.stringify(true) },

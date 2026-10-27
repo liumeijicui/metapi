@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
-import { generateDownstreamSkKey } from '../helpers/generateDownstreamSkKey.js';
-
-const PROXY_TOKEN_PREFIX = 'sk-';
+import { api } from '../../api.js';
+import { useToast } from '../../components/Toast.js';
 
 export type DownstreamExcludedCredentialRef =
   | {
@@ -267,6 +266,8 @@ export default function DownstreamKeyEditorModal({
   siteOptions: DownstreamSiteOption[];
   credentialOptions: DownstreamCredentialOption[];
 }) {
+  const toast = useToast();
+  const [generatingKey, setGeneratingKey] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const [groupSearch, setGroupSearch] = useState('');
   const [siteSearch, setSiteSearch] = useState('');
@@ -385,9 +386,20 @@ export default function DownstreamKeyEditorModal({
               type="button"
               className="btn btn-ghost"
               style={{ flexShrink: 0, whiteSpace: 'nowrap', alignSelf: 'stretch' }}
-              onClick={() => onChange((prev) => ({ ...prev, key: generateDownstreamSkKey(PROXY_TOKEN_PREFIX) }))}
+              disabled={generatingKey}
+              onClick={async () => {
+                setGeneratingKey(true);
+                try {
+                  const res = await api.generateSecurityKey('downstream');
+                  if (res?.key) onChange((prev) => ({ ...prev, key: res.key }));
+                } catch (error: any) {
+                  toast.error(error?.message || '生成密钥失败');
+                } finally {
+                  setGeneratingKey(false);
+                }
+              }}
             >
-              随机
+              {generatingKey ? '生成中...' : '随机'}
             </button>
           </div>
         </div>

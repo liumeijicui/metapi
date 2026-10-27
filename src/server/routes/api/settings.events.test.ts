@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { eq } from 'drizzle-orm';
 import { resetRequestRateLimitStore } from '../../middleware/requestRateLimit.js';
+import { resetAdminAuthStateForTests } from '../../services/adminAuthService.js';
 
 type DbModule = typeof import('../../db/index.js');
 type ConfigModule = typeof import('../../config.js');
@@ -37,6 +38,7 @@ describe('settings and auth events', () => {
 
   beforeEach(async () => {
     resetRequestRateLimitStore();
+    resetAdminAuthStateForTests();
     await db.delete(schema.events).run();
     await db.delete(schema.settings).run();
 
@@ -323,7 +325,7 @@ describe('settings and auth events', () => {
     expect(saved).toBeFalsy();
   });
 
-  it('returns current recognized admin IP in runtime settings response', async () => {
+  it('ignores spoofed forwarded IP and returns the socket admin IP', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/settings/runtime',
@@ -335,7 +337,7 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(200);
     const body = response.json() as { currentAdminIp?: string; serverTimeZone?: string };
-    expect(body.currentAdminIp).toBe('203.0.113.5');
+    expect(body.currentAdminIp).toBe('10.0.0.8');
     expect(typeof body.serverTimeZone).toBe('string');
     expect((body.serverTimeZone || '').length).toBeGreaterThan(0);
   });
@@ -981,24 +983,27 @@ describe('settings and auth events', () => {
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
       type: 'token',
-      title: '管理员登录令牌已更新',
+      title: '管理员登录账号已更新',
       relatedType: 'settings',
     });
   });
 
   it('rate limits repeated admin auth token changes from the same client ip', async () => {
+    let password = config.authToken;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const nextPassword = `new-admin-token-${attempt}-456`;
       const response = await app.inject({
         method: 'POST',
         url: '/api/settings/auth/change',
         remoteAddress: '198.51.100.12',
         payload: {
-          oldToken: config.authToken,
-          newToken: `new-admin-token-${attempt}-456`,
+          oldToken: password,
+          newToken: nextPassword,
         },
       });
 
       expect(response.statusCode).toBe(200);
+      password = nextPassword;
     }
 
     const limited = await app.inject({
@@ -1006,7 +1011,7 @@ describe('settings and auth events', () => {
       url: '/api/settings/auth/change',
       remoteAddress: '198.51.100.12',
       payload: {
-        oldToken: config.authToken,
+        oldToken: password,
         newToken: 'new-admin-token-rate-limit',
       },
     });

@@ -53,6 +53,36 @@ type SiteSubscriptionSummary = {
   updatedAt?: number | null;
 };
 
+type SiteInventoryAccount = {
+  id: number;
+  username: string | null;
+  status: string | null;
+  oauthProvider: string | null;
+  balance: number | null;
+  checkinEnabled: boolean;
+  lastBalanceRefresh: string | null;
+  lastCheckinAt: string | null;
+  createdAt: string | null;
+  tokenCount: number;
+  enabledTokenCount: number;
+  tokens: Array<{
+    id: number;
+    name: string;
+    tokenMasked: string;
+    tokenGroup: string | null;
+    valueStatus: string;
+    source: string | null;
+    enabled: boolean;
+    isDefault: boolean;
+    createdAt: string | null;
+    updatedAt: string | null;
+  }>;
+};
+
+type SiteInventory = {
+  accounts: SiteInventoryAccount[];
+};
+
 type SiteRow = {
   id: number;
   name: string;
@@ -320,6 +350,116 @@ function SiteCheckinDisplay(props: { site: SiteRow }) {
     </div>
   );
 }
+function SiteInventoryPanel(props: {
+  loading: boolean;
+  inventory?: SiteInventory;
+}) {
+  const { loading, inventory } = props;
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+        <span className="spinner spinner-sm" /> 正在读取账号与密钥...
+      </div>
+    );
+  }
+  const accounts = inventory?.accounts ?? [];
+  if (accounts.length === 0) {
+    return <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>该站点还没有绑定账号。</div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {accounts.map((account) => {
+        return (
+          <div
+            key={account.id}
+            style={{
+              border: '1px solid var(--color-border-light)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-bg)',
+              padding: '8px 10px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+              <span style={{ fontWeight: 600 }}>{account.username || `账号 #${account.id}`}</span>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                {account.status === 'expired' ? '已过期' : account.status === 'disabled' ? '已禁用' : '正常'}
+              </span>
+              {account.oauthProvider ? (
+                <span className="badge badge-info" style={{ fontSize: 11 }}>{account.oauthProvider}</span>
+              ) : null}
+              <span style={{ color: 'var(--color-text-muted)' }}>
+                余额 {formatUsd(account.balance)}
+              </span>
+              <span style={{ color: 'var(--color-text-muted)' }}>
+                签到 {account.checkinEnabled ? '已开启' : '已关闭'}
+              </span>
+              <span style={{ color: 'var(--color-text-muted)' }}>
+                密钥 {account.enabledTokenCount}/{account.tokenCount}
+              </span>
+            </div>
+            {account.tokens.length === 0 ? (
+              <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                该账号还没有 SK 密钥。
+              </div>
+            ) : (
+              <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={inventoryThStyle}>名称</th>
+                      <th style={inventoryThStyle}>密钥</th>
+                      <th style={inventoryThStyle}>分组</th>
+                      <th style={inventoryThStyle}>状态</th>
+                      <th style={inventoryThStyle}>来源</th>
+                      <th style={inventoryThStyle}>更新时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {account.tokens.map((token) => (
+                      <tr key={token.id} style={{ borderTop: '1px solid var(--color-border-light)' }}>
+                        <td style={inventoryTdStyle}>
+                          {token.name}
+                          {token.isDefault ? (
+                            <span className="badge badge-success" style={{ marginLeft: 6, fontSize: 10 }}>默认</span>
+                          ) : null}
+                        </td>
+                        <td style={{ ...inventoryTdStyle, fontFamily: 'var(--font-mono)' }}>{token.tokenMasked || '-'}</td>
+                        <td style={inventoryTdStyle}>{token.tokenGroup || '-'}</td>
+                        <td style={inventoryTdStyle}>
+                          <span className={`badge ${token.enabled ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 10 }}>
+                            {token.enabled ? '启用' : '停用'}
+                          </span>
+                        </td>
+                        <td style={inventoryTdStyle}>{token.source === 'sync' ? '同步' : token.source === 'legacy' ? '历史' : '手动'}</td>
+                        <td style={inventoryTdStyle}>{token.updatedAt ? formatDateTimeLocal(token.updatedAt) : '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const inventoryThStyle: React.CSSProperties = {
+  padding: '6px 8px',
+  textAlign: 'left',
+  fontWeight: 600,
+  color: 'var(--color-text-secondary)',
+  whiteSpace: 'nowrap',
+};
+
+const inventoryTdStyle: React.CSSProperties = {
+  padding: '6px 8px',
+  verticalAlign: 'top',
+  wordBreak: 'break-all',
+};
+
 const platformColors: Record<string, string> = {
   'new-api': 'badge-info',
   'one-api': 'badge-success',
@@ -401,6 +541,10 @@ export default function Sites() {
   const [refreshingSiteBalanceId, setRefreshingSiteBalanceId] = useState<number | null>(null);
   const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
+  // 站点下的账号 / 密钥明细：按需拉取并缓存，只缓存本次会话，不写全局状态。
+  const [inventorySite, setInventorySite] = useState<SiteRow | null>(null);
+  const [inventoryBySiteId, setInventoryBySiteId] = useState<Record<number, SiteInventory>>({});
+  const [inventoryLoadingSiteId, setInventoryLoadingSiteId] = useState<number | null>(null);
   const [createdSiteForChoice, setCreatedSiteForChoice] = useState<{
     id: number;
     name: string;
@@ -1232,6 +1376,29 @@ export default function Sites() {
     ));
   };
 
+  const openSiteInventory = async (site: SiteRow) => {
+    setInventorySite(site);
+    // 每次打开都重新拉一次：账号余额、签到状态和密钥都会变，弹窗里看到的
+    // 应该是最新状态，而不是上次打开时的快照。
+    setInventoryLoadingSiteId(site.id);
+    try {
+      const result = await api.getSiteInventory(site.id);
+      setInventoryBySiteId((current) => ({
+        ...current,
+        [site.id]: { accounts: Array.isArray(result?.accounts) ? result.accounts : [] },
+      }));
+    } catch (error: any) {
+      toast.error(error?.message || '加载站点账号与密钥失败');
+      setInventoryBySiteId((current) => {
+        const next = { ...current };
+        delete next[site.id];
+        return next;
+      });
+    } finally {
+      setInventoryLoadingSiteId(null);
+    }
+  };
+
   const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy', skipDeleteConfirm = false) => {
     if (selectedSiteIds.length === 0) return;
     if (action === 'delete' && !skipDeleteConfirm) {
@@ -1715,6 +1882,42 @@ export default function Sites() {
           }}
         />
       )}
+
+      {inventorySite ? (
+        <CenteredModal
+          open
+          onClose={() => setInventorySite(null)}
+          title={(
+            <div style={{ fontSize: 14, fontWeight: 600 }}>
+              {inventorySite.name} · 账号与密钥
+            </div>
+          )}
+          maxWidth={isMobile ? 640 : 900}
+          closeOnEscape
+          bodyStyle={{
+            maxHeight: isMobile ? '76vh' : '70vh',
+            overflowY: 'auto',
+          }}
+          footer={(
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setInventorySite(null)}
+            >
+              关闭
+            </button>
+          )}
+        >
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
+            密钥只显示掩码，不会回传明文。
+          </div>
+          <SiteInventoryPanel
+            loading={inventoryLoadingSiteId === inventorySite.id}
+            inventory={inventoryBySiteId[inventorySite.id]}
+          />
+        </CenteredModal>
+      ) : null}
 
       {activeEditor && (
         <CenteredModal
@@ -2520,15 +2723,6 @@ export default function Sites() {
                         <SiteCheckinDisplay site={site} />
                       </div>
                     )} />
-                    <MobileField
-                      label="最后更新"
-                      value={site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
-                    />
-                    <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
-                    <MobileField
-                      label="最大并发"
-                      value={site.maxConcurrency && site.maxConcurrency > 0 ? String(site.maxConcurrency) : '不限制'}
-                    />
                     {isExpanded ? (
                       <div className="mobile-card-extra">
                         <MobileField
@@ -2608,8 +2802,21 @@ export default function Sites() {
                           value={hasConfiguredCustomHeaders(site.customHeaders) ? '已配置' : '-'}
                         />
                         <MobileField
-                          label="创建时间"
-                          value={formatDateTimeLocal(site.createdAt)}
+                          label="账号 / 密钥"
+                          stacked
+                          value={(
+                            <button
+                              type="button"
+                              className="btn btn-link btn-link-primary"
+                              onClick={() => { void openSiteInventory(site); }}
+                            >
+                              查看 {site.accountCount ?? 0} 个账号与密钥
+                            </button>
+                          )}
+                        />
+                        <MobileField
+                          label="最后更新"
+                          value={site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
                         />
                         <div className="mobile-card-actions">
                           <button
@@ -2667,13 +2874,11 @@ export default function Sites() {
                   <th>外部签到站URL</th>
                   <th>总余额</th>
                   <th>今日签到</th>
-                  <th>最后更新</th>
+                  <th>账号 / 密钥</th>
                   <th>状态</th>
                   <th>系统代理</th>
-                  <th>权重</th>
-                  <th>最大并发</th>
                   <th>平台</th>
-                  <th>创建时间</th>
+                  <th>最后更新</th>
                   <th className="sites-actions-col" style={{ textAlign: 'right' }}>操作</th>
                 </tr>
               </thead>
@@ -2767,7 +2972,19 @@ export default function Sites() {
                       <SiteCheckinDisplay site={site} />
                     </td>
                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      {site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
+                      <button
+                        type="button"
+                        className="btn btn-link btn-link-primary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void openSiteInventory(site);
+                        }}
+                      >
+                        查看
+                        <span style={{ marginLeft: 6, color: 'var(--color-text-muted)' }}>
+                          {site.accountCount ?? 0} 个账号
+                        </span>
+                      </button>
                     </td>
                     <td>
                       <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>
@@ -2778,12 +2995,6 @@ export default function Sites() {
                       <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
                         {site.useSystemProxy ? '已开启' : '未开启'}
                       </span>
-                    </td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
-                      {(site.globalWeight || 1).toFixed(2)}
-                    </td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>
-                      {site.maxConcurrency && site.maxConcurrency > 0 ? site.maxConcurrency : '不限制'}
                     </td>
                     <td>
                       <a
@@ -2798,14 +3009,7 @@ export default function Sites() {
                       </a>
                     </td>
                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      <a
-                        href={site.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ color: 'var(--color-text-muted)', textDecoration: 'underline' }}
-                      >
-                        {formatDateTimeLocal(site.createdAt)}
-                      </a>
+                      {site.lastBalanceRefresh ? formatDateTimeLocal(site.lastBalanceRefresh) : '-'}
                     </td>
                     <td className="sites-actions-cell" style={{ textAlign: 'right' }}>
                       <div className="sites-row-actions">

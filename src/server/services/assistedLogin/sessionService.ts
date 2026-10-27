@@ -513,12 +513,79 @@ export function createAssistedLoginSession(input: {
   }
 
   /**
-   * Ticks the site's own "I have read and agree" box when it is what holds the
-   * OAuth entry disabled.
+   * Ticks one unchecked agreement box on the page.
    *
-   * Several panels ship the provider buttons in a permanently disabled state
-   * until that agreement box is ticked. The button still *looks* ready, so the
-   * handoff silently never starts and the capture reports a missing entry.
+   * Returns `null` when there is nothing to tick, so the caller can tell "no
+   * gate here" apart from "the gate refused to open".
+   *
+   * `termsOnly` drops the last-resort fallback. It is set whenever the provider
+   * entry is *enabled*, because that is exactly the case where an unrelated
+   * "remember me" box would otherwise be flipped for no reason.
+   */
+  async function tickConsentBox(
+    page: import('playwright-core').Page,
+    termsOnly: boolean,
+  ): Promise<boolean | null> {
+    // The callback is passed as source text on purpose. A real function is run
+    // through the TS transpiler, which rewrites nested arrow functions into
+    // `__name(...)`-wrapped ones; that helper only exists in the server bundle,
+    // so the browser would throw `__name is not defined` and the unlock would
+    // silently never happen.
+    const result = await page.evaluate(`
+      (() => {
+        const termsPattern = /同意|协议|条款|我已阅读|隐私|terms|agree|privacy/i;
+        const termsOnly = ${termsOnly ? 'true' : 'false'};
+        function isChecked(el) {
+          return el instanceof HTMLInputElement
+            ? el.checked
+            : el.getAttribute('aria-checked') === 'true';
+        }
+        function labelText(el) {
+          const wrapper = el.closest('label') || el.parentElement.parentElement;
+          const name = el.getAttribute('aria-label') || '';
+          return ((wrapper ? wrapper.textContent : '') + ' ' + name).trim();
+        }
+        const all = Array.from(
+          document.querySelectorAll('input[type="checkbox"], [role="checkbox"]'),
+        ).filter(function (el) { return !isChecked(el); });
+        const inputs = all.filter(function (el) {
+          return el instanceof HTMLInputElement;
+        });
+        const candidates = inputs.length ? inputs : all;
+        let target = null;
+        for (const el of candidates) {
+          if (termsPattern.test(labelText(el))) { target = el; break; }
+        }
+        if (!target) {
+          if (termsOnly) return null;
+          target = candidates[candidates.length - 1] || null;
+        }
+        if (!target) return null;
+        if (target instanceof HTMLInputElement) {
+          target.click();
+        } else {
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        }
+        return isChecked(target);
+      })()
+    `);
+    return (result ?? null) as boolean | null;
+  }
+
+  /**
+   * Ticks the site's own "I have read and agree" box when it is what holds the
+   * OAuth entry back.
+   *
+   * Two gates look identical from the outside and are reported the same way:
+   *
+   * - the entry is rendered `disabled` until the box is ticked (most panels);
+   * - the entry *looks* ready but its handler silently refuses the click until
+   *   the box is ticked (咕嘎咕嘎 / ai.xmiaom.com). Nothing on the button says
+   *   so, the click is swallowed, and the capture reports a missing entry.
+   *
+   * The second shape is why a tick is attempted even when the button reports
+   * itself enabled. Only a box whose surrounding copy reads like a terms or
+   * privacy line is accepted there, so "remember me" is left alone.
    *
    * Ticking is retried rather than done once: the checkbox is rendered before
    * React hydrates it, and a click landing in that window flips the DOM state
@@ -531,6 +598,7 @@ export function createAssistedLoginSession(input: {
       const deadline = Date.now() + AGREEMENT_WAIT_TIMEOUT_MS;
       const visibleEntry = () => entryLocator(page).filter({ visible: true });
       if ((await visibleEntry().count()) === 0) return false;
+      let handledSoftGate = false;
       while (Date.now() < deadline) {
         const entry = visibleEntry();
         const blocked = await entry.first().evaluate(
@@ -538,47 +606,20 @@ export function createAssistedLoginSession(input: {
             el.getAttribute('aria-disabled') === 'true' ||
             (el as HTMLButtonElement).disabled === true,
         );
-        if (!blocked) return true;
+        if (!blocked) {
+          if (handledSoftGate) return true;
+          const ticked = await tickConsentBox(page, true);
+          if (ticked === null) return true;
+          if (!ticked) {
+            await page.waitForTimeout(500);
+            continue;
+          }
+          handledSoftGate = true;
+          await page.waitForTimeout(600);
+          continue;
+        }
 
-        // The callback is passed as source text on purpose. A real function is
-        // run through the TS transpiler, which rewrites nested arrow functions
-        // into `__name(...)`-wrapped ones; that helper only exists in the server
-        // bundle, so the browser would throw `__name is not defined` and the
-        // unlock would silently never happen.
-        const ticked = await page.evaluate(`
-          (() => {
-            const termsPattern = /同意|协议|条款|我已阅读|terms|agree/i;
-            function isChecked(el) {
-              return el instanceof HTMLInputElement
-                ? el.checked
-                : el.getAttribute('aria-checked') === 'true';
-            }
-            function labelText(el) {
-              const wrapper = el.closest('label') || el.parentElement.parentElement;
-              const name = el.getAttribute('aria-label') || '';
-              return ((wrapper ? wrapper.textContent : '') + ' ' + name).trim();
-            }
-            const all = Array.from(
-              document.querySelectorAll('input[type="checkbox"], [role="checkbox"]'),
-            ).filter(function (el) { return !isChecked(el); });
-            const inputs = all.filter(function (el) {
-              return el instanceof HTMLInputElement;
-            });
-            const candidates = inputs.length ? inputs : all;
-            let target = null;
-            for (const el of candidates) {
-              if (termsPattern.test(labelText(el))) { target = el; break; }
-            }
-            if (!target) target = candidates[candidates.length - 1];
-            if (!target) return false;
-            if (target instanceof HTMLInputElement) {
-              target.click();
-            } else {
-              target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-            }
-            return isChecked(target);
-          })()
-        `);
+        const ticked = await tickConsentBox(page, false);
         if (!ticked) {
           await page.waitForTimeout(500);
           continue;

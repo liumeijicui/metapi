@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import Combobox from '../components/Combobox.js';
 import ModelChatModal from '../components/ModelChatModal.js';
+import ModelBatchTestModal from '../components/ModelBatchTestModal.js';
 import DownstreamKeyCcSwitchModal, { type CcSwitchKeyTarget } from './downstream-keys/DownstreamKeyCcSwitchModal.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
@@ -212,6 +213,7 @@ export default function ModelMonitor() {
   const [attachBusy, setAttachBusy] = useState(false);
   const [chatTarget, setChatTarget] = useState<ModelRow | null>(null);
   const [chatAutoTest, setChatAutoTest] = useState(false);
+  const [batchTestOpen, setBatchTestOpen] = useState(false);
   // 「导入到 CC Switch」：先把原站的 base 地址与 sk- 密钥取回来，再打开弹窗。
   // 这是「原站直连」配置，模型名必须用该站自己的模型名，所以把该站的模型清单
   // 一并带进弹窗，避免误选我们的对外模型名（源站会直接回 503）。
@@ -416,6 +418,12 @@ export default function ModelMonitor() {
   };
 
   const models = overview?.models ?? [];
+  const batchTestModels = useMemo(() => models.map((model) => ({
+    key: `${model.siteId}:${model.modelName}`,
+    siteId: model.siteId,
+    siteName: model.siteName,
+    modelName: model.modelName,
+  })), [models]);
   const sites = overview?.sites ?? [];
   // CC Switch 导入弹窗里的模型候选：当前这份清单里的「站点 · 模型」，方便换模型名。
   const ccSwitchModelOptions = useMemo(() => {
@@ -528,6 +536,15 @@ export default function ModelMonitor() {
             style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
           >
             {refreshing ? <><span className="spinner spinner-sm" /> {tr('刷新中...')}</> : tr('刷新')}
+          </button>
+          <button
+            onClick={() => setBatchTestOpen(true)}
+            disabled={models.length === 0}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+            title={tr('对当前筛选出的模型按顺序逐个测试，停止会立即中断上游请求')}
+          >
+            {tr('批量测试')}
           </button>
         </div>
       </div>
@@ -1002,6 +1019,12 @@ export default function ModelMonitor() {
           siteUrl: chatTarget.siteUrl,
         } : null}
         onClose={() => { setChatTarget(null); setChatAutoTest(false); }}
+      />
+
+      <ModelBatchTestModal
+        open={batchTestOpen}
+        models={batchTestModels}
+        onClose={() => setBatchTestOpen(false)}
       />
 
       <DownstreamKeyCcSwitchModal

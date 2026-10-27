@@ -8,6 +8,7 @@ import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { getAllBrandNames } from '../../services/brandMatcher.js';
 import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
+import { validateDownstreamKeyValue } from '../../services/downstreamKeyService.js';
 import {
   exportBackup,
   exportBackupToWebdav,
@@ -35,7 +36,7 @@ import {
   parseBackupWebdavExportPayload,
 } from '../../contracts/settingsRoutePayloads.js';
 import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
-import { extractClientIp, findInvalidIpAllowlistEntries, isIpAllowed } from '../../middleware/auth.js';
+import { findInvalidIpAllowlistEntries, getClientIp, isIpAllowed } from '../../middleware/auth.js';
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
@@ -70,6 +71,7 @@ interface RuntimeSettingsBody {
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
+  checkinRandomWindowMinutes?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -143,7 +145,7 @@ const SYSTEM_PROXY_TEST_PROBE_URL = 'https://www.gstatic.com/generate_204';
 const SYSTEM_PROXY_TEST_TIMEOUT_MS = 15_000;
 
 function isValidProxyToken(value: string): boolean {
-  return value.startsWith(PROXY_TOKEN_PREFIX) && value.length >= 6;
+  return validateDownstreamKeyValue(value).ok;
 }
 
 function maskSecret(value: string): string {
@@ -359,6 +361,17 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       const intervalHours = Number(value);
       if (!Number.isFinite(intervalHours) || intervalHours < 1 || intervalHours > 24) return;
       config.checkinIntervalHours = Math.trunc(intervalHours);
+      updateCheckinSchedule({
+        mode: config.checkinScheduleMode,
+        cronExpr: config.checkinCron,
+        intervalHours: config.checkinIntervalHours,
+      });
+      return;
+    }
+    case 'checkin_random_window_minutes': {
+      const windowMinutes = Number(value);
+      if (!Number.isFinite(windowMinutes) || windowMinutes < 0 || windowMinutes > 12 * 60) return;
+      config.checkinRandomWindowMinutes = Math.trunc(windowMinutes);
       updateCheckinSchedule({
         mode: config.checkinScheduleMode,
         cronExpr: config.checkinCron,
@@ -716,6 +729,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     checkinCron: config.checkinCron,
     checkinScheduleMode: config.checkinScheduleMode,
     checkinIntervalHours: config.checkinIntervalHours,
+    checkinRandomWindowMinutes: config.checkinRandomWindowMinutes,
     balanceRefreshCron: config.balanceRefreshCron,
     logCleanupCron: config.logCleanupCron,
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
@@ -844,7 +858,7 @@ function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
 
 export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
-    const currentAdminIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+    const currentAdminIp = getClientIp(request);
     return getRuntimeSettingsResponse(currentAdminIp);
   });
 
@@ -908,7 +922,7 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     const body = parsedBody.data as RuntimeSettingsBody;
     const changedLabels: string[] = [];
-    const currentRequestIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+    const currentRequestIp = getClientIp(request);
     let pendingPayloadRules: typeof config.payloadRules | undefined;
 
     const webhookTouched = body.webhookUrl !== undefined || body.webhookEnabled !== undefined;
@@ -988,7 +1002,8 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     const checkinScheduleTouched = body.checkinCron !== undefined
       || body.checkinScheduleMode !== undefined
-      || body.checkinIntervalHours !== undefined;
+      || body.checkinIntervalHours !== undefined
+      || body.checkinRandomWindowMinutes !== undefined;
 
     if (body.checkinCron !== undefined) {
       if (!cron.validate(body.checkinCron)) {
@@ -1021,6 +1036,18 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.checkinIntervalHours = nextIntervalHours;
     }
 
+    if (body.checkinRandomWindowMinutes !== undefined) {
+      const randomWindowMinutes = Number(body.checkinRandomWindowMinutes);
+      if (!Number.isFinite(randomWindowMinutes) || randomWindowMinutes < 0 || randomWindowMinutes > 12 * 60) {
+        return reply.code(400).send({ success: false, message: '签到随机窗口必须是 0 到 720 的整数分钟' });
+      }
+      const nextRandomWindowMinutes = Math.trunc(randomWindowMinutes);
+      if (nextRandomWindowMinutes !== config.checkinRandomWindowMinutes) {
+        changedLabels.push(`签到随机窗口（${config.checkinRandomWindowMinutes}m -> ${nextRandomWindowMinutes}m）`);
+      }
+      config.checkinRandomWindowMinutes = nextRandomWindowMinutes;
+    }
+
     if (checkinScheduleTouched) {
       const nextCheckinCron = body.checkinCron !== undefined ? body.checkinCron : config.checkinCron;
       const nextCheckinScheduleMode: 'cron' | 'interval' = body.checkinScheduleMode !== undefined
@@ -1041,6 +1068,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('checkin_cron', config.checkinCron);
       upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
       upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+      upsertSetting('checkin_random_window_minutes', config.checkinRandomWindowMinutes);
     }
 
     if (body.balanceRefreshCron !== undefined) {
@@ -1114,8 +1142,9 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (!proxyToken.startsWith(PROXY_TOKEN_PREFIX)) {
         return reply.code(400).send({ success: false, message: '下游访问令牌必须以 sk- 开头' });
       }
-      if (proxyToken.length < 6) {
-        return reply.code(400).send({ success: false, message: '下游访问令牌至少 6 位（含 sk-）' });
+      const proxyTokenValidation = validateDownstreamKeyValue(proxyToken);
+      if (!proxyTokenValidation.ok) {
+        return reply.code(400).send({ success: false, message: proxyTokenValidation.error });
       }
       if (proxyToken !== config.proxyToken) {
         changedLabels.push('代理访问 Token');

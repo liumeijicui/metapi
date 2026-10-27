@@ -22,11 +22,11 @@ export async function registerEdgeWebAssets(app: FastifyInstance): Promise<boole
     setHeaders: (res, filePath) => {
       const normalizedPath = normalize(filePath);
       if (normalizedPath.includes(`${sep}assets${sep}`)) {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.header('Cache-Control', 'public, max-age=31536000, immutable');
         return;
       }
       if (normalizedPath.endsWith(`${sep}index.html`)) {
-        res.setHeader('Cache-Control', 'no-cache');
+        res.header('Cache-Control', 'no-cache');
       }
     },
   });

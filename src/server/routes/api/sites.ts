@@ -21,6 +21,7 @@ import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
 import { probeSiteModels } from '../../services/modelService.js';
 import { refreshBalance } from '../../services/balanceService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { maskToken, resolveAccountTokenValueStatus } from '../../services/accountTokenService.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
   try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
@@ -516,6 +517,73 @@ export async function sitesRoutes(app: FastifyInstance) {
       };
     });
   });
+  // 站点下的账号与账号下的密钥（SK）明细。站点管理表格点开一行时才请求，
+  // 避免每次加载站点列表都联表读取所有令牌。
+  app.get<{ Params: { id: string } }>('/api/sites/:id/inventory', async (request, reply) => {
+    const siteId = Number.parseInt(request.params.id, 10);
+    if (!Number.isFinite(siteId) || siteId <= 0) {
+      return reply.code(400).send({ success: false, message: '无效的站点 ID' });
+    }
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
+    if (!site) return reply.code(404).send({ success: false, message: '站点不存在' });
+
+    const accountRows = await db.select({
+      id: schema.accounts.id,
+      username: schema.accounts.username,
+      status: schema.accounts.status,
+      oauthProvider: schema.accounts.oauthProvider,
+      balance: schema.accounts.balance,
+      checkinEnabled: schema.accounts.checkinEnabled,
+      lastBalanceRefresh: schema.accounts.lastBalanceRefresh,
+      lastCheckinAt: schema.accounts.lastCheckinAt,
+      createdAt: schema.accounts.createdAt,
+    }).from(schema.accounts)
+      .where(eq(schema.accounts.siteId, siteId))
+      .orderBy(asc(schema.accounts.id))
+      .all();
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
+      .where(eq(schema.accounts.siteId, siteId))
+      .orderBy(asc(schema.accountTokens.id))
+      .all();
+
+    const tokensByAccountId = new Map<number, Array<Record<string, unknown>>>();
+    for (const row of tokenRows) {
+      const token = row.account_tokens;
+      const bucket = tokensByAccountId.get(token.accountId) ?? [];
+      bucket.push({
+        id: token.id,
+        name: token.name,
+        tokenMasked: maskToken(token.token, site.platform),
+        tokenGroup: token.tokenGroup,
+        valueStatus: resolveAccountTokenValueStatus(token),
+        source: token.source,
+        enabled: token.enabled !== false,
+        isDefault: token.isDefault === true,
+        createdAt: token.createdAt,
+        updatedAt: token.updatedAt,
+      });
+      tokensByAccountId.set(token.accountId, bucket);
+    }
+
+    return {
+      success: true,
+      site: { id: site.id, name: site.name, platform: site.platform },
+      accounts: accountRows.map((account) => {
+        const tokens = tokensByAccountId.get(account.id) ?? [];
+        return {
+          ...account,
+          checkinEnabled: account.checkinEnabled !== false,
+          tokenCount: tokens.length,
+          enabledTokenCount: tokens.filter((item) => item.enabled).length,
+          tokens,
+        };
+      }),
+    };
+  });
+
   // Add a site
   app.post<{ Body: unknown }>('/api/sites', async (request, reply) => {
     const parsedBody = parseSiteCreatePayload(request.body);
