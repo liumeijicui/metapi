@@ -795,6 +795,7 @@ export default function ModelChatModal({
       onClose={() => { if (!sending) onClose(); }}
       title={tr('对话测试')}
       maxWidth={760}
+      mobileFullscreen
       bodyStyle={{ padding: 0 }}
       footer={(
         <div className="model-chat-footer">

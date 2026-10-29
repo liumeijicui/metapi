@@ -47,6 +47,7 @@ const zhToEn: Record<string, string> = {
   '关闭': 'Close',
   '打开': 'Open',
   '导航': 'Navigate',
+  '更多': 'More',
   '重置': 'Reset',
   '全部': 'All',
   '清空': 'Clear',

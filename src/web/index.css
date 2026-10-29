@@ -8118,3 +8118,502 @@ a.model-monitor-site-name:hover {
   font-size: 12.5px;
   margin-bottom: 12px;
 }
+
+/* ===== Mobile (<=768px) user experience ===== */
+/*
+ * 手机端不是在桌面布局上「缩一缩」就够了：底部标签栏解决切页要开抽屉的问题，
+ * 长列表分页解决上千张卡片把页面拉到几十万像素的问题，弹窗铺满整屏解决聊天
+ * 输入区被挤没的问题。这里集中放这批覆盖规则，避免和上面的桌面样式互相打架。
+ */
+@media (max-width: 768px) {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    overscroll-behavior-y: none;
+  }
+
+  /* iOS 在输入框字号小于 16px 时会自动放大页面，随后很难缩回去。 */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  .main-content {
+    padding: 12px;
+    padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .page-subtitle {
+    font-size: 12px;
+    line-height: 1.65;
+    word-break: break-word;
+  }
+
+  .topbar {
+    padding: 0 10px;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .topbar-logo-text {
+    max-width: 88px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* --- 底部标签栏 --- */
+  .mobile-tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 95;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    align-items: stretch;
+    min-height: 56px;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom, 0px));
+    background: color-mix(in srgb, var(--color-bg-card) 94%, transparent);
+    border-top: 1px solid var(--color-border);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 -4px 18px rgba(15, 23, 42, 0.06);
+  }
+
+  [data-theme="dark"] .mobile-tabbar {
+    background: color-mix(in srgb, var(--color-bg-card) 94%, #000 6%);
+    box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.35);
+  }
+
+  .mobile-tabbar-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 0;
+    padding: 4px 2px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 10.5px;
+    font-weight: 500;
+    text-decoration: none;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-tabbar-item span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-tabbar-item .sidebar-item-icon {
+    width: 21px;
+    height: 21px;
+    opacity: 0.72;
+  }
+
+  .mobile-tabbar-item.active {
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 9%, transparent);
+  }
+
+  .mobile-tabbar-item.active .sidebar-item-icon {
+    opacity: 1;
+  }
+
+  /* 批量操作条浮在标签栏上方，不能盖住导航。 */
+  .mobile-actions-bar {
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* 手机上的提示放到底部：顶部已经被标题和操作按钮占满，弹在顶上会挡住刚点的按钮。 */
+  .toast-container {
+    top: auto;
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+    left: 10px;
+    right: 10px;
+    gap: 6px;
+  }
+
+  .toast {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
+  /*
+   * 全屏弹窗里底部就是输入区和操作按钮，提示条固定在底部会正好压住它们。
+   * 弹窗打开时把提示条移到标题栏下方，只遮住内容区，不影响操作。
+   */
+  body:has(.modal-backdrop-mobile-fullscreen:not(.is-closing)) .toast-container {
+    top: calc(64px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+  }
+
+  /* --- 弹窗铺满整屏（只给聊天 / 批量测试这类高密度弹窗用） --- */
+  .modal-backdrop.modal-backdrop-mobile-fullscreen {
+    padding: 0;
+    align-items: stretch;
+    overflow: hidden;
+  }
+
+  .modal-content.modal-content-mobile-fullscreen {
+    width: 100vw;
+    max-width: 100vw !important;
+    height: 100vh;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: none;
+  }
+
+  .modal-content-mobile-fullscreen .modal-header {
+    flex-shrink: 0;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 8px;
+    border-bottom: 1px solid var(--color-border-light);
+    font-size: 15px;
+  }
+
+  .modal-content-mobile-fullscreen .modal-close-button {
+    width: 36px;
+    height: 36px;
+  }
+
+  .modal-content-mobile-fullscreen .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 8px 10px !important;
+  }
+
+  .modal-content-mobile-fullscreen .modal-footer {
+    flex-shrink: 0;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--color-border-light);
+  }
+
+  .modal-content-mobile-fullscreen .model-chat {
+    height: 100%;
+    max-height: none;
+    overflow: hidden;
+    padding: 0;
+    gap: 8px;
+  }
+
+  .modal-content-mobile-fullscreen .model-chat-messages-wrap {
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-sm);
+    padding: 4px 6px;
+  }
+
+  .modal-content-mobile-fullscreen .model-chat-composer textarea {
+    min-height: 64px;
+    resize: none;
+  }
+
+  .modal-content-mobile-fullscreen .model-chat-footer {
+    flex-wrap: wrap;
+  }
+
+  .modal-content-mobile-fullscreen .model-chat-footer > span {
+    flex: 1 1 100%;
+  }
+
+  /* --- 提示词管理 --- */
+  .prompt-library-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .prompt-library-stats .stat-card {
+    padding: 10px;
+  }
+
+  .prompt-library-stats .stat-value {
+    font-size: 20px;
+  }
+
+  .prompt-library-stats .stat-label {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .prompt-library-cases {
+    padding: 12px;
+  }
+
+  .prompt-library-mobile-list .mobile-card-footer-actions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .prompt-library-mobile-list .mobile-card-footer-actions .btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 34px;
+    padding: 4px 6px;
+  }
+
+  .prompt-library-mobile-text {
+    max-height: 120px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+  }
+
+  /* --- 模型监控 --- */
+  .model-monitor-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .model-monitor-stats .stat-card {
+    padding: 12px;
+  }
+
+  .model-monitor-filter-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .model-monitor-filter-toggle > span:first-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .model-monitor-filter-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-primary);
+  }
+
+  .model-monitor-toolbar.is-mobile-collapsed {
+    display: none;
+  }
+
+  .model-monitor-toolbar {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  .model-monitor-toolbar select,
+  .model-monitor-filter,
+  .model-monitor-filter-site,
+  .model-monitor-filter-model {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: none;
+  }
+
+  .model-monitor-view-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    width: 100%;
+  }
+
+  /* 卡片视图在手机上已经是唯一的实用视图，表格切换会让人误点到不可用的表格。 */
+  .model-monitor-view-toggle {
+    grid-template-columns: 1fr;
+  }
+
+  .model-monitor-view-toggle button:last-child {
+    display: none;
+  }
+
+  .model-monitor-view-toggle .btn {
+    justify-content: center;
+  }
+
+  .model-monitor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-monitor-card {
+    padding: 12px;
+  }
+
+  .model-monitor-model-name {
+    white-space: normal;
+    word-break: break-all;
+    text-align: left;
+    line-height: 1.35;
+  }
+
+  .model-monitor-card-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .model-monitor-action-btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 36px;
+    padding: 4px 8px;
+  }
+
+  .model-monitor-load-more {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .model-monitor-load-more .btn {
+    min-width: 160px;
+    justify-content: center;
+  }
+
+  /* 模型名 / 站点名的复制提示别在手机上占位。 */
+  .model-monitor-copy-hint {
+    display: none;
+  }
+
+  /* --- 仪表盘：站点可观测性 --- */
+  /* 站点多的时候单列卡片会把首页拉成一万多像素，两列 + 收紧内边距能减半。 */
+  .site-observability-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .site-observability-card {
+    padding: 9px 10px;
+    min-width: 0;
+  }
+
+  /* 24 格固定 10px 的条在双列卡片里必然溢出，改成按卡片宽度均分。 */
+  .site-observability-card .site-availability-strip-compact {
+    grid-template-columns: repeat(24, minmax(0, 1fr));
+    gap: 2px;
+    width: 100%;
+  }
+
+  .site-observability-card .site-availability-strip-compact .site-availability-cell {
+    width: 100%;
+    height: 18px;
+  }
+
+  .site-observability-card-top {
+    gap: 4px;
+  }
+
+  .site-observability-card-title .site-observability-site-name {
+    font-size: 12px;
+  }
+
+  .site-observability-card-metrics {
+    font-size: 11px;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+
+  .site-observability-metric-main {
+    font-size: 12px;
+  }
+
+  .site-observability-log-link-compact {
+    width: 24px;
+    height: 24px;
+  }
+
+  .site-observability-header {
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+
+  .stat-summary-card {
+    min-width: 0;
+    padding: 12px 12px;
+  }
+
+  .stat-summary-card-value {
+    font-size: 18px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+
+  .stat-summary-card-label {
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 380px) {
+  .topbar-logo-text {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  /* --- 模型转发 --- */
+  /* 规则头部的四个操作在手机上会散成两行、贴到卡片边；收成一行等宽按钮。 */
+  .model-forward-rule-head {
+    row-gap: 8px;
+  }
+
+  .model-forward-rule-spacer {
+    display: none !important;
+  }
+
+  .model-forward-rule-actions,
+  .model-forward-target-actions {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 4px;
+    width: 100%;
+  }
+
+  .model-forward-rule-actions .btn,
+  .model-forward-target-actions .btn {
+    justify-content: center;
+    min-height: 34px;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-sm);
+    padding: 4px 6px !important;
+  }
+
+  .model-forward-target {
+    row-gap: 6px;
+  }
+
+  .model-forward-target-spacer {
+    display: none !important;
+  }
+}

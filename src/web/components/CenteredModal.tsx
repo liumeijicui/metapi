@@ -18,6 +18,8 @@ type CenteredModalProps = {
   closeOnBackdrop?: boolean;
   closeOnEscape?: boolean;
   showCloseButton?: boolean;
+  /** 手机端铺满整屏：聊天窗、批量测试这类高密度弹窗在手机上需要全部空间。 */
+  mobileFullscreen?: boolean;
 };
 
 export default function CenteredModal({
@@ -32,6 +34,7 @@ export default function CenteredModal({
   closeOnBackdrop = false,
   closeOnEscape = false,
   showCloseButton = true,
+  mobileFullscreen = false,
 }: CenteredModalProps) {
   const presence = useAnimatedVisibility(open, 220);
   const canUsePortal = typeof document !== 'undefined'
@@ -63,11 +66,11 @@ export default function CenteredModal({
 
   const modal = (
     <div
-      className={`modal-backdrop ${presence.isVisible ? '' : 'is-closing'}`.trim()}
+      className={`modal-backdrop ${presence.isVisible ? '' : 'is-closing'}${mobileFullscreen ? ' modal-backdrop-mobile-fullscreen' : ''}`.trim()}
       onClick={closeOnBackdrop ? onClose : undefined}
     >
       <div
-        className={`modal-content ${presence.isVisible ? '' : 'is-closing'}`.trim()}
+        className={`modal-content ${presence.isVisible ? '' : 'is-closing'}${mobileFullscreen ? ' modal-content-mobile-fullscreen' : ''}`.trim()}
         style={{
           maxWidth,
           ...(width ? { width: `min(${width}px, calc(100vw - 32px))` } : {}),

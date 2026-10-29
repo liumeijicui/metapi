@@ -55,7 +55,7 @@ describe('ModelMonitor 对话按钮', () => {
   });
 
   it('对话支持 chat / responses 协议，并按站点 + 模型记住选择', () => {
-    expect(modal).toContain("const [apiMode, setApiMode] = useState<'chat' | 'responses'>('chat');");
+    expect(modal).toContain("const [apiMode, setApiMode] = useState<'chat' | 'responses'>('responses');");
     expect(modal).toContain("tr('接口协议')");
     expect(modal).toContain('<option value="chat">Chat Completions</option>');
     expect(modal).toContain('<option value="responses">Responses</option>');
@@ -63,7 +63,7 @@ describe('ModelMonitor 对话按钮', () => {
     expect(modal).toContain('apiMode,');
     // 打开时从 chat-channels 的 preference 恢复。
     expect(modal).toContain('const preference = res?.preference;');
-    expect(modal).toContain("setApiMode(preference.apiMode === 'responses' ? 'responses' : 'chat');");
+    expect(modal).toContain("setApiMode(preference.apiMode === 'chat' ? 'chat' : 'responses');");
   });
 
   it('Responses 流式事件也能解析成正文与思考过程', () => {

@@ -7,6 +7,7 @@ import ModelChatModal from '../components/ModelChatModal.js';
 import ModelBatchTestModal from '../components/ModelBatchTestModal.js';
 import DownstreamKeyCcSwitchModal, { type CcSwitchKeyTarget } from './downstream-keys/DownstreamKeyCcSwitchModal.js';
 import { useToast } from '../components/Toast.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 import {
   buildModelMonitorSlots,
@@ -393,6 +394,11 @@ export default function ModelMonitor() {
   const [refreshing, setRefreshing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [view, setView] = useState<'cards' | 'table'>('cards');
+  const isMobile = useIsMobile();
+  // 手机上模型可能有上千条，一次性铺成卡片会把页面拉到几十万像素高。
+  // 这里只渲染前 30 条，点「加载更多」再追加；桌面端保持原样显示全部。
+  const [mobileVisibleCount, setMobileVisibleCount] = useState(30);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [modelFilter, setModelFilter] = useState('');
   const [siteFilter, setSiteFilter] = useState('');
   const [familyFilter, setFamilyFilter] = useState('');
@@ -612,6 +618,16 @@ export default function ModelMonitor() {
   };
 
   const models = overview?.models ?? [];
+  const visibleModels = isMobile ? models.slice(0, mobileVisibleCount) : models;
+
+  useEffect(() => {
+    setMobileVisibleCount(30);
+  }, [siteFilter, modelFilter, familyFilter, minSuccessRate, sortKey]);
+
+  // 手机上 9 列表格只能横向拖动，几乎没法读；切到手机宽度时回到卡片视图。
+  useEffect(() => {
+    if (isMobile) setView('cards');
+  }, [isMobile]);
   const batchTestModels = useMemo(() => models.map((model) => ({
     key: `${model.siteId}:${model.modelName}`,
     siteId: model.siteId,
@@ -774,7 +790,25 @@ export default function ModelMonitor() {
         </div>
       </div>
 
-      <div className="card model-monitor-toolbar">
+      {isMobile ? (
+        <button
+          type="button"
+          className={`model-monitor-filter-toggle ${mobileFiltersOpen ? 'is-open' : ''}`}
+          onClick={() => setMobileFiltersOpen((current) => !current)}
+          aria-expanded={mobileFiltersOpen}
+        >
+          <span>
+            <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 6h16M7 12h10M10 18h4" />
+            </svg>
+            {tr('筛选与排序')}
+            {monitorFiltersActive ? <i className="model-monitor-filter-dot" aria-hidden /> : null}
+          </span>
+          <span>{mobileFiltersOpen ? tr('收起') : tr('展开')}</span>
+        </button>
+      ) : null}
+
+      <div className={`card model-monitor-toolbar ${isMobile && !mobileFiltersOpen ? 'is-mobile-collapsed' : ''}`.trim()}>
         {/* 站点在前、模型在后：模型候选是按站点收窄的，先定站点再挑模型才顺。 */}
         <div className="model-monitor-filter model-monitor-filter-site">
           {/* 用 Combobox：触发框本身就是输入框，想筛站点当前页直接打字就行，
@@ -979,7 +1013,7 @@ export default function ModelMonitor() {
         </div>
       ) : view === 'cards' ? (
         <div className="model-monitor-grid">
-          {models.map((model) => {
+          {visibleModels.map((model) => {
             const metricsAvailable = model.metricsAvailable !== false;
             return (
             <div className="card model-monitor-card" key={`${model.siteId}:${model.modelName}`}>
@@ -1108,7 +1142,7 @@ export default function ModelMonitor() {
               </tr>
             </thead>
             <tbody>
-              {models.map((model) => {
+              {visibleModels.map((model) => {
                 const metricsAvailable = model.metricsAvailable !== false;
                 return (
                 <tr key={`${model.siteId}:${model.modelName}`}>
@@ -1197,6 +1231,21 @@ export default function ModelMonitor() {
           </table>
         </div>
       )}
+
+      {isMobile && models.length > visibleModels.length ? (
+        <div className="model-monitor-load-more">
+          <div>
+            {tr('已显示')} {visibleModels.length} / {models.length}
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => setMobileVisibleCount((count) => count + 30)}
+          >
+            {tr('加载更多')}
+          </button>
+        </div>
+      ) : null}
 
       <div className="model-monitor-legend">
         <span>{tr('成功率颜色：')}

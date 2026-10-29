@@ -323,7 +323,7 @@ export default function ModelForwarding() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {rules.map((rule) => (
             <div key={rule.id} className="card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <div className="model-forward-rule-head" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <code style={{ fontWeight: 600, fontSize: 13.5 }}>{rule.modelName}</code>
                 <span className={`badge ${rule.enabled ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 10.5 }}>
                   {rule.enabled ? tr('启用') : tr('停用')}
@@ -336,7 +336,8 @@ export default function ModelForwarding() {
                     {tr('唯一派发通道')}
                   </span>
                 ) : null}
-                <span style={{ flex: 1 }} />
+                <span className="model-forward-rule-spacer" style={{ flex: 1 }} />
+                <div className="model-forward-rule-actions">
                 <button
                   type="button"
                   className="btn btn-link"
@@ -375,6 +376,7 @@ export default function ModelForwarding() {
                     </button>
                   </>
                 )}
+                </div>
               </div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -396,6 +398,7 @@ export default function ModelForwarding() {
                   return (
                     <div
                       key={target.id}
+                      className="model-forward-target"
                       style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -431,7 +434,8 @@ export default function ModelForwarding() {
                       >
                         {state}
                       </span>
-                      <span style={{ flex: 1 }} />
+                      <span className="model-forward-target-spacer" style={{ flex: 1 }} />
+                      <div className="model-forward-target-actions">
                       <button
                         type="button"
                         className="btn btn-link"
@@ -487,6 +491,7 @@ export default function ModelForwarding() {
                           {tr('删除')}
                         </button>
                       )}
+                      </div>
                     </div>
                   );
                 })}

@@ -216,9 +216,10 @@ describe('ModelForwarding 模型转发页', () => {
     expect(tokensRoute).toContain("app.get<{ Querystring: { model?: string } }>('/api/routes/decision'");
     expect(tokensRoute).toContain('tokenRouter.explainSelection(model)');
 
-    // 网关模式：请求直接打我们自己的网关（/v1/chat/completions），不是直连上游站点。
+    // 网关模式：请求直接打我们自己的网关（按所选协议走 /v1/responses 或
+    // /v1/chat/completions），不是直连上游站点。
     expect(modal).toContain('api.proxyTestStream(');
-    expect(modal).toContain("path: '/v1/chat/completions'");
+    expect(modal).toContain("path: apiMode === 'responses' ? '/v1/responses' : '/v1/chat/completions'");
     // 回复里自报的模型名 = 实际被调用的模型，作为派发结果的直接证据。
     expect(modal).toContain('responseModel');
     expect(modal).toContain("tr('实际模型')");

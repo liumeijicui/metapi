@@ -899,6 +899,18 @@ function AppShell() {
     }]
     : sidebarGroups;
 
+  // 手机上的底部标签栏：只放最常用的四个入口，其余收进「更多」抽屉。
+  // 之前手机端只有一个汉堡菜单，切换页面要「打开抽屉 → 找菜单 → 关闭」三步，
+  // 用起来很费劲；常用页面固定在拇指可及的位置更顺手。
+  const mobileTabPaths = edgeMode
+    ? ['/model-forwarding', '/logs']
+    : ['/', '/sites', '/accounts', '/monitor'];
+  const mobileTabItems = mobileTabPaths
+    .map((path) => visibleSidebarGroups
+      .flatMap((group) => group.items)
+      .find((item) => item.to === path))
+    .filter((item): item is NonNullable<typeof item> => !!item);
+
   if (!authed) {
     return <Login
       t={t}
@@ -1210,6 +1222,34 @@ function AppShell() {
           </PageTransition>
         </main>
       </div>
+
+      {isMobile ? (
+        <nav className="mobile-tabbar" aria-label={t('导航')}>
+          {mobileTabItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) => `mobile-tabbar-item ${isActive ? 'active' : ''}`}
+            >
+              {item.icon}
+              <span>{t(item.label)}</span>
+            </NavLink>
+          ))}
+          <button
+            type="button"
+            className={`mobile-tabbar-item ${drawerOpen ? 'active' : ''}`}
+            aria-label={t('更多')}
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen(true)}
+          >
+            <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+            <span>{t('更多')}</span>
+          </button>
+        </nav>
+      ) : null}
 
       <UserProfileModal
         open={showProfileModal}

@@ -481,6 +481,7 @@ export default function ModelBatchTestModal({ open, models, onClose }: Props) {
       title={tr('批量测试')}
       maxWidth={1280}
       width={1280}
+      mobileFullscreen
       footer={footer}
       bodyStyle={{ maxHeight: '84vh', overflow: 'hidden', padding: 16 }}
     >

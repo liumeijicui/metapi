@@ -114,7 +114,8 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
   return (
     <div>
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+      {/* minmax(0,1fr)：手机上三列固定 1fr 会被数字撑破，改成可收缩的列。 */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 20 }}>
         <div className="stat-summary-card stat-summary-purple">
           <div className="stat-summary-card-label">总消耗</div>
           <div className="stat-summary-card-value">{formatCurrency(totals.spend)}</div>

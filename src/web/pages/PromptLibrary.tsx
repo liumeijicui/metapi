@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import Combobox from '../components/Combobox.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
+import { MobileCard, MobileField } from '../components/MobileCard.js';
 import { useToast } from '../components/Toast.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 import PresetImportModal from './prompt-library/PresetImportModal.js';
 import type { BuiltinPreset } from './prompt-library/types.js';
@@ -28,6 +30,7 @@ type SimpleCase = {
  */
 export default function PromptLibrary() {
   const toast = useToast();
+  const isMobile = useIsMobile();
   const [cases, setCases] = useState<SimpleCase[]>([]);
   const [defaultCaseId, setDefaultCaseId] = useState<number | null>(null);
   const [savingDefault, setSavingDefault] = useState(false);
@@ -290,6 +293,54 @@ export default function PromptLibrary() {
           <div className="empty-state">{tr('还没有题目，点「新增题目」或导入内置题库')}</div>
         ) : filteredCases.length === 0 ? (
           <div className="empty-state">{tr('没有匹配的题目')}</div>
+        ) : isMobile ? (
+          <div className="mobile-card-list prompt-library-mobile-list">
+            {filteredCases.map((promptCase) => (
+              <MobileCard
+                key={promptCase.id}
+                title={promptCase.title}
+                headerActions={promptCase.id === defaultCaseId ? (
+                  <span className="badge badge-info">{tr('默认')}</span>
+                ) : null}
+                footerActions={(
+                  <>
+                    <button
+                      className="btn btn-ghost prompt-library-btn-sm"
+                      onClick={() => void handleDefaultCaseChange(String(promptCase.id))}
+                      disabled={savingDefault || promptCase.id === defaultCaseId}
+                    >
+                      {promptCase.id === defaultCaseId ? tr('默认') : tr('设默认')}
+                    </button>
+                    <button className="btn btn-ghost prompt-library-btn-sm" onClick={() => void handleCopy(promptCase)}>
+                      {tr('复制')}
+                    </button>
+                    <button className="btn btn-ghost prompt-library-btn-sm" onClick={() => setEditor({ open: true, promptCase })}>
+                      {tr('编辑')}
+                    </button>
+                    <button
+                      className="btn btn-ghost prompt-library-btn-sm prompt-library-danger"
+                      onClick={() => setDeleteTarget(promptCase)}
+                    >
+                      {tr('删除')}
+                    </button>
+                  </>
+                )}
+              >
+                <MobileField
+                  label={tr('题目描述')}
+                  stacked
+                  value={<div className="prompt-library-mobile-text">{promptCase.description}</div>}
+                />
+                <MobileField
+                  label={tr('答案')}
+                  stacked
+                  value={promptCase.answer
+                    ? <div className="prompt-library-mobile-text">{promptCase.answer}</div>
+                    : <span className="prompt-library-muted">—</span>}
+                />
+              </MobileCard>
+            ))}
+          </div>
         ) : (
           <div className="prompt-library-table-wrap">
             <table className="data-table prompt-library-table">
