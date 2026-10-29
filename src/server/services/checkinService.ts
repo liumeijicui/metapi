@@ -737,6 +737,11 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   return {
     ...result,
+    // The stored log already prefers the site's own refusal over the 401 that
+    // triggered the re-login; the caller's toast should say the same thing
+    // instead of sending the operator after a credential that was not the
+    // problem.
+    message: logMessage,
     success: effectiveSuccess,
     status: normalizedStatus,
     ...(normalizedStatus === 'skipped' ? { skipped: true } : {}),

@@ -202,7 +202,8 @@ export default function ModelChatModal({
   const [sending, setSending] = useState(false);
   // 接口协议：部分模型只认 /v1/responses（Codex 那套），部分只认 Chat Completions。
   // 选了哪套就只发哪套，不做跨协议降级——这样测出来的才是真实可用性。
-  const [apiMode, setApiMode] = useState<'chat' | 'responses'>('chat');
+  // 默认 Responses：模型监控这边主要就是验证 Codex 那条链路。
+  const [apiMode, setApiMode] = useState<'chat' | 'responses'>('responses');
   // 直连凭据：站点自己的账号 / sk- 令牌。选一条就直接打目标站，
   // 完全不走网关的新路由 / 老路由，所以和「有没有配路由」无关。
   const [credentials, setCredentials] = useState<DirectCredentialOption[]>([]);
@@ -242,7 +243,7 @@ export default function ModelChatModal({
     setMessages([]);
     setInput('');
     setSending(false);
-    setApiMode('chat');
+    setApiMode('responses');
     setReasoningEffort('');
     setDefaultPromptCaseId(null);
     setPromptQuery('');
@@ -285,7 +286,9 @@ export default function ModelChatModal({
         // 上次在这个站点 + 模型上选过的协议与思考强度，直接恢复。
         const preference = res?.preference;
         if (preference) {
-          setApiMode(preference.apiMode === 'responses' ? 'responses' : 'chat');
+          // 没存过偏好就保持上面设的默认值（responses）；
+          // 存过的按存的那套发，避免老站点被默认值改坏。
+          setApiMode(preference.apiMode === 'chat' ? 'chat' : 'responses');
           setReasoningEffort(preference.reasoningEffort || '');
         }
       })
@@ -523,7 +526,36 @@ export default function ModelChatModal({
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // 这一轮的测活数据：首字、总用时、完整回答。跑完回写到模型监控，
+    // 每个「站点 + 模型」只保留最新一条。
+    const requestStartedAt = Date.now();
+    let firstByteMs: number | null = null;
+    let answerText = '';
+    let streamError: string | null = null;
+    const recordProbe = (
+      status: 'success' | 'failed' | 'cancelled',
+      errorMessage?: string | null,
+    ) => {
+      const siteId = target?.siteId;
+      if (isGateway || typeof siteId !== 'number' || siteId <= 0) return;
+      // 「已停止」不算一次有效结论，别把上一次正常结果覆盖掉。
+      if (status === 'cancelled') return;
+      void api.saveModelProbeResult({
+        siteId,
+        model: target!.modelName,
+        source: autoTest ? 'test' : 'chat',
+        status,
+        firstByteMs,
+        durationMs: Date.now() - requestStartedAt,
+        apiMode,
+        reasoningEffort: reasoningEffort || null,
+        answer: answerText || null,
+        errorMessage: errorMessage ?? null,
+      }).catch(() => undefined);
+    };
+
     const applyDelta = (patch: { content?: string; reasoning?: string }) => {
+      if (patch.content) answerText += patch.content;
       setMessages((prev) => {
         const copy = [...prev];
         const last = copy[copy.length - 1];
@@ -603,6 +635,7 @@ export default function ModelChatModal({
         const { done, value } = await reader.read();
         if (done) break;
         if (!value) continue;
+        if (firstByteMs == null) firstByteMs = Date.now() - requestStartedAt;
         buffer += decoder.decode(value, { stream: true });
         const blocks = buffer.split(/\r?\n\r?\n/);
         buffer = blocks.pop() || '';
@@ -667,10 +700,14 @@ export default function ModelChatModal({
       });
       // 发完再查一次：如果这一轮暴露了「顺序和预期不一样」，刷新后的预览就是当场对账。
       if (isGateway) void loadRoutePreview();
+      recordProbe('success');
     } catch (error: any) {
-      const message = error?.name === 'AbortError'
+      const aborted = error?.name === 'AbortError';
+      const message = aborted
         ? tr('已停止')
         : String(error?.message || tr('请求失败'));
+      streamError = message;
+      recordProbe(aborted ? 'cancelled' : 'failed', message);
       setMessages((prev) => {
         const copy = [...prev];
         const last = copy[copy.length - 1];
@@ -685,7 +722,7 @@ export default function ModelChatModal({
       abortRef.current = null;
       setSending(false);
     }
-  }, [input, sending, target, messages, credentials, credentialKey, toast, isGateway, reasoningEffort, apiMode, loadRoutePreview]);
+  }, [input, sending, target, messages, credentials, credentialKey, toast, isGateway, reasoningEffort, apiMode, autoTest, loadRoutePreview]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();

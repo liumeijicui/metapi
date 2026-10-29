@@ -6109,6 +6109,97 @@ a.model-monitor-site-name:hover {
 }
 
 /* 模型监控卡片 / 表格行里的操作按钮（对话 + 挂到转发）。 */
+/* 最近一次测活结果：状态 + 首字 + 用时 + 相对时间，回答只留一个图标。 */
+.model-monitor-probe {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.model-monitor-probe em {
+  font-style: normal;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-right: 3px;
+}
+
+.model-monitor-probe .badge {
+  font-size: 10.5px;
+  padding: 0 6px;
+}
+
+.model-monitor-probe-empty {
+  color: var(--color-text-muted);
+}
+
+.model-monitor-probe-answer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-bg-card));
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.model-monitor-probe-answer:hover,
+.model-monitor-probe-answer:focus-visible {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--color-bg-card));
+  border-color: color-mix(in srgb, var(--color-primary) 50%, transparent);
+  outline: none;
+}
+
+.model-monitor-probe-pop {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.18));
+  overflow: hidden;
+}
+
+.model-monitor-probe-pop-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.model-monitor-probe-pop-head strong {
+  font-size: 12px;
+  color: var(--color-text-primary);
+  word-break: break-all;
+}
+
+.model-monitor-probe-pop-body {
+  margin: 0;
+  flex: 0 1 auto;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
 .model-monitor-card-actions,
 .model-monitor-row-actions {
   display: flex;

@@ -21,6 +21,10 @@ import {
   saveModelChatPreference,
 } from '../../services/modelChatPreferenceService.js';
 import {
+  saveModelProbeResult,
+  type ModelProbeResultView,
+} from '../../services/modelProbeResultService.js';
+import {
   CodexConfigSyncError,
   syncCodexDirectConfig,
 } from '../../services/codexConfigSyncService.js';
@@ -160,6 +164,52 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
   });
 
   /**
+   * 对话 / 测试 / 批量测试跑完回写一条结果。
+   * 每个「站点 + 模型」只保留最新一条，由服务端 upsert 保证。
+   */
+  app.put<{
+    Body: {
+      siteId?: number;
+      model?: string;
+      source?: string;
+      status?: string;
+      firstByteMs?: number | null;
+      durationMs?: number | null;
+      apiMode?: string | null;
+      reasoningEffort?: string | null;
+      answer?: string | null;
+      errorMessage?: string | null;
+    };
+  }>('/api/model-monitor/probe-result', async (request, reply) => {
+    const body = request.body || {};
+    const siteId = Math.trunc(Number(body.siteId) || 0);
+    const model = String(body.model || '').trim();
+    if (siteId <= 0 || !model) {
+      return reply.code(400).send({ success: false, message: 'siteId 和 model 不能为空' });
+    }
+    try {
+      const result: ModelProbeResultView = await saveModelProbeResult({
+        siteId,
+        modelName: model,
+        source: body.source,
+        status: body.status,
+        firstByteMs: body.firstByteMs,
+        durationMs: body.durationMs,
+        apiMode: body.apiMode,
+        reasoningEffort: body.reasoningEffort,
+        answer: body.answer,
+        errorMessage: body.errorMessage,
+      });
+      return { success: true, result };
+    } catch (error) {
+      return reply.code(400).send({
+        success: false,
+        message: error instanceof Error ? error.message : '保存测试结果失败',
+      });
+    }
+  });
+
+  /**
    * 直连对话：用「站点 + 账号 + 凭据」直接打上游，和路由配置完全无关。
    * 请求体里的 model 就是页面点中的那个，不做任何模型名改写。
    */
@@ -193,7 +243,9 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     if (reasoningEffort && !allowedReasoningEfforts.includes(reasoningEffort)) {
       return reply.code(400).send({ error: { message: `思考强度不合法：${reasoningEffort}` } });
     }
-    const apiMode = normalizeModelChatApiMode(body.apiMode) || 'chat';
+    // 默认走 Responses：模型监控里点的对话/测试都是 Codex 那条链路，
+    // 页面上没有单独选择时按 responses 发。
+    const apiMode = normalizeModelChatApiMode(body.apiMode) || 'responses';
     if (siteId <= 0 || accountId <= 0 || !model) {
       return reply.code(400).send({ error: { message: 'siteId / accountId / model 不能为空' } });
     }

@@ -303,8 +303,12 @@ apply_layout() {
 case "$SITE" in
   *kktoken.cc*) apply_layout kkt ;;
   *motomoto.lol*) apply_layout moto ;;
-  *5201201314*) apply_layout rc ;;
-  *chinahk.qzz.io*) apply_layout chinahk ;;
+  # chinahk 换过两次域名（chinahk.qzz.io → sunapi.5201201314.top）。新域名曾经
+  # 落到 `rc` 预设上：那份坐标是 16px 偏下的测量值，点击落在输入框下边界之外，
+  # 密码根本没进表单，Turnstile 却照样能过，于是整轮看起来"登录了但仍是未登录"，
+  # 每天 401。域名换了布局没换，所以这里两个域名都必须走 chinahk 预设（带 DOM
+  # 定位，坐标只作兜底）。
+  *5201201314*|*chinahk.qzz.io*) apply_layout chinahk ;;
   *bxacc.xyz*) apply_layout ark ;;
   *justwoker.icu*) apply_layout jdw ;;
   *aapi.ssite.site*) apply_layout supra ;;

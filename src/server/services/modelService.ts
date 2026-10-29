@@ -46,6 +46,7 @@ import {
   validateGeminiCliOauthConnection,
 } from './platformDiscoveryRegistry.js';
 import { probeRuntimeModel, type RuntimeModelProbeStatus } from './runtimeModelProbe.js';
+import { resolveSiteModelDiscoveryTimeoutMs } from './siteProfiles.js';
 
 const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
@@ -1209,6 +1210,11 @@ async function runRefreshModelsForAccount(
     });
   }
 
+  const modelDiscoveryTimeoutMs = resolveSiteModelDiscoveryTimeoutMs(
+    site.url || aiBaseUrl,
+    MODEL_DISCOVERY_TIMEOUT_MS,
+  );
+
   const accountModels = new Map<string, string>();   // lowercase key → original name (first-wins)
   const modelLatency = new Map<string, number | null>();
   const modelContextRefreshScope = `${modelContextScope}:refresh:${randomUUID()}`;
@@ -1265,8 +1271,8 @@ async function runRefreshModelsForAccount(
         await withTimeout(
           () => withAccountProxyOverride(accountProxyUrl,
             () => adapter.getModels(aiBaseUrl, credential, platformUserId, credentialContextScope)),
-          MODEL_DISCOVERY_TIMEOUT_MS,
-          `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+          modelDiscoveryTimeoutMs,
+          `model discovery timeout (${Math.round(modelDiscoveryTimeoutMs / 1000)}s)`,
           () => clearModelContextLengthCache(credentialContextScope),
         ),
       );
@@ -1297,8 +1303,8 @@ async function runRefreshModelsForAccount(
         await withTimeout(
           () => withAccountProxyOverride(accountProxyUrl,
             () => adapter.getModels(aiBaseUrl, token.token, platformUserId, tokenContextScope)),
-          MODEL_DISCOVERY_TIMEOUT_MS,
-          `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+          modelDiscoveryTimeoutMs,
+          `model discovery timeout (${Math.round(modelDiscoveryTimeoutMs / 1000)}s)`,
           () => clearModelContextLengthCache(tokenContextScope),
         ),
       );

@@ -267,6 +267,13 @@
       "when": 1793062595925,
       "tag": "0037_lazy_luckman",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1793119736929,
+      "tag": "0038_fair_shard",
+      "breakpoints": true
     }
   ]
 }

@@ -501,10 +501,32 @@ export function createAssistedLoginSession(input: {
     for (const locator of triggers) {
       if (await clickWhenVisible(locator, 3_000)) {
         await settle(page, 2_500);
+        await passLoginSecurityVerification(page);
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * Clears the Cloudflare interstitial some sites put between the login button
+   * and the login form.
+   *
+   * 皮皮智绘 answers the click with `/api/v1/security/verify?action=login` - a
+   * Turnstile page with no links or buttons of its own. Nothing on it matches an
+   * OAuth entry, so the capture used to report "没有找到 Linux.do 登录入口" while
+   * the site was simply waiting to be let through. The widget is answered with a
+   * real pointer click (the same helper the consent page uses) and the page then
+   * redirects to the form on its own.
+   */
+  async function passLoginSecurityVerification(page: import('playwright-core').Page): Promise<void> {
+    if (!/\/security\/verify/i.test(page.url())) return;
+    await passCloudflareChallenge(page);
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && /\/security\/verify/i.test(page.url())) {
+      await page.waitForTimeout(1_000).catch(() => undefined);
+    }
+    await settle(page, 1_500);
   }
 
   /** Entry locator; the shape matching and the content-link filter live in `entryMatch`. */

@@ -6,6 +6,7 @@ import { useIsMobile } from './useIsMobile.js';
 import { tr } from '../i18n.js';
 import {
   createModelBatchSseParser,
+  interleaveModelBatchTargets,
   readModelBatchErrorResponse,
   runModelBatchTestQueue,
   type ModelBatchTestCompleted,
@@ -220,23 +221,42 @@ export default function ModelBatchTestModal({ open, models, onClose }: Props) {
       return { status: 'cancelled', firstByteMs: null, durationMs: Date.now() - startedAt, message: '已停止', preview: '' };
     }
 
+    const preference = (channels as any)?.preference;
+    // 没有保存过偏好时默认 Responses：和 Codex 那边保持同一条链路。
+    const apiMode = preference?.apiMode === 'chat' ? 'chat' : 'responses';
+    const reasoningEffort = typeof preference?.reasoningEffort === 'string'
+      ? preference.reasoningEffort
+      : '';
+
+    /** 每跑完一个模型就回写一条「最新结果」，模型监控页直接展示。 */
+    const record = (result: ModelBatchTestResult): ModelBatchTestResult => {
+      if (result.status === 'cancelled') return result;
+      void api.saveModelProbeResult({
+        siteId: target.siteId,
+        model: target.modelName,
+        source: 'batch',
+        status: result.status,
+        firstByteMs: result.firstByteMs,
+        durationMs: result.durationMs,
+        apiMode,
+        reasoningEffort: reasoningEffort || null,
+        answer: result.preview || null,
+        errorMessage: result.status === 'failed' ? result.message : null,
+      }).catch(() => undefined);
+      return result;
+    };
+
     const credentials = Array.isArray((channels as any)?.credentials) ? (channels as any).credentials : [];
     const credential = credentials.find((item: any) => Number(item?.accountId) > 0);
     if (!credential) {
-      return {
+      return record({
         status: 'failed',
         firstByteMs: null,
         durationMs: Date.now() - startedAt,
         message: '该站点没有可用于直连的账号或密钥',
         preview: '',
-      };
+      });
     }
-
-    const preference = (channels as any)?.preference;
-    const apiMode = preference?.apiMode === 'responses' ? 'responses' : 'chat';
-    const reasoningEffort = typeof preference?.reasoningEffort === 'string'
-      ? preference.reasoningEffort
-      : '';
 
     const response = await api.directChatStream({
       siteId: target.siteId,
@@ -252,22 +272,22 @@ export default function ModelBatchTestModal({ open, models, onClose }: Props) {
       return { status: 'cancelled', firstByteMs: null, durationMs: Date.now() - startedAt, message: '已停止', preview: '' };
     }
     if (!response.ok) {
-      return {
+      return record({
         status: 'failed',
         firstByteMs: null,
         durationMs: Date.now() - startedAt,
         message: await readModelBatchErrorResponse(response),
         preview: '',
-      };
+      });
     }
     if (!response.body) {
-      return {
+      return record({
         status: 'failed',
         firstByteMs: null,
         durationMs: Date.now() - startedAt,
         message: '流式响应体为空',
         preview: '',
-      };
+      });
     }
 
     const reader = response.body.getReader();
@@ -314,31 +334,31 @@ export default function ModelBatchTestModal({ open, models, onClose }: Props) {
       };
     }
     if (parsed.error) {
-      return {
+      return record({
         status: 'failed',
         firstByteMs,
         durationMs: Date.now() - startedAt,
         message: parsed.error,
         preview: parsed.preview,
-      };
+      });
     }
     if (bytes === 0) {
-      return {
+      return record({
         status: 'failed',
         firstByteMs: null,
         durationMs: Date.now() - startedAt,
         message: '上游没有返回任何内容',
         preview: '',
-      };
+      });
     }
 
-    return {
+    return record({
       status: 'success',
       firstByteMs,
       durationMs: Date.now() - startedAt,
       message: '测试成功',
       preview: parsed.preview,
-    };
+    });
   }, []);
 
   const start = useCallback(async () => {
@@ -362,8 +382,11 @@ export default function ModelBatchTestModal({ open, models, onClose }: Props) {
     setRows(Object.fromEntries(selectedModels.map((model) => [model.key, { status: 'pending' as const }])));
 
     try {
+      // 按站点打散后再测：勾选的模型可能同一站占一大半，连着打过去最容易
+      // 触发上游风控/会话限制。勾选顺序本身不动，只调整实际执行顺序。
+      const targets = interleaveModelBatchTargets(selectedModels);
       const completed = await runModelBatchTestQueue({
-        targets: selectedModels,
+        targets,
         signal: controller.signal,
         runOne: (target, signal) => executeOne(target, prompt, signal),
         onStart: (target) => {

@@ -369,7 +369,8 @@ export async function requestSiteDirectChat(input: SiteDirectChatInput): Promise
   const { site, account, tokenValue } = resolved;
 
   const stream = input.stream !== false;
-  const apiMode: ModelChatApiMode = input.apiMode === 'responses' ? 'responses' : 'chat';
+  // 没传协议时默认 Responses：模型监控的对话/测试默认按 Codex 那条链路发。
+  const apiMode: ModelChatApiMode = input.apiMode === 'chat' ? 'chat' : 'responses';
   // 页面选中的思考强度之类的字段，原样透传（openai 协议下就是 chat/completions 的顶层字段）。
   const extraBody = input.extraBody && typeof input.extraBody === 'object' ? input.extraBody : {};
   const openaiBody: Record<string, unknown> = {

@@ -1052,6 +1052,82 @@
         }
       }
     },
+    "model_probe_results": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "first_byte_ms": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "duration_ms": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "api_mode": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "reasoning_effort": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "answer": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "error_message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        }
+      }
+    },
     "oauth_route_unit_members": {
       "columns": {
         "id": {
@@ -3403,6 +3479,31 @@
       "unique": false
     },
     {
+      "name": "model_probe_results_created_at_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_site_id_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_site_model_unique",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -4029,6 +4130,14 @@
       ]
     },
     {
+      "name": "model_probe_results_site_model_unique",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id",
+        "model_name"
+      ]
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -4266,6 +4375,17 @@
         "id"
       ],
       "onDelete": "SET NULL"
+    },
+    {
+      "table": "model_probe_results",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
     },
     {
       "table": "oauth_route_unit_members",

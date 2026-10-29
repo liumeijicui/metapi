@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createModelBatchSseParser,
+  interleaveModelBatchTargets,
   runModelBatchTestQueue,
   type ModelBatchTestResult,
   type ModelBatchTestTarget,
@@ -81,5 +82,39 @@ describe('modelMonitorBatchTest', () => {
     const failedParser = createModelBatchSseParser();
     failedParser.push('data: {"error":{"message":"限流了"}}\n\n');
     expect(failedParser.getError()).toBe('限流了');
+  });
+
+  it('打散同一个站点的模型，相邻两项不来自同一站点', () => {
+    const targets: ModelBatchTestTarget[] = [
+      { key: 'a1', siteId: 1, siteName: 'A', modelName: 'a-1' },
+      { key: 'a2', siteId: 1, siteName: 'A', modelName: 'a-2' },
+      { key: 'a3', siteId: 1, siteName: 'A', modelName: 'a-3' },
+      { key: 'b4', siteId: 2, siteName: 'B', modelName: 'b-1' },
+      { key: 'b5', siteId: 2, siteName: 'B', modelName: 'b-2' },
+      { key: 'c6', siteId: 3, siteName: 'C', modelName: 'c-1' },
+    ];
+
+    const ordered = interleaveModelBatchTargets(targets, () => 0.42);
+
+    expect([...ordered].sort((left, right) => left.key.localeCompare(right.key)))
+      .toEqual([...targets].sort((left, right) => left.key.localeCompare(right.key)));
+    for (let index = 1; index < ordered.length; index += 1) {
+      expect(ordered[index].siteId).not.toBe(ordered[index - 1].siteId);
+    }
+  });
+
+  it('站点数量不足时仍保持全部目标，且不丢模型', () => {
+    const targets: ModelBatchTestTarget[] = [
+      { key: 'a1', siteId: 1, siteName: 'A', modelName: 'a-1' },
+      { key: 'a2', siteId: 1, siteName: 'A', modelName: 'a-2' },
+      { key: 'a3', siteId: 1, siteName: 'A', modelName: 'a-3' },
+      { key: 'a4', siteId: 1, siteName: 'A', modelName: 'a-4' },
+      { key: 'b5', siteId: 2, siteName: 'B', modelName: 'b-1' },
+    ];
+
+    const ordered = interleaveModelBatchTargets(targets, () => 0.1);
+    expect(ordered).toHaveLength(targets.length);
+    // 只有一个站点占多数时无法完全避开，但开头两轮就要轮到 B，不能先把 A 全打完。
+    expect(ordered.slice(0, 2).some((item) => item.siteId === 2)).toBe(true);
   });
 });

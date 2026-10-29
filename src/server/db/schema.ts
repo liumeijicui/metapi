@@ -109,6 +109,35 @@ export const siteModelMonitorModels = sqliteTable('site_model_monitor_models', {
   modelNameIdx: index('site_model_monitor_models_model_name_idx').on(table.modelName),
 }));
 
+/**
+ * 模型监控里「对话 / 测试 / 批量测试」的最近一次结果。
+ *
+ * 每个「站点 + 模型」只保留最新一条（唯一索引 + upsert），页面直接读这张表，
+ * 所以不会越攒越多。回答正文可能很长，落库时截断到固定上限。
+ */
+export const modelProbeResults = sqliteTable('model_probe_results', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  modelName: text('model_name').notNull(),
+  /** 这次结果是谁跑出来的：对话 / 测试（默认提示词）/ 批量测试。 */
+  source: text('source').notNull(),
+  /** success | failed | cancelled */
+  status: text('status').notNull(),
+  firstByteMs: integer('first_byte_ms'),
+  durationMs: integer('duration_ms'),
+  /** 发请求时用的接口协议（chat / responses）与思考强度，便于复现。 */
+  apiMode: text('api_mode'),
+  reasoningEffort: text('reasoning_effort'),
+  /** 回答正文，超长时截断；页面上以图标 + 悬浮全文展示。 */
+  answer: text('answer'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+}, (table) => ({
+  siteModelUnique: uniqueIndex('model_probe_results_site_model_unique').on(table.siteId, table.modelName),
+  siteIdIdx: index('model_probe_results_site_id_idx').on(table.siteId),
+  createdAtIdx: index('model_probe_results_created_at_idx').on(table.createdAt),
+}));
+
 export const accounts = sqliteTable('accounts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),

@@ -136,6 +136,63 @@ describe('Sub2ApiAdapter', () => {
     expect(result.message).toContain('今日已签到');
   });
 
+  it('checks in through the root-level /checkin routes used by ChatflowsAI', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      // Every `/api/v1` spelling is absent on this deployment.
+      if ((req.url || '').startsWith('/api/v1/')) {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/checkin/status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          data: { can_checkin: true, checked_in: false, amount: 50, reset_hour: 12 },
+        }));
+        return;
+      }
+      if (req.url === '/api/checkin' && req.method === 'POST') {
+        posted = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { amount: 50, balance: 100 } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(true);
+    expect(result).toMatchObject({ success: true, reward: '50' });
+  });
+
+  it('reads the already-claimed period from the root-level checkin status', async () => {
+    let posted = false;
+    await startServer((req, res) => {
+      if ((req.url || '').startsWith('/api/v1/')) {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.url === '/api/checkin/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          data: { can_checkin: false, checked_in: true, checked_in_at: '2026-10-29T13:01:51Z' },
+        }));
+        return;
+      }
+      if (req.url === '/api/checkin') posted = true;
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(posted).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('今日已签到');
+  });
+
   it('checks in through the checkin-spelling routes used by customized Sub2API forks', async () => {
     let posted = false;
     await startServer((req, res) => {

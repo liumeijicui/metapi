@@ -24,6 +24,50 @@ export function buildModelBatchTestKey(siteId: number, modelName: string): strin
   return `${siteId}:${modelName}`;
 }
 
+/**
+ * 把待测模型按站点打散，避免连续对同一个站点测活。
+ *
+ * 做法是「站点分组 + 组内打乱 + 按站点轮转」：同一站点最多隔一轮就轮到别的
+ * 站点。直接全局 shuffle 不够——同一个站点的模型偶尔还会挨在一起；轮转能保证
+ * 只要不是单个站点独占全部目标，相邻两项一定来自不同站点。
+ *
+ * `random` 可注入，测试里传固定种子函数即可得到稳定结果。
+ */
+export function interleaveModelBatchTargets<T extends { siteId: number }>(
+  targets: T[],
+  random: () => number = Math.random,
+): T[] {
+  if (targets.length <= 2) return [...targets];
+
+  const groups = new Map<number, T[]>();
+  // 站点出现顺序也打乱：否则每次都是「第一个站点先测」，风控特征太明显。
+  for (const target of targets) {
+    const list = groups.get(target.siteId);
+    if (list) list.push(target);
+    else groups.set(target.siteId, [target]);
+  }
+
+  const shuffle = <U,>(list: U[]): U[] => {
+    const copy = [...list];
+    for (let index = copy.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(random() * (index + 1));
+      [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+    }
+    return copy;
+  };
+
+  const queues = shuffle(Array.from(groups.values()).map((group) => shuffle(group)));
+  const result: T[] = [];
+  let cursor = 0;
+  while (queues.some((queue) => queue.length > 0)) {
+    const queue = queues[cursor % queues.length];
+    const next = queue.shift();
+    if (next) result.push(next);
+    cursor += 1;
+  }
+  return result;
+}
+
 function abortResult(durationMs: number): ModelBatchTestResult {
   return {
     status: 'cancelled',

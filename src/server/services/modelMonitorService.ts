@@ -1,6 +1,11 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
+import {
+  buildModelProbeKey,
+  loadModelProbeResultMap,
+  type ModelProbeResultView,
+} from './modelProbeResultService.js';
 import { matchesModelPattern } from './tokenRouter.js';
 import { getAdapter } from './platforms/index.js';
 import {
@@ -99,6 +104,8 @@ export type ModelMonitorModelView = {
   inputPrice: number | null;
   outputPrice: number | null;
   fetchedAt: string | null;
+  /** 最近一次「对话 / 测试 / 批量测试」的结果，每个站点+模型只保留最新一条。 */
+  lastProbe: ModelProbeResultView | null;
 };
 
 export type ModelMonitorOverview = {
@@ -1363,6 +1370,9 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     ? modelRows.filter((row) => resolveModelFamily(row.modelName) === familyFilter)
     : modelRows;
 
+  // 最近一次测活结果按「站点 + 模型」关联：每个组合只有一条，页面直接展示。
+  const probeMap = await loadModelProbeResultMap(visibleRows.map((row) => row.siteId));
+
   const models: ModelMonitorModelView[] = visibleRows.map((row) => ({
     siteId: row.siteId,
     siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
@@ -1381,6 +1391,7 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     inputPrice: row.inputPrice,
     outputPrice: row.outputPrice,
     fetchedAt: row.fetchedAt,
+    lastProbe: probeMap.get(buildModelProbeKey(row.siteId, row.modelName)) ?? null,
   }));
 
   const sortKey = String(filter.sort || 'success').trim();

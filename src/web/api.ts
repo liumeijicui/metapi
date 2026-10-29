@@ -1731,6 +1731,27 @@ export const api = {
       body: JSON.stringify(payload),
       timeoutMs: 30_000,
     }),
+  /**
+   * 回写一条「最近一次测活结果」：对话 / 测试 / 批量测试共用。
+   * 服务端按「站点 + 模型」upsert，每个组合只保留最新一条。
+   */
+  saveModelProbeResult: (payload: {
+    siteId: number;
+    model: string;
+    source: 'chat' | 'test' | 'batch';
+    status: 'success' | 'failed' | 'cancelled';
+    firstByteMs?: number | null;
+    durationMs?: number | null;
+    apiMode?: string | null;
+    reasoningEffort?: string | null;
+    answer?: string | null;
+    errorMessage?: string | null;
+  }) =>
+    request<{ success: boolean; result?: unknown }>("/api/model-monitor/probe-result", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      timeoutMs: 15_000,
+    }),
 
   // 提示词管理：题库（suite）+ 题目（case），题目可带标准答案或评分要点
   getPromptSuites: () =>

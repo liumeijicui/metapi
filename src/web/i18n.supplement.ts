@@ -923,6 +923,7 @@ export const zhToEnSupplemental: Record<string, string> = {
   '无采样': 'no samples',
   '刚刚': 'just now',
   '分钟前': 'min ago',
+  '秒前': 's ago',
   '小时前': 'h ago',
   '天前': 'd ago',
   '尚未采集': 'Not collected yet',
@@ -1070,4 +1071,10 @@ export const zhToEnSupplemental: Record<string, string> = {
   '选中左侧模型后，测试结果和完整回复会显示在这里。': 'Select a model on the left to see its test result and full reply here.',
   '个，确定继续？': 'models (one quota unit each). Continue?',
   '全选会为每个模型各消耗一次额度，共': 'Selecting all consumes one quota unit per model —',
+  // ==== 模型监控：最近一次测活结果 ====
+  '查看回答': 'View reply',
+  '最近测试': 'Last test',
+  '最近一次测活结果': 'Latest test result',
+  '首次拿到响应内容的时间': 'Time until the first response content arrived',
+  '整轮测试的总耗时': 'Total duration of this test',
 };

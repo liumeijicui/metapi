@@ -12,6 +12,7 @@ import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dai
 import { cleanupConfiguredLogs } from './logCleanupService.js';
 import { formatLocalDate } from './localTimeService.js';
 import { normalizeLogCleanupRetentionDays } from '../shared/logCleanupRetentionDays.js';
+import { resolveSiteCheckinDayStartHour } from './siteProfiles.js';
 
 export type CheckinScheduleMode = 'cron' | 'interval';
 
@@ -59,6 +60,8 @@ type CheckinTarget = {
   siteId: number;
   siteName: string;
   accountIds: number[];
+  /** Site origin, used to recognise registries whose check-in day rolls over late. */
+  siteUrl?: string;
 };
 
 async function resolveJsonSetting<T>(
@@ -160,6 +163,23 @@ export function computeCheckinSiteDelaySeconds(
   return Math.floor((raw / HASH_48_BIT_MODULUS) * windowSeconds);
 }
 
+/**
+ * When the day's jitter window opens for one site.
+ *
+ * Normally that is the moment the plan is built (the first hourly tick after
+ * local midnight). A registry whose check-in day starts at 08:00 is different:
+ * visiting it before its own roll-over only re-confirms yesterday, so its
+ * window opens just after that hour - still jittered, still inside the same
+ * window length, just anchored to the day it is actually claiming.
+ */
+function resolveCheckinWindowStartMs(now: Date, siteUrl?: string): number {
+  const lateHour = resolveSiteCheckinDayStartHour(siteUrl);
+  if (lateHour == null) return now.getTime();
+  const dayStart = new Date(now.getTime());
+  dayStart.setHours(lateHour, 5, 0, 0);
+  return Math.max(now.getTime(), dayStart.getTime());
+}
+
 export function buildCheckinDailyPlan(input: {
   now: Date;
   windowMinutes: number;
@@ -179,7 +199,9 @@ export function buildCheckinDailyPlan(input: {
       siteId: target.siteId,
       siteName: target.siteName,
       accountIds: [...target.accountIds],
-      scheduledAt: new Date(baseMs + delaySeconds * 1000).toISOString(),
+      scheduledAt: new Date(
+        resolveCheckinWindowStartMs(input.now, target.siteUrl) + delaySeconds * 1000,
+      ).toISOString(),
       status: 'pending' as const,
     };
   }).sort((a, b) => {
@@ -219,6 +241,7 @@ async function loadCheckinTargets(): Promise<CheckinTarget[]> {
       siteId,
       siteName: String(row.sites.name || `站点 ${siteId}`),
       accountIds: [],
+      siteUrl: String(row.sites.url || ''),
     };
     current.accountIds.push(accountId);
     grouped.set(siteId, current);

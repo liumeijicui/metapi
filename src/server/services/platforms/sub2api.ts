@@ -872,6 +872,10 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       { label: 'check-in', statusPath: '/api/v1/check-in/status', claimPath: '/api/v1/check-in', claimBody: { turnstile_token: '' } },
       { label: 'checkin', statusPath: '/api/v1/checkin/status', claimPath: '/api/v1/checkin' },
       { label: 'user', statusPath: '/api/v1/user/check-in', claimPath: '/api/v1/user/check-in' },
+      // ChatflowsAI (ai.chatflowsai.com) serves its check-in from the public
+      // site root rather than under `/api/v1`, and takes its day boundary from
+      // the deployment's own `reset_hour` (12:00 there) instead of midnight.
+      { label: 'daily', statusPath: '/api/checkin/status', claimPath: '/api/checkin' },
     ];
 
     let status: any;
@@ -905,6 +909,17 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     if (status?.enabled === false) {
       return { success: false, message: '站点签到未启用' };
     }
+    // The `daily` dialect states the verdict positively: `can_checkin` is false
+    // for the rest of the period, whether that is because the reward was already
+    // taken or because the period has not opened yet.
+    if (dialect.label === 'daily' && status?.can_checkin === false) {
+      return {
+        success: false,
+        message: status?.checked_in === false || status?.checked_in_at
+          ? '今日已签到'
+          : '本轮签到尚未开放',
+      };
+    }
     if (status?.checked_in_today === true || status?.checked_in === true) {
       return { success: false, message: '今日已签到' };
     }
@@ -934,6 +949,11 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       }
       if (raw.includes('CHECK_IN_CAPTCHA') || raw.includes('CAPTCHA_REQUIRED')) {
         return { success: false, message: '站点开启了人机校验，需要人工完成签到' };
+      }
+      // A 409 from the `daily` dialect arrives as its own Chinese sentence; it
+      // is the period's verdict, not a failed request.
+      if (dialect.label === 'daily' && /已签到|已经签到/.test(raw)) {
+        return { success: false, message: '今日已签到' };
       }
       return { success: false, message: `check-in failed: ${raw}` };
     }

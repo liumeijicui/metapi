@@ -75,6 +75,74 @@ export function siteUrlRequiresSystemProxy(rawUrl: string | null | undefined): b
 }
 
 /**
+ * Sites whose check-in day does not start at local midnight.
+ *
+ * Most New API forks mint a per-day check-in record keyed on the server's own
+ * local midnight. A few count the day in UTC instead, which is 08:00 at
+ * +08:00: between midnight and 08:00 they are still serving *yesterday's*
+ * verdict. happycoding.xyz is one of them — its check-in succeeds at 08:08 and
+ * answers `今日已签到` all the way from 09:00 back to 00:08 the next night, which
+ * is only possible if the boundary sits at 08:00.
+ *
+ * This matters because the daily plan is built at 00:08 local and finishes
+ * within its 90-minute window: such a site would be visited while it still
+ * believes it is yesterday, so the run "succeeds" for the previous day and the
+ * site shows 未签到 for the whole of the new one. Scheduling those hosts after
+ * their own roll-over is what makes the daily grant actually land today.
+ */
+const SITE_CHECKIN_DAY_START_HOURS: ReadonlyArray<{ host: string; hour: number }> = [
+  { host: 'happycoding.xyz', hour: 8 },
+  // ChatflowsAI 每轮签到在北京时间 12:00 才开放（`/api/checkin/status` 直接回
+  // `reset_hour: 12`，`next_reset_at` 也是次日 12:00）。00:08 的计划只能落在
+  // 前一轮里，站点当天会一直显示未签到。
+  { host: 'ai.chatflowsai.com', hour: 12 },
+];
+
+/** Local hour the site's check-in day rolls over, or null for a midnight site. */
+export function resolveSiteCheckinDayStartHour(rawUrl: string | null | undefined): number | null {
+  let host = '';
+  try {
+    host = normalizeHost(new URL(String(rawUrl || '')).host);
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+  const match = SITE_CHECKIN_DAY_START_HOURS.find(
+    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+  );
+  return match ? match.hour : null;
+}
+
+/**
+ * Sites whose model listing is much slower than the default discovery budget.
+ *
+ * ChatflowsAI answers `/v1/models` in 40-50 seconds even when the key is valid,
+ * so the generic 12s timeout treated every refresh as a failure and the site
+ * never got any models. Give only this host a larger budget instead of slowing
+ * down discovery for every other site.
+ */
+const SITE_MODEL_DISCOVERY_TIMEOUT_MS: ReadonlyArray<{ host: string; timeoutMs: number }> = [
+  { host: 'ai.chatflowsai.com', timeoutMs: 90_000 },
+];
+
+export function resolveSiteModelDiscoveryTimeoutMs(
+  rawUrl: string | null | undefined,
+  fallbackMs: number,
+): number {
+  let host = '';
+  try {
+    host = normalizeHost(new URL(String(rawUrl || '')).host);
+  } catch {
+    return fallbackMs;
+  }
+  if (!host) return fallbackMs;
+  const match = SITE_MODEL_DISCOVERY_TIMEOUT_MS.find(
+    (entry) => host === entry.host || host.endsWith(`.${entry.host}`),
+  );
+  return match ? match.timeoutMs : fallbackMs;
+}
+
+/**
  * Inference-endpoint client fingerprint requirement.
  *
  * agentrouter.org gates its **inference** API (`/v1/models`, `/v1/chat/completions`,

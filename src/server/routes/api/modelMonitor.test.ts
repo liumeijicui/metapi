@@ -130,6 +130,64 @@ describe('model monitor routes', () => {
     expect(other.json().preference).toBeNull();
   });
 
+  it('保存最近一次测活结果并只保留最新一条，总览里能直接读到', async () => {
+    const site = await db.select().from(schema.sites).get();
+    const first = await app.inject({
+      method: 'PUT',
+      url: '/api/model-monitor/probe-result',
+      payload: {
+        siteId: site!.id,
+        model: 'gpt-5.5',
+        source: 'chat',
+        status: 'failed',
+        durationMs: 900,
+        apiMode: 'responses',
+        errorMessage: '上游 500',
+      },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: 'PUT',
+      url: '/api/model-monitor/probe-result',
+      payload: {
+        siteId: site!.id,
+        model: 'gpt-5.5',
+        source: 'batch',
+        status: 'success',
+        firstByteMs: 1200,
+        durationMs: 4300,
+        apiMode: 'responses',
+        answer: '正常',
+      },
+    });
+    expect(second.statusCode).toBe(200);
+
+    const rows = await db.select().from(schema.modelProbeResults).all();
+    expect(rows).toHaveLength(1);
+
+    const overview = await app.inject({ method: 'GET', url: '/api/model-monitor/overview' });
+    const model = overview.json().models.find((row: any) => row.modelName === 'gpt-5.5');
+    expect(model.lastProbe).toMatchObject({
+      status: 'success',
+      source: 'batch',
+      firstByteMs: 1200,
+      durationMs: 4300,
+      answer: '正常',
+    });
+    const untouched = overview.json().models.find((row: any) => row.modelName === 'grok-4.5');
+    expect(untouched.lastProbe).toBeNull();
+  });
+
+  it('测活结果缺少站点或模型时返回 400', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/model-monitor/probe-result',
+      payload: { siteId: 0, model: '' },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it('rejects unknown sort keys by falling back to success rate', async () => {
     const response = await app.inject({
       method: 'GET',

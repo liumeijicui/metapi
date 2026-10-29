@@ -155,6 +155,37 @@ describe('autoRelogin', () => {
     }));
   });
 
+  it('reports the browser run\'s own verdict when it never signs in', async () => {
+    // A profile that ends on the sign-in page has a sentence for why (the form
+    // was not where the script looked, Turnstile never cleared). Keeping it is
+    // what separates a layout bug from a genuinely dead credential.
+    adapterMock.login.mockResolvedValue({ success: false, message: 'Turnstile token 为空' });
+    decryptPasswordMock.mockReturnValue('liyaodong7238508');
+    browserSessionMock.mockResolvedValue({
+      outcome: {
+        kind: 'result',
+        result: { success: false, message: '浏览器签到未完成：sign-in never reached the profile page' },
+        logDir: '/logs',
+        profileDir: '/profile',
+        signedIn: false,
+      },
+      accessToken: null,
+    });
+    const onRefusal = vi.fn();
+
+    const { tryAutoRelogin } = await import('./autoRelogin.js');
+    const result = await tryAutoRelogin(account(), SITE, {
+      allowBrowserFallback: true,
+      onRefusal,
+    });
+
+    expect(result).toBeNull();
+    expect(onRefusal).toHaveBeenCalledWith({
+      code: 'relogin_refused',
+      reason: '浏览器签到未完成：sign-in never reached the profile page',
+    });
+  });
+
   it('signs the other sessions out after a successful login', async () => {
     // The fork caps concurrent sessions, and the leftovers from earlier manual
     // sign-ins are what will refuse the *next* re-login. The fresh session is

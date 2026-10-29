@@ -154,6 +154,24 @@ function isHumanCheckRefusal(message?: string | null): boolean {
 }
 
 /**
+ * Records why a browser-based replay gave up.
+ *
+ * These runs take minutes and end with a sentence the driver already wrote -
+ * "站点未回调 Linux.do 登录", "sign-in never reached the profile page", "15 分钟内
+ * 已尝试过". Dropping it leaves the caller with the 401 that *started* the
+ * replay, so the operator reads "凭证过期" for a layout bug, a cooldown, or a
+ * Cloudflare block and has no way to tell them apart.
+ */
+function reportBrowserReloginGap(
+  options: AutoReloginOptions | undefined,
+  message?: string | null,
+): void {
+  const reason = String(message || '').trim();
+  if (!reason) return;
+  options?.onRefusal?.({ code: 'relogin_refused', reason });
+}
+
+/**
  * Replays the stored username/password over HTTP.
  *
  * `blocked` separates "the site wants a human check" — which the browser can
@@ -346,7 +364,10 @@ async function tryOauthRelogin(
       await import('./assistedLogin/sites/pipiImageRelogin.js');
     if (supportsPipiImageLinuxDoLogin(site.url, provider)) {
       const captured = await reloginPipiImageWithLinuxDo({ siteId: site.id, siteUrl: site.url });
-      if (!captured.ok || !captured.accessToken) return null;
+      if (!captured.ok || !captured.accessToken) {
+        reportBrowserReloginGap(options, captured.message);
+        return null;
+      }
 
       const persisted = await persistCredential(account, {
         accessToken: captured.accessToken,
@@ -373,7 +394,7 @@ async function tryOauthRelogin(
     // fragment instead. The platform decides which driver gets to speak.
     return isSub2ApiPlatform(site.platform)
       ? trySub2ApiLinuxDoRelogin(account, site, options)
-      : tryLinuxDoRelogin(account, site);
+      : tryLinuxDoRelogin(account, site, options);
   }
   if (provider !== 'github') return null;
 
@@ -520,11 +541,16 @@ async function tryAgentRouterRelogin(
  * into a credential the row can actually send. Skipping the harvest would leave
  * a signed-in browser with a dead row, which is the state this exists to fix.
  */
-async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+async function tryLinuxDoRelogin(
+  account: any,
+  site: any,
+  options?: AutoReloginOptions,
+): Promise<AutoReloginResult | null> {
   let host = '';
   try {
     host = new URL(site.url).hostname.toLowerCase();
   } catch {
+    reportBrowserReloginGap(options, '站点地址不是合法 URL，无法打开浏览器重登');
     return null;
   }
   if (!host) return null;
@@ -532,7 +558,10 @@ async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginRe
   // The handshake runs a real browser and takes minutes, and the relays that
   // need it also throttle hard. Without this, every failed balance refresh would
   // start another run and keep the account rate-limited instead of reviving it.
-  if (isBrowserReloginCoolingDown(account.extraConfig)) return null;
+  if (isBrowserReloginCoolingDown(account.extraConfig)) {
+    reportBrowserReloginGap(options, '浏览器重登 15 分钟内只跑一次，本轮跳过（冷却中）');
+    return null;
+  }
   await recordBrowserReloginAttempt(account);
 
   const clientId = await readLinuxDoClientId(site.url);
@@ -549,11 +578,17 @@ async function tryLinuxDoRelogin(account: any, site: any): Promise<AutoReloginRe
     callbackPath: LINUXDO_CALLBACK_PATH,
     siteLabel: host,
   }));
-  if (!relogin.ok) return null;
+  if (!relogin.ok) {
+    reportBrowserReloginGap(options, relogin.message || 'Linux.do 退出重登未完成');
+    return null;
+  }
 
   const { harvestLinuxDoSiteCredential } = await import('./linuxdoSession/sessionService.js');
   const captured = await harvestLinuxDoSiteCredential(site.url);
-  if (!captured?.accessToken) return null;
+  if (!captured?.accessToken) {
+    reportBrowserReloginGap(options, 'Linux.do 授权完成，但没有从站点取回可用的登录凭证');
+    return null;
+  }
 
   const nowIso = new Date().toISOString();
   const persisted = await persistCredential(account, {
@@ -600,6 +635,7 @@ async function trySub2ApiLinuxDoRelogin(
   try {
     host = new URL(site.url).hostname.toLowerCase();
   } catch {
+    reportBrowserReloginGap(options, '站点地址不是合法 URL，无法打开浏览器重登');
     return null;
   }
   if (!host) return null;
@@ -607,7 +643,10 @@ async function trySub2ApiLinuxDoRelogin(
   // A browser run costs minutes, and `connect.linux.do` escalates its challenge
   // when it is asked in bursts: the first run answers one click, the fifth
   // answers a hard 403. The cooldown is what keeps the next attempt cheap.
-  if (isBrowserReloginCoolingDown(account.extraConfig)) return null;
+  if (isBrowserReloginCoolingDown(account.extraConfig)) {
+    reportBrowserReloginGap(options, '浏览器重登 15 分钟内只跑一次，本轮跳过（冷却中）');
+    return null;
+  }
   await recordBrowserReloginAttempt(account);
 
   const expectedUserId = getPlatformUserIdFromExtraConfig(account.extraConfig);
@@ -728,12 +767,17 @@ async function recordBrowserReloginAttempt(account: any): Promise<void> {
  * A password-less account is the opposite case: the stored session is the only
  * credential it has, so seeding it is the only way in.
  */
-async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginResult | null> {
+async function tryBrowserRelogin(
+  account: any,
+  site: any,
+  options?: AutoReloginOptions,
+): Promise<AutoReloginResult | null> {
   const platform = (site.platform || '').toLowerCase();
   const relogin = getAutoReloginConfig(account.extraConfig);
   const password = relogin ? decryptAccountPassword(relogin.passwordCipher) : null;
 
   if (isBrowserReloginCoolingDown(account.extraConfig)) {
+    reportBrowserReloginGap(options, '浏览器重登 15 分钟内只跑一次，本轮跳过（冷却中）');
     return null;
   }
   await recordBrowserReloginAttempt(account);
@@ -750,7 +794,10 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
       username: relogin?.username || account.username,
       password,
     });
-    if (!outcome.ok || !outcome.accessToken) return null;
+    if (!outcome.ok || !outcome.accessToken) {
+      reportBrowserReloginGap(options, outcome.message || '辉哥中转浏览器登录未完成');
+      return null;
+    }
     // Same hygiene as every other sign-in: this one minted a session too, so
     // the entries it superseded are retired before the run ends. A panel with
     // no session API reports `unsupported` and changes nothing.
@@ -771,7 +818,10 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
   if (platform !== 'new-api') return null;
 
   const sessionCredential = password ? null : asBrowserSessionCredential(account.accessToken);
-  if (!password && !sessionCredential) return null;
+  if (!password && !sessionCredential) {
+    reportBrowserReloginGap(options, '账号没有可用的密码或登录会话，浏览器重登无法进行');
+    return null;
+  }
 
   const { outcome, accessToken } = await runBrowserSessionCheckin({
     site,
@@ -780,7 +830,16 @@ async function tryBrowserRelogin(account: any, site: any): Promise<AutoReloginRe
     accountExtraConfig: account.extraConfig,
     sessionCredential,
   });
-  if (outcome.kind !== 'result' || !accessToken) return null;
+  if (outcome.kind === 'unavailable') {
+    reportBrowserReloginGap(options, `浏览器重登不可用：${outcome.reason}`);
+    return null;
+  }
+  if (!accessToken) {
+    // The run finished but never reached a signed-in page; its own sentence is
+    // the only description of *why* (form not locatable, Turnstile not passed).
+    reportBrowserReloginGap(options, outcome.result.message || '浏览器重登未取得登录会话');
+    return null;
+  }
 
   // Persist before pruning: the credential the browser just captured is a
   // rotatable cookie, and the prune exchanges it. Writing the row first is what
@@ -865,5 +924,5 @@ export async function tryAutoRelogin(
   // the gate a single scheduled tick could start dozens of Chromium runs at
   // once - which is what produced the `session_rejected` and "browser would not
   // start" errors, and the memory spikes that went with them.
-  return browserLane.run(() => tryBrowserRelogin(account, site));
+  return browserLane.run(() => tryBrowserRelogin(account, site, options));
 }

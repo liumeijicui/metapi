@@ -128,6 +128,30 @@ describe('checkinScheduler', () => {
     expect(dayOne.sites[0].scheduledAt).not.toBe(dayTwo.sites[0].scheduledAt);
   });
 
+  it('opens a late-day site\'s window after its own check-in day rolls over', async () => {
+    // happycoding 的签到日按 UTC 计，08:00（+08:00）才换日。计划在 00:08 生成，
+    // 若照常参与 90 分钟窗口，它每天都只能确认"昨天"，站点整天显示未签到。
+    const scheduler = await import('./checkinScheduler.js');
+    const now = new Date('2026-10-28T16:08:00.000Z'); // 2026-10-29 00:08 +08:00
+    const plan = scheduler.buildCheckinDailyPlan({
+      now,
+      windowMinutes: 90,
+      seed: 'daily-seed',
+      targets: [
+        { siteId: 19, siteName: 'happycoding', accountIds: [7], siteUrl: 'https://happycoding.xyz' },
+        { siteId: 20, siteName: 'midnight', accountIds: [8], siteUrl: 'https://example.com' },
+      ],
+    });
+
+    const late = plan.sites.find((site) => site.siteId === 19)!;
+    const regular = plan.sites.find((site) => site.siteId === 20)!;
+    const lateAt = new Date(late.scheduledAt);
+    expect(lateAt.getHours() * 60 + lateAt.getMinutes()).toBeGreaterThanOrEqual(8 * 60 + 5);
+    expect(lateAt.getTime() - now.getTime()).toBeLessThanOrEqual((8 * 60 + 90) * 60 * 1000);
+    // Every other site keeps the original behaviour: inside the plan's window.
+    expect(Date.parse(regular.scheduledAt) - now.getTime()).toBeLessThanOrEqual(90 * 60 * 1000);
+  });
+
   it('keeps the legacy immediate behavior when the random window is zero', async () => {
     const scheduler = await import('./checkinScheduler.js');
     expect(scheduler.computeCheckinSiteDelaySeconds(1, '2026-10-27', 'seed', 0)).toBe(0);

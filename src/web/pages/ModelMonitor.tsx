@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import Combobox from '../components/Combobox.js';
@@ -35,6 +36,22 @@ type ModelRow = {
   inputPrice: number | null;
   outputPrice: number | null;
   fetchedAt: string | null;
+  /** 最近一次「对话 / 测试 / 批量测试」的结果，每个站点+模型只保留最新一条。 */
+  lastProbe: ProbeResult | null;
+};
+
+type ProbeResult = {
+  siteId: number;
+  modelName: string;
+  source: 'chat' | 'test' | 'batch';
+  status: 'success' | 'failed' | 'cancelled';
+  firstByteMs: number | null;
+  durationMs: number | null;
+  apiMode: string | null;
+  reasoningEffort: string | null;
+  answer: string | null;
+  errorMessage: string | null;
+  createdAt: string;
 };
 
 type SiteRow = {
@@ -158,6 +175,183 @@ function formatRelative(value: string | null | undefined): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} ${tr('小时前')}`;
   return `${Math.floor(hours / 24)} ${tr('天前')}`;
+}
+
+/** 测活结果用的短相对时间：50 秒前 / 45 分钟前 / 3 小时前 / 2 天前。 */
+function formatProbeRelative(value: string | null | undefined): string {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  const diffMs = Date.now() - parsed.getTime();
+  if (diffMs < 0) return tr('刚刚');
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${Math.max(1, seconds)} ${tr('秒前')}`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} ${tr('分钟前')}`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ${tr('小时前')}`;
+  return `${Math.floor(hours / 24)} ${tr('天前')}`;
+}
+
+function probeSourceLabel(source: ProbeResult['source']): string {
+  if (source === 'batch') return tr('批量测试');
+  if (source === 'test') return tr('测试');
+  return tr('对话');
+}
+
+function probeStatusLabel(status: ProbeResult['status']): string {
+  if (status === 'success') return tr('成功');
+  if (status === 'failed') return tr('失败');
+  return tr('已停止');
+}
+
+function probeStatusClass(status: ProbeResult['status']): string {
+  if (status === 'success') return 'badge badge-success';
+  if (status === 'failed') return 'badge badge-error';
+  return 'badge badge-muted';
+}
+
+/**
+ * 回答正文的入口：页面上只留一个图标，鼠标移上去（或键盘聚焦）才弹出全文。
+ * 回答动辄几千字，直接铺在卡片里会把整页撑散，所以用 fixed 定位的浮层，
+ * 不受卡片/表格的 overflow 裁切。
+ */
+function ProbeAnswerIcon({ probe }: { probe: ProbeResult }) {
+  const [popover, setPopover] = useState<{ top?: number; bottom?: number; left: number; width: number; maxHeight: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
+  const answer = probe.answer || '';
+
+  const cancelHide = () => {
+    if (hideTimerRef.current != null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  };
+
+  const show = () => {
+    cancelHide();
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = Math.min(520, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(rect.left - width + rect.width, window.innerWidth - width - 12));
+    const spaceBelow = window.innerHeight - rect.bottom - 16;
+    const spaceAbove = rect.top - 16;
+    // 下面放不下就往上弹，避免浮层落到屏幕外只能看到一小截。
+    if (spaceBelow < 220 && spaceAbove > spaceBelow) {
+      setPopover({
+        bottom: window.innerHeight - rect.top + 8,
+        left,
+        width,
+        maxHeight: Math.min(420, Math.max(160, spaceAbove)),
+      });
+      return;
+    }
+    setPopover({
+      top: rect.bottom + 8,
+      left,
+      width,
+      maxHeight: Math.min(420, Math.max(160, spaceBelow)),
+    });
+  };
+
+  const scheduleHide = () => {
+    cancelHide();
+    hideTimerRef.current = window.setTimeout(() => {
+      setPopover(null);
+      hideTimerRef.current = null;
+    }, 120);
+  };
+
+  useEffect(() => () => cancelHide(), []);
+
+  // 浮层是 fixed 定位：页面一滚动就会和图标错位，直接收起来比跟着漂更好。
+  useEffect(() => {
+    if (!popover) return;
+    const hide = () => setPopover(null);
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    return () => {
+      window.removeEventListener('scroll', hide, true);
+      window.removeEventListener('resize', hide);
+    };
+  }, [popover]);
+
+  if (!answer) return null;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="model-monitor-probe-answer"
+        aria-label={tr('查看回答')}
+        title={tr('查看回答')}
+        onMouseEnter={show}
+        onMouseLeave={scheduleHide}
+        onFocus={show}
+        onBlur={scheduleHide}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </button>
+      {popover ? createPortal(
+        <div
+          className="model-monitor-probe-pop"
+          role="tooltip"
+          style={{
+            top: popover.top,
+            bottom: popover.bottom,
+            left: popover.left,
+            width: popover.width,
+            maxHeight: popover.maxHeight,
+          }}
+          onMouseEnter={cancelHide}
+          onMouseLeave={scheduleHide}
+        >
+          <div className="model-monitor-probe-pop-head">
+            <strong>{probe.modelName}</strong>
+            <span>{probeSourceLabel(probe.source)}</span>
+            <span>{probeStatusLabel(probe.status)}</span>
+            {probe.firstByteMs != null ? <span>{tr('首字')} {formatLatency(probe.firstByteMs)}</span> : null}
+            {probe.durationMs != null ? <span>{tr('用时')} {formatLatency(probe.durationMs)}</span> : null}
+            <span>{formatProbeRelative(probe.createdAt)}</span>
+          </div>
+          <pre
+            className="model-monitor-probe-pop-body"
+            style={{ maxHeight: Math.max(80, popover.maxHeight - 46) }}
+          >
+            {answer}
+          </pre>
+        </div>,
+        document.body,
+      ) : null}
+    </>
+  );
+}
+
+function ProbeSummary({ probe }: { probe: ProbeResult }) {
+  return (
+    <div className="model-monitor-probe">
+      <span
+        className={probeStatusClass(probe.status)}
+        title={probe.errorMessage || tr('最近一次测活结果')}
+      >
+        {probeStatusLabel(probe.status)}
+      </span>
+      <span title={tr('首次拿到响应内容的时间')}>
+        <em>{tr('首字')}</em>{formatLatency(probe.firstByteMs)}
+      </span>
+      <span title={tr('整轮测试的总耗时')}>
+        <em>{tr('用时')}</em>{formatLatency(probe.durationMs)}
+      </span>
+      <span title={new Date(probe.createdAt).toLocaleString()}>
+        {formatProbeRelative(probe.createdAt)}
+      </span>
+      <ProbeAnswerIcon probe={probe} />
+    </div>
+  );
 }
 
 function siteStatusLabel(status: string): string {
@@ -848,6 +1042,7 @@ export default function ModelMonitor() {
               {formatModelPrice(model) ? (
                 <div className="model-monitor-card-price">{formatModelPrice(model)}</div>
               ) : null}
+              {model.lastProbe ? <ProbeSummary probe={model.lastProbe} /> : null}
               <div className="model-monitor-card-actions">
                 <button
                   type="button"
@@ -908,6 +1103,7 @@ export default function ModelMonitor() {
                 <th>{tr('吞吐')}</th>
                 <th>{tr('价格')}</th>
                 <th>{tr('最近更新')}</th>
+                <th>{tr('最近测试')}</th>
                 <th>{tr('操作')}</th>
               </tr>
             </thead>
@@ -945,6 +1141,9 @@ export default function ModelMonitor() {
                   <td>{metricsAvailable ? formatThroughput(model.avgTps) : '—'}</td>
                   <td className="model-monitor-price">{formatModelPrice(model) || '—'}</td>
                   <td title={formatTimestamp(model.fetchedAt)}>{formatRelative(model.fetchedAt)}</td>
+                  <td>
+                    {model.lastProbe ? <ProbeSummary probe={model.lastProbe} /> : <span className="model-monitor-probe-empty">—</span>}
+                  </td>
                   <td>
                     <div className="model-monitor-row-actions">
                       <button
@@ -1018,13 +1217,22 @@ export default function ModelMonitor() {
           siteName: chatTarget.siteName,
           siteUrl: chatTarget.siteUrl,
         } : null}
-        onClose={() => { setChatTarget(null); setChatAutoTest(false); }}
+        onClose={() => {
+          setChatTarget(null);
+          setChatAutoTest(false);
+          // 对话跑完会回写一条测活结果，关窗时静默拉一次，让卡片上的
+          // 首字/用时/回答立刻更新，而不是等 30 秒轮询。
+          void load(true);
+        }}
       />
 
       <ModelBatchTestModal
         open={batchTestOpen}
         models={batchTestModels}
-        onClose={() => setBatchTestOpen(false)}
+        onClose={() => {
+          setBatchTestOpen(false);
+          void load(true);
+        }}
       />
 
       <DownstreamKeyCcSwitchModal
