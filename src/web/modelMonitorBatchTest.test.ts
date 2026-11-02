@@ -117,4 +117,36 @@ describe('modelMonitorBatchTest', () => {
     // 只有一个站点占多数时无法完全避开，但开头两轮就要轮到 B，不能先把 A 全打完。
     expect(ordered.slice(0, 2).some((item) => item.siteId === 2)).toBe(true);
   });
+
+  it('某个站点的模型远多于其它站点时，也不会在列表尾部堆成一串', () => {
+    // 真实数据里出现过「一个站 266 个、其余站平均 20 个」的分布：按站点轮转
+    // 会让小站点早早取完，剩下几百个同一站点的模型全挤在末尾。
+    const targets: ModelBatchTestTarget[] = [];
+    for (let index = 0; index < 60; index += 1) {
+      targets.push({ key: `big-${index}`, siteId: 1, siteName: 'Big', modelName: `big-${index}` });
+    }
+    for (let site = 2; site <= 6; site += 1) {
+      for (let index = 0; index < 5; index += 1) {
+        targets.push({ key: `s${site}-${index}`, siteId: site, siteName: `S${site}`, modelName: `s${site}-${index}` });
+      }
+    }
+
+    const ordered = interleaveModelBatchTargets(targets, () => 0.37);
+    expect(ordered).toHaveLength(targets.length);
+
+    // 关键性质是大站点的模型被均匀铺开，而不是挤在某一段：
+    // 轮转算法会在小站点取完后，把剩下的大站点模型全部堆到列表尾部。
+    const positions = ordered
+      .map((item, index) => (item.siteId === 1 ? index : -1))
+      .filter((index) => index >= 0);
+    const gaps = positions.slice(1).map((value, index) => value - positions[index]);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(5);
+
+    // 前半段（小站点还有货时）相邻两项不来自同一站点。
+    // 末段只剩大站点，连续是数学上不可避免的，这里不苛求。
+    const head = ordered.slice(0, Math.floor(ordered.length * 0.6));
+    for (let index = 1; index < head.length; index += 1) {
+      expect(head[index].siteId).not.toBe(head[index - 1].siteId);
+    }
+  });
 });

@@ -164,17 +164,25 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
   /**
    * 列表顺序 = 执行顺序。
    *
-   * 之前只在执行前打散，左侧列表还是原始顺序，看起来像「随机挑一条跑」。
-   * 现在打开弹窗时就把各站点的模型穿插好，列表和队列共用这一份顺序，
-   * 既不会连续打同一个站点，也能让用户看到真实执行次序。
-   *
-   * 依赖里带上 `open`：每次重新打开都会重新穿插一次，同一次会话里顺序稳定，
-   * 列表和执行队列才不会对不上。
+   * 打开弹窗时把各站点的模型穿插好，左侧列表就是执行队列，两者共用同一份
+   * 顺序。这里刻意「快照」而不是每轮渲染重算：模型监控页每 30 秒会轮询刷新，
+   * `models` 是新数组，跟着它重算会让列表在跑测试的过程中重新排序，看起来
+   * 就像「没按列表顺序测」。所以只在打开弹窗、或模型集合真的变了（且没在跑）
+   * 时重新穿插。
    */
-  const orderedModels = useMemo(
-    () => (open ? interleaveModelBatchTargets(models) : models),
-    [open, models],
-  );
+  const modelSignature = useMemo(() => models.map((model) => model.key).join('|'), [models]);
+  const [orderedModels, setOrderedModels] = useState<ModelBatchTestModel[]>(models);
+  const orderedSignatureRef = useRef('');
+
+  // 弹窗已经打开、模型清单又被刷新时，重排一次；运行中不动，免得列表和
+  // 正在执行的队列对不上。打开弹窗那一刻的重排放在下面的 open 副作用里，
+  // 保证「列表顺序」和「默认勾选」用的是同一次穿插结果。
+  useEffect(() => {
+    if (!open || running) return;
+    if (orderedSignatureRef.current === modelSignature) return;
+    orderedSignatureRef.current = modelSignature;
+    setOrderedModels(interleaveModelBatchTargets(models));
+  }, [open, models, modelSignature, running]);
 
   const selectedModels = useMemo(
     () => orderedModels.filter((model) => selectedKeys.has(model.key)),
@@ -205,8 +213,11 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
       return;
     }
 
-    const initialKeys = new Set(orderedModels.slice(0, 3).map((model) => model.key));
-    setSelectedKeys(initialKeys);
+    // 打开时先穿插好，列表顺序、默认勾选、执行队列都用这一份。
+    const ordered = interleaveModelBatchTargets(models);
+    orderedSignatureRef.current = modelSignature;
+    setOrderedModels(ordered);
+    setSelectedKeys(new Set(ordered.slice(0, 3).map((model) => model.key)));
     setRows({});
     setRowQuery('');
     setSummary(null);

@@ -27,13 +27,18 @@ export function buildModelBatchTestKey(siteId: number, modelName: string): strin
 }
 
 /**
- * 把待测模型按站点打散，避免连续对同一个站点测活。
+ * 把待测模型按站点穿插，避免同一个站点的模型连在一起。
  *
- * 做法是「站点分组 + 组内打乱 + 按站点轮转」：同一站点最多隔一轮就轮到别的
- * 站点。直接全局 shuffle 不够——同一个站点的模型偶尔还会挨在一起；轮转能保证
- * 只要不是单个站点独占全部目标，相邻两项一定来自不同站点。
+ * 之前用的是「按站点轮转」（每轮各站取一个）。只要有一个站点的模型明显多
+ * （实测有个站 266 个、其余站平均 20 个），小站点几轮就取完了，剩下几百个
+ * 同一站点的模型全堆在列表尾部 —— 看起来就是「根本没穿插」。
  *
- * `random` 可注入，测试里传固定种子函数即可得到稳定结果。
+ * 现在改成平滑加权轮转（smooth weighted round-robin）并禁止连续取同一站点：
+ * 权重是每个站点本次的模型数，每一步给还有剩余的站点累加自己的权重，取累加
+ * 值最大、且不是上一个站点的那个。模型多的站点会被均匀铺满整个列表，而不是
+ * 挤在末尾；相邻两项也不会来自同一站点（除非只剩它一个）。
+ *
+ * `random` 可注入：站点顺序与组内顺序都会打乱，测试里传固定值即可得到稳定结果。
  */
 export function interleaveModelBatchTargets<T extends { siteId: number }>(
   targets: T[],
@@ -59,14 +64,37 @@ export function interleaveModelBatchTargets<T extends { siteId: number }>(
   };
 
   const queues = shuffle(Array.from(groups.values()).map((group) => shuffle(group)));
+  // 权重固定用「打开时每个站点的模型数」，不随剩余数量变化：否则快取完的
+  // 站点权重变小，最后又会被大站点连成一串。
+  const weights = queues.map((queue) => queue.length);
+  const current = queues.map(() => 0);
+  const total = targets.length;
   const result: T[] = [];
-  let cursor = 0;
-  while (queues.some((queue) => queue.length > 0)) {
-    const queue = queues[cursor % queues.length];
-    const next = queue.shift();
-    if (next) result.push(next);
-    cursor += 1;
+  let previous = -1;
+
+  for (let step = 0; step < total; step += 1) {
+    for (let index = 0; index < queues.length; index += 1) {
+      if (queues[index].length > 0) current[index] += weights[index];
+    }
+    let picked = -1;
+    for (let index = 0; index < queues.length; index += 1) {
+      if (queues[index].length === 0) continue;
+      if (index === previous) continue;
+      if (picked === -1 || current[index] > current[picked]) picked = index;
+    }
+    // 只剩上一个站点还有货时，只能连着取（无法避免）。
+    if (picked === -1) {
+      for (let index = 0; index < queues.length; index += 1) {
+        if (queues[index].length === 0) continue;
+        if (picked === -1 || current[index] > current[picked]) picked = index;
+      }
+    }
+    if (picked === -1) break;
+    result.push(queues[picked].shift() as T);
+    current[picked] -= total;
+    previous = picked;
   }
+
   return result;
 }
 
