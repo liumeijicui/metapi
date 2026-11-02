@@ -1305,7 +1305,122 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (!message) return false;
     const text = message.toLowerCase();
     if (/^http\s+404:/i.test(text)) return true;
-    return /invalid url \(post \/api\/user\/(sign_in|checkin|daily|sota-agent-checkin)\)/.test(text);
+    return /invalid url \(post \/api\/user\/(sign_in|checkin|daily|daily-reward|sota-agent-checkin)\)/.test(text);
+  }
+
+  /**
+   * Newer forks move the daily reward behind `/api/user/daily-reward`.
+   *
+   * The route is not a plain check-in: it answers a calendar plus the site's
+   * current rule revision, refuses to pay until the caller has confirmed that
+   * revision, and refuses everything outright when the session was not created
+   * today. Treating its 404 (the route missing on older builds) as "no answer"
+   * keeps the generic walk going; anything else it says is the site's verdict.
+   */
+  private isDailyRewardRouteMissing(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    return text.includes('invalid url (post /api/user/daily-reward)')
+      || (text.includes('http 404') && text.includes('/api/user/daily-reward'));
+  }
+
+  /** True when the site refuses because the login session predates today. */
+  private isStaleDailyRewardSessionMessage(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    return text.includes('checkin_login_required')
+      || text.includes('session created today')
+      || text.includes('requires a session created today');
+  }
+
+  /**
+   * Runs the `/api/user/daily-reward` flow on the deployments that use it.
+   *
+   * Detection is a read-only GET: the route answers the month's calendar when it
+   * exists and 404s everywhere else, so probing it cannot pay out twice or spend
+   * a captcha. The POST that follows only runs when the calendar says the reward
+   * is enabled and today is still unclaimed.
+   */
+  private async tryDailyRewardCheckin(
+    baseUrl: string,
+    cookie: string,
+    platformUserId?: number | null,
+  ): Promise<CheckinResult | null> {
+    const headers: Record<string, string> = {
+      Cookie: cookie,
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+    this.appendUserIdCompatibilityHeaders(headers, platformUserId);
+
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    let status: any;
+    try {
+      status = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/daily-reward?month=${month}`, {
+        method: 'GET',
+        headers,
+      });
+    } catch (err) {
+      const message = this.formatRequestErrorMessage(err);
+      return this.isDailyRewardRouteMissing(message) ? null : { success: false, message: message || '签到失败' };
+    }
+    if (!status) return null;
+    const statusMessage = this.extractResponseMessage(status);
+    if (this.isDailyRewardRouteMissing(statusMessage)) return null;
+    if (!status.success) {
+      // A stale session is the site's own verdict and has to reach the caller so
+      // the re-login path can replay the sign-in; an unauthenticated probe is
+      // simply "no verdict here" and leaves the generic walk in charge.
+      if (this.isStaleDailyRewardSessionMessage(statusMessage)) {
+        return { success: false, message: statusMessage || '签到需要当天重新登录' };
+      }
+      return null;
+    }
+
+    const data = status.data ?? {};
+    if (data.enabled === false) return null;
+    if (data.stats?.checked_in_today === true) {
+      return { success: true, message: '今日已签到', reward: undefined };
+    }
+
+    // The site refuses to pay until the current rule revision is accepted. The
+    // revision is versioned, so it is read from the status response instead of
+    // being hard-coded.
+    if (data.rule?.requires_confirmation && data.rule?.version) {
+      const confirm = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/daily-reward/rules/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({ version: data.rule.version, confirmed: true }),
+        headers,
+      }).catch(() => null);
+      if (confirm && !confirm.success) {
+        const message = this.extractResponseMessage(confirm);
+        if (this.isStaleDailyRewardSessionMessage(message)) {
+          return { success: false, message: message || '签到需要当天重新登录' };
+        }
+        return { success: false, message: message || '签到规则确认失败' };
+      }
+    }
+
+    const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/daily-reward`, {
+      method: 'POST',
+      headers,
+    }).catch((err) => {
+      const message = this.formatRequestErrorMessage(err);
+      return message ? { success: false, message } : null;
+    });
+    if (!res) return { success: false, message: '签到失败' };
+    if (res.success) {
+      return {
+        success: true,
+        message: res.message || 'checkin success',
+        reward: normalizeCheckinReward(res.data?.quota_awarded, QUOTA_PER_UNIT),
+      };
+    }
+    const message = this.extractResponseMessage(res);
+    if (this.isStaleDailyRewardSessionMessage(message)) {
+      return { success: false, message: message || '签到需要当天重新登录' };
+    }
+    return { success: false, message: message || '签到失败' };
   }
 
   /**
@@ -2313,6 +2428,13 @@ export class NewApiAdapter extends BasePlatformAdapter {
       };
 
       for (const cookie of this.buildCookieCandidates(accessToken)) {
+        // Some forks pay the daily reward only through `/api/user/daily-reward`;
+        // their legacy routes answer "insufficient privileges". Probing the
+        // dedicated route first is read-only, so a deployment without it just
+        // 404s and the generic walk below proceeds unchanged.
+        const dailyRewardResult = await this.tryDailyRewardCheckin(baseUrl, cookie, cookieUserId);
+        if (dailyRewardResult) return dailyRewardResult;
+
         try {
           const headers: Record<string, string> = {
             Cookie: cookie,

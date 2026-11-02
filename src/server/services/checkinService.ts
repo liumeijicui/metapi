@@ -105,6 +105,11 @@ function shouldAttemptAutoRelogin(message?: string | null): boolean {
   const text = message.toLowerCase();
   if (text.includes('new-api-user')) return true;
   if (text.includes('access token')) return true;
+  // Some forks only pay a reward to a session that was created that same day,
+  // so a still-valid cookie is refused every morning until the account signs in
+  // again. The credential is fine; the sign-in is what has to be replayed.
+  if (text.includes('checkin_login_required')) return true;
+  if (text.includes('session created today')) return true;
   return false;
 }
 
