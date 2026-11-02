@@ -138,6 +138,38 @@ export const modelProbeResults = sqliteTable('model_probe_results', {
   createdAtIdx: index('model_probe_results_created_at_idx').on(table.createdAt),
 }));
 
+/**
+ * 批量测试的逐条历史结果（追加式，不覆盖）。
+ *
+ * `model_probe_results` 每个「站点 + 模型」只留最新一条，用来在模型监控列表里
+ * 显示最近一次结果；这张表保留每次批量测试的每一条记录，便于事后按错误码
+ * （200 / 401 / 429 …）、站点、模型回查首字与耗时。`run_id` 把同一次批量测试
+ * 的记录串起来。
+ */
+export const modelBatchTestResults = sqliteTable('model_batch_test_results', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  runId: text('run_id').notNull(),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  modelName: text('model_name').notNull(),
+  /** success | failed | cancelled */
+  status: text('status').notNull(),
+  /** 上游返回的 HTTP 状态码；网络层失败时为 null。 */
+  httpStatus: integer('http_status'),
+  firstByteMs: integer('first_byte_ms'),
+  durationMs: integer('duration_ms'),
+  apiMode: text('api_mode'),
+  reasoningEffort: text('reasoning_effort'),
+  promptTitle: text('prompt_title'),
+  answer: text('answer'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+}, (table) => ({
+  runIdIdx: index('model_batch_test_results_run_id_idx').on(table.runId),
+  siteModelIdx: index('model_batch_test_results_site_model_idx').on(table.siteId, table.modelName),
+  httpStatusIdx: index('model_batch_test_results_http_status_idx').on(table.httpStatus),
+  createdAtIdx: index('model_batch_test_results_created_at_idx').on(table.createdAt),
+}));
+
 export const accounts = sqliteTable('accounts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),

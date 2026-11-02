@@ -28,6 +28,11 @@ import {
   CodexConfigSyncError,
   syncCodexDirectConfig,
 } from '../../services/codexConfigSyncService.js';
+import {
+  listModelBatchTestResults,
+  loadSiteBalances,
+  saveModelBatchTestResult,
+} from '../../services/modelBatchTestResultService.js';
 
 function parseOptionalNumber(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
@@ -402,6 +407,91 @@ export async function modelMonitorRoutes(app: FastifyInstance) {
     }).catch(() => undefined);
     return reply;
   });
+
+  /**
+   * 批量测试的逐条结果。
+   *
+   * 前端每测完一个模型就 POST 一条；结果集页面按 runId / 站点 / 模型 / 状态 /
+   * 错误码查询。和 `/probe-result` 的区别：那个是 upsert 的「最新一条」，
+   * 这个是追加的历史记录。
+   */
+  app.post('/api/model-monitor/batch-test-results', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    try {
+      const result = await saveModelBatchTestResult({
+        runId: body.runId,
+        siteId: body.siteId,
+        modelName: body.modelName,
+        status: body.status,
+        httpStatus: body.httpStatus,
+        firstByteMs: body.firstByteMs,
+        durationMs: body.durationMs,
+        apiMode: body.apiMode,
+        reasoningEffort: body.reasoningEffort,
+        promptTitle: body.promptTitle,
+        answer: body.answer,
+        errorMessage: body.errorMessage,
+      });
+      return { success: true, result };
+    } catch (error) {
+      return reply.code(400).send({
+        success: false,
+        message: error instanceof Error ? error.message : '保存批量测试结果失败',
+      });
+    }
+  });
+
+  app.get<{
+    Querystring: {
+      runId?: string;
+      siteId?: string;
+      model?: string;
+      status?: string;
+      httpStatuses?: string;
+      since?: string;
+      limit?: string;
+    };
+  }>('/api/model-monitor/batch-test-results', async (request) => {
+    const query = request.query ?? {};
+    const siteId = Number(query.siteId);
+    const limit = Number(query.limit);
+    const httpStatuses = String(query.httpStatuses ?? '')
+      .split(',')
+      .map((item) => Number.parseInt(item.trim(), 10))
+      .filter((value) => Number.isFinite(value));
+    return {
+      success: true,
+      ...(await listModelBatchTestResults({
+        runId: query.runId ?? null,
+        siteId: Number.isFinite(siteId) ? Math.trunc(siteId) : null,
+        model: query.model ?? null,
+        status: query.status ?? null,
+        httpStatuses: httpStatuses.length ? httpStatuses : null,
+        since: query.since ?? null,
+        limit: Number.isFinite(limit) ? Math.trunc(limit) : null,
+      })),
+    };
+  });
+
+  /** 批量测试弹窗左侧列表要显示站点余额，一次把这些站点的余额取回来。 */
+  app.get<{ Querystring: { siteIds?: string } }>(
+    '/api/model-monitor/batch-test-site-balances',
+    async (request) => {
+      const raw = String(request.query?.siteIds ?? '');
+      const siteIds = raw
+        .split(',')
+        .map((item) => Number.parseInt(item.trim(), 10))
+        .filter((id) => Number.isFinite(id) && id > 0);
+      const balances = await loadSiteBalances(siteIds);
+      return {
+        success: true,
+        balances: Object.entries(balances).map(([siteId, balance]) => ({
+          siteId: Number(siteId),
+          balance,
+        })),
+      };
+    },
+  );
 
   app.post('/api/model-monitor/refresh', async () => {
     if (isModelMonitorRunning()) {

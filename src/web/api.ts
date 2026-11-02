@@ -1753,6 +1753,79 @@ export const api = {
       timeoutMs: 15_000,
     }),
 
+  /**
+   * 批量测试的逐条历史结果（追加式）：每测完一个模型落一条，
+   * 结果集页面按 runId / 站点 / 模型 / 状态 / 错误码查询。
+   */
+  saveModelBatchTestResult: (payload: {
+    runId: string;
+    siteId: number;
+    siteName?: string | null;
+    modelName: string;
+    status: 'success' | 'failed' | 'cancelled';
+    httpStatus?: number | null;
+    firstByteMs?: number | null;
+    durationMs?: number | null;
+    apiMode?: string | null;
+    reasoningEffort?: string | null;
+    promptTitle?: string | null;
+    answer?: string | null;
+    errorMessage?: string | null;
+  }) =>
+    request<{ success: boolean; result?: unknown }>("/api/model-monitor/batch-test-results", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 15_000,
+    }),
+  getModelBatchTestResults: (filters: {
+    runId?: string | null;
+    siteId?: number | null;
+    model?: string | null;
+    status?: string | null;
+    httpStatuses?: number[] | null;
+    since?: string | null;
+    limit?: number | null;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.runId) params.set("runId", filters.runId);
+    if (filters.siteId) params.set("siteId", String(filters.siteId));
+    if (filters.model) params.set("model", filters.model);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.httpStatuses?.length) params.set("httpStatuses", filters.httpStatuses.join(","));
+    if (filters.since) params.set("since", filters.since);
+    if (filters.limit) params.set("limit", String(filters.limit));
+    const query = params.toString();
+    return request<{
+      success: boolean;
+      results: Array<{
+        id: number;
+        runId: string;
+        siteId: number;
+        siteName: string;
+        modelName: string;
+        status: 'success' | 'failed' | 'cancelled';
+        httpStatus: number | null;
+        firstByteMs: number | null;
+        durationMs: number | null;
+        apiMode: string | null;
+        reasoningEffort: string | null;
+        promptTitle: string | null;
+        answer: string | null;
+        errorMessage: string | null;
+        createdAt: string;
+      }>;
+      total: number;
+      httpStatusCounts: Array<{ httpStatus: number | null; count: number }>;
+    }>(`/api/model-monitor/batch-test-results${query ? `?${query}` : ""}`, {
+      timeoutMs: 30_000,
+    });
+  },
+  getModelBatchTestSiteBalances: (siteIds: number[]) =>
+    request<{ success: boolean; balances: Array<{ siteId: number; balance: number }> }>(
+      `/api/model-monitor/batch-test-site-balances?siteIds=${encodeURIComponent(siteIds.join(","))}`,
+      { timeoutMs: 30_000 },
+    ),
+
   // 提示词管理：题库（suite）+ 题目（case），题目可带标准答案或评分要点
   getPromptSuites: () =>
     request<{ success: boolean; suites: any[] }>("/api/prompt-suites", {

@@ -848,6 +848,94 @@
         }
       }
     },
+    "model_batch_test_results": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "run_id": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "http_status": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "first_byte_ms": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "duration_ms": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "api_mode": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "reasoning_effort": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "prompt_title": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "answer": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "error_message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        }
+      }
+    },
     "model_day_usage": {
       "columns": {
         "id": {
@@ -3378,6 +3466,39 @@
       "unique": false
     },
     {
+      "name": "model_batch_test_results_created_at_idx",
+      "table": "model_batch_test_results",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_batch_test_results_http_status_idx",
+      "table": "model_batch_test_results",
+      "columns": [
+        "http_status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_batch_test_results_run_id_idx",
+      "table": "model_batch_test_results",
+      "columns": [
+        "run_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_batch_test_results_site_model_idx",
+      "table": "model_batch_test_results",
+      "columns": [
+        "site_id",
+        "model_name"
+      ],
+      "unique": false
+    },
+    {
       "name": "model_day_usage_day_idx",
       "table": "model_day_usage",
       "columns": [
@@ -4316,6 +4437,17 @@
         "account_id"
       ],
       "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_batch_test_results",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
       "referencedColumns": [
         "id"
       ],

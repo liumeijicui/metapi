@@ -632,6 +632,8 @@ export default function ModelMonitor() {
     key: `${model.siteId}:${model.modelName}`,
     siteId: model.siteId,
     siteName: model.siteName,
+    // 批量测试列表里的站点名要能直接点开该站点，所以把主页一起带过去。
+    siteUrl: model.siteUrl,
     modelName: model.modelName,
   })), [models]);
   const sites = overview?.sites ?? [];
@@ -1277,6 +1279,7 @@ export default function ModelMonitor() {
 
       <ModelBatchTestModal
         open={batchTestOpen}
+        onForwardChanged={() => setForwardNamesLoaded(false)}
         models={batchTestModels}
         onClose={() => {
           setBatchTestOpen(false);

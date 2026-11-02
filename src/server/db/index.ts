@@ -48,6 +48,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'prompt_cases',
   'model_forward_rules',
   'model_forward_targets',
+  'model_batch_test_results',
   'ip_blocklist',
   'trusted_fingerprints',
   'admin_login_logs',

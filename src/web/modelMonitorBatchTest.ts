@@ -11,6 +11,8 @@ export type ModelBatchTestResult = {
   durationMs: number;
   message: string;
   preview: string;
+  /** 上游返回的 HTTP 状态码；网络层失败（连响应都没拿到）时为 null。 */
+  httpStatus?: number | null;
 };
 
 export type ModelBatchTestCompleted = {
