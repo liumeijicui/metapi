@@ -165,6 +165,7 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
   const [promptCaseId, setPromptCaseId] = useState<number | null>(null);
   const [promptText, setPromptText] = useState('');
   const [promptLoading, setPromptLoading] = useState(false);
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [rowQuery, setRowQuery] = useState('');
   const [rows, setRows] = useState<Record<string, RowState>>({});
@@ -259,6 +260,7 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
     setStopping(false);
     setPromptCaseId(null);
     setPromptText('');
+    setPromptExpanded(false);
     setPromptCases([]);
     setPromptLoading(true);
     setTab('list');
@@ -931,21 +933,27 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
               {resultTotal > 0 ? ` (${resultTotal})` : ''}
             </button>
           </div>
-          <span style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
-            {tr('测试会直接调用每个模型所在的源站，日志会标记为「模型测试」。列表已按站点穿插，测试按这个顺序逐个执行。')}
+          <span
+            style={{ fontSize: 11.5, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}
+            title={tr('测试会直接调用每个模型所在的源站，日志会标记为「模型测试」。列表已按站点穿插，测试按这个顺序逐个执行。')}
+          >
+            {tr('直连源站 · 按列表顺序执行')}
           </span>
         </div>
 
         {tab === 'list' ? (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '220px minmax(0, 1fr)', gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>{tr('测试提示词')}</div>
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 8, alignItems: 'stretch' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: isMobile ? '1 1 auto' : '0 0 280px', minWidth: 0 }}>
+                <span style={{ fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>{tr('测试提示词')}</span>
                 <select
                   value={promptCaseId == null ? '' : String(promptCaseId)}
                   onChange={(event) => applyPromptCase(event.target.value)}
-                  style={{ width: '100%', padding: '8px 10px' }}
+                  style={{ flex: 1, minWidth: 0, padding: '6px 9px' }}
                   disabled={running || promptLoading}
+                  title={promptCases.find((item) => item.id === promptCaseId)?.answer
+                    ? `${tr('答案')}：${promptCases.find((item) => item.id === promptCaseId)?.answer}`
+                    : undefined}
                 >
                   <option value="">{promptLoading ? tr('加载中…') : tr('手动输入')}</option>
                   {promptCases.map((item) => (
@@ -953,27 +961,35 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
                   ))}
                 </select>
               </div>
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-                  {tr('发送内容')} {promptCases.find((item) => item.id === promptCaseId)?.answer
-                    ? `· ${tr('答案')} ${promptCases.find((item) => item.id === promptCaseId)?.answer}`
-                    : ''}
-                </div>
+              <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, flex: 1, minWidth: 0 }}>
                 <textarea
                   value={promptText}
                   onChange={(event) => setPromptText(event.target.value)}
-                  rows={isMobile ? 4 : 5}
+                  rows={1}
                   placeholder={tr('选择提示词后会自动填入，也可以手动修改')}
                   style={{
-                    width: '100%',
-                    minHeight: 110,
-                    resize: 'vertical',
-                    padding: '9px 11px',
+                    flex: 1,
+                    minWidth: 0,
+                    height: promptExpanded ? 96 : 40,
+                    minHeight: promptExpanded ? 96 : 40,
+                    resize: promptExpanded ? 'vertical' : 'none',
+                    padding: '7px 10px',
                     fontFamily: 'inherit',
-                    lineHeight: 1.6,
+                    lineHeight: 1.45,
+                    overflowY: promptExpanded ? 'auto' : 'hidden',
                   }}
+                  title={promptExpanded ? undefined : promptText}
                   disabled={running}
                 />
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ flexShrink: 0, padding: '0 10px', fontSize: 12, border: '1px solid var(--color-border-light)' }}
+                  onClick={() => setPromptExpanded((value) => !value)}
+                  disabled={running}
+                >
+                  {promptExpanded ? tr('收起') : tr('展开')}
+                </button>
               </div>
             </div>
 
