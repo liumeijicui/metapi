@@ -1334,6 +1334,28 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   /**
+   * Whether a failure from the standard routes is worth one probe of
+   * `/api/user/daily-reward`.
+   *
+   * Only a "this deployment does not serve check-in here" verdict qualifies: a
+   * missing route, or the privilege refusal those forks answer instead. A real
+   * account failure is not about which route was called, and probing on it would
+   * spend a request on every site for nothing.
+   */
+  private isDailyRewardFallbackCandidate(message?: string | null): boolean {
+    if (!message) return false;
+    // The standard walk already knows every shape of "this route is not here"
+    // (404, `Invalid URL (POST /api/user/...)`, an unsupported-checkin notice),
+    // and each of them means the same thing: ask the fork-specific route.
+    if (this.isMissingRouteMessage(message)) return true;
+    if (this.isMissingCheckinEndpointMessage(message)) return true;
+    const text = message.toLowerCase();
+    return text.includes('insufficient privileges')
+      || text.includes('权限不足')
+      || text.includes('无权进行此操作');
+  }
+
+  /**
    * Runs the `/api/user/daily-reward` flow on the deployments that use it.
    *
    * Detection is a read-only GET: the route answers the month's calendar when it
@@ -2428,13 +2450,6 @@ export class NewApiAdapter extends BasePlatformAdapter {
       };
 
       for (const cookie of this.buildCookieCandidates(accessToken)) {
-        // Some forks pay the daily reward only through `/api/user/daily-reward`;
-        // their legacy routes answer "insufficient privileges". Probing the
-        // dedicated route first is read-only, so a deployment without it just
-        // 404s and the generic walk below proceeds unchanged.
-        const dailyRewardResult = await this.tryDailyRewardCheckin(baseUrl, cookie, cookieUserId);
-        if (dailyRewardResult) return dailyRewardResult;
-
         try {
           const headers: Record<string, string> = {
             Cookie: cookie,
@@ -2530,6 +2545,16 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (alternateCookieUserId) {
       const retriedCookieResult = await tryCookieCheckin(alternateCookieUserId);
       if (retriedCookieResult) return retriedCookieResult;
+    }
+
+    // Some forks pay the daily reward only through `/api/user/daily-reward` and
+    // answer the standard routes with "insufficient privileges" or a 404. Only
+    // that shape of verdict is worth the extra request: a deployment without
+    // the route would just 404 again, and a genuine account failure is not
+    // about which route was called.
+    if (this.isDailyRewardFallbackCandidate(firstFailureMessage)) {
+      const dailyRewardResult = await this.tryDailyRewardCheckin(baseUrl, accessToken, resolvedUserId);
+      if (dailyRewardResult) return dailyRewardResult;
     }
 
     if (this.isMissingCheckinEndpointMessage(firstFailureMessage)) {
