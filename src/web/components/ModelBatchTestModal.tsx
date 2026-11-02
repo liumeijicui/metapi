@@ -73,6 +73,24 @@ type BatchSummary = {
   cancelled: number;
 };
 
+/**
+ * 批量测试的实时进度。
+ *
+ * 队列是顺序执行的，所以「已完成条数 / 总数」就是最直观的进度；再按成功 /
+ * 失败 / 已停止分色，一眼能看出这一轮结果好不好。`startedAt` 用来算已用时和
+ * 预计剩余 —— 批量测试经常要跑几分钟，没有这个用户不知道还要等多久。
+ */
+type BatchProgress = {
+  total: number;
+  done: number;
+  success: number;
+  failed: number;
+  cancelled: number;
+  startedAt: number;
+  finishedAt: number | null;
+  currentKey: string | null;
+};
+
 function formatBatchDuration(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value < 0) return '—';
   if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}s`;
@@ -124,6 +142,17 @@ function httpStatusBadgeClass(value: number | null): string {
   return 'badge badge-muted';
 }
 
+function formatElapsed(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
+}
+
 function createRunId(): string {
   const random = Math.random().toString(36).slice(2, 8);
   return `batch-${Date.now()}-${random}`;
@@ -142,6 +171,10 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [summary, setSummary] = useState<BatchSummary | null>(null);
+  const [progress, setProgress] = useState<BatchProgress | null>(null);
+  // 走秒用的心跳：进度条上的「已用时 / 预计剩余」需要每秒重算，但队列本身
+  // 只在每个模型跑完时才有新事件。
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [tab, setTab] = useState<'list' | 'results'>('list');
   const [balances, setBalances] = useState<Record<number, number>>({});
@@ -221,6 +254,7 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
     setRows({});
     setRowQuery('');
     setSummary(null);
+    setProgress(null);
     setRunning(false);
     setStopping(false);
     setPromptCaseId(null);
@@ -295,6 +329,14 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
   }, [open, models]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
+
+  // 跑测试时每秒刷新一次时钟，进度条上的「已用时 / 预计剩余」才会走动。
+  useEffect(() => {
+    if (!running) return;
+    setClockNow(Date.now());
+    const timer = setInterval(() => setClockNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
 
   const loadResults = useCallback(async () => {
     setResultLoading(true);
@@ -609,10 +651,22 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
     const controller = new AbortController();
     const batchRunId = createRunId();
     controllerRef.current = controller;
+    const startedAt = Date.now();
     setRunId(batchRunId);
     setRunning(true);
     setStopping(false);
     setSummary(null);
+    setProgress({
+      total: selectedModels.length,
+      done: 0,
+      success: 0,
+      failed: 0,
+      cancelled: 0,
+      startedAt,
+      finishedAt: null,
+      currentKey: selectedModels[0]?.key ?? null,
+    });
+    setClockNow(startedAt);
     setActiveKey(selectedModels[0]?.key ?? null);
     setRows(Object.fromEntries(selectedModels.map((model) => [model.key, { status: 'pending' as const }])));
 
@@ -628,6 +682,7 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
         runOne: (target, signal) => executeOne(target, prompt, promptTitle, batchRunId, signal),
         onStart: (target) => {
           setActiveKey(target.key);
+          setProgress((prev) => (prev ? { ...prev, currentKey: target.key } : prev));
           setRows((prev) => ({ ...prev, [target.key]: { status: 'running' } }));
         },
         onResult: ({ target, result }: ModelBatchTestCompleted) => {
@@ -642,6 +697,18 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
               preview: result.preview,
             },
           }));
+          // 进度用「已出结果条数」算，和停止时剩余项的补记分开：
+          // 停止后剩下的算 cancelled，进度条会一次补满并定格。
+          setProgress((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              done: prev.done + 1,
+              success: prev.success + (result.status === 'success' ? 1 : 0),
+              failed: prev.failed + (result.status === 'failed' ? 1 : 0),
+              cancelled: prev.cancelled + (result.status === 'cancelled' ? 1 : 0),
+            };
+          });
         },
       });
 
@@ -668,6 +735,16 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
         total: selectedModels.length,
         ...counts,
       });
+      // 停止时剩余项目不会再走 onResult，这里把进度补齐并定格。
+      setProgress((prev) => (prev
+        ? {
+          ...prev,
+          done: selectedModels.length,
+          cancelled: prev.cancelled + remaining.length,
+          currentKey: null,
+          finishedAt: Date.now(),
+        }
+        : prev));
     } catch (error: any) {
       toast.error(String(error?.message || tr('批量测试失败')));
     } finally {
@@ -697,6 +774,100 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
       current.includes(code) ? current.filter((item) => item !== code) : [...current, code]
     ));
   }, []);
+
+  // 进度条用的派生值：百分比、已用时、预计剩余。
+  const progressView = useMemo(() => {
+    if (!progress) return null;
+    const total = Math.max(progress.total, 1);
+    const elapsedMs = (progress.finishedAt ?? clockNow) - progress.startedAt;
+    const averageMs = progress.done > 0 ? elapsedMs / progress.done : null;
+    const remainingCount = Math.max(progress.total - progress.done, 0);
+    const etaMs = progress.finishedAt || averageMs == null ? null : averageMs * remainingCount;
+    return {
+      percent: Math.min(100, Math.round((progress.done / total) * 100)),
+      successPercent: (progress.success / total) * 100,
+      failedPercent: (progress.failed / total) * 100,
+      cancelledPercent: (progress.cancelled / total) * 100,
+      done: progress.done,
+      total: progress.total,
+      success: progress.success,
+      failed: progress.failed,
+      cancelled: progress.cancelled,
+      elapsedMs,
+      etaMs,
+      finished: progress.finishedAt != null,
+      percentText: `${Math.min(100, Math.round((progress.done / total) * 100))}%`,
+      currentLabel: progress.currentKey
+        ? orderedModels.find((model) => model.key === progress.currentKey) || null
+        : null,
+    };
+  }, [clockNow, orderedModels, progress]);
+
+  const progressBar = progressView ? (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '10px 12px',
+        border: '1px solid var(--color-border-light)',
+        borderRadius: 'var(--radius-sm)',
+        background: 'var(--color-bg-subtle, var(--color-bg))',
+      }}
+      data-testid="model-batch-test-progress"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12.5 }}>
+        <strong style={{ fontSize: 13 }}>
+          {progressView.finished ? tr('已完成') : tr('测试中')} {progressView.done} / {progressView.total}
+        </strong>
+        <span style={{ color: 'var(--color-text-muted)' }}>{progressView.percentText}</span>
+        {progressView.currentLabel && !progressView.finished ? (
+          <span
+            style={{
+              color: 'var(--color-text-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: 420,
+            }}
+            title={`${progressView.currentLabel.siteName} · ${progressView.currentLabel.modelName}`}
+          >
+            {tr('正在测试')}：{progressView.currentLabel.siteName} · {progressView.currentLabel.modelName}
+          </span>
+        ) : null}
+        <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+          {tr('已用时')} {formatElapsed(progressView.elapsedMs)}
+          {progressView.etaMs != null
+            ? ` · ${tr('预计剩余')} ${formatElapsed(progressView.etaMs)}`
+            : ''}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-valuenow={progressView.done}
+        aria-valuemin={0}
+        aria-valuemax={progressView.total}
+        aria-label={tr('批量测试进度')}
+        style={{
+          display: 'flex',
+          width: '100%',
+          height: 10,
+          borderRadius: 999,
+          overflow: 'hidden',
+          background: 'var(--color-border-light)',
+        }}
+      >
+        <span style={{ width: `${progressView.successPercent}%`, background: 'var(--color-success, #22c55e)', transition: 'width .25s ease' }} />
+        <span style={{ width: `${progressView.failedPercent}%`, background: 'var(--color-error, #ef4444)', transition: 'width .25s ease' }} />
+        <span style={{ width: `${progressView.cancelledPercent}%`, background: 'var(--color-text-muted)', opacity: 0.5, transition: 'width .25s ease' }} />
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--color-text-muted)' }}>
+        <span>{tr('成功')} {progressView.success}</span>
+        <span>{tr('失败')} {progressView.failed}</span>
+        {progressView.cancelled > 0 ? <span>{tr('已停止')} {progressView.cancelled}</span> : null}
+      </div>
+    </div>
+  ) : null;
 
   const footer = (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, width: '100%', flexWrap: 'wrap' }}>
@@ -738,6 +909,8 @@ export default function ModelBatchTestModal({ open, models, onClose, onForwardCh
           height: isMobile ? 'auto' : 'min(74vh, 780px)',
         }}
       >
+        {progressBar}
+
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 8, background: 'var(--color-bg)' }}>
             <button
