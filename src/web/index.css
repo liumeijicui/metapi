@@ -5905,7 +5905,40 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
+  min-width: 0;
+}
+
+/*
+ * 站点名 + 余额 / 签到徽标放在同一行：模型监控里一个站点会有几十行模型，
+ * 多占一行会让卡片明显变高，所以让徽标跟在站点名右侧、必要时换行。
+ */
+.model-monitor-card-site-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.model-monitor-table-site {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.model-monitor-site-wallet {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.model-monitor-site-balance {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 a.model-monitor-card-site:hover {

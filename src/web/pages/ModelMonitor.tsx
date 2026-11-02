@@ -64,6 +64,11 @@ type SiteRow = {
   message: string | null;
   modelsCount: number;
   fetchedAt: string | null;
+  totalBalance: number;
+  accountCount: number;
+  checkinEnabledCount: number;
+  todayCheckedIn: boolean;
+  todayCheckedInCount: number;
 };
 
 type Overview = {
@@ -125,6 +130,74 @@ function formatThroughput(value: number | null | undefined): string {
 function formatPercent(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '—';
   return `${value.toFixed(2)}%`;
+}
+
+/** 余额展示：小额保留两位，大额缩成 $1.2k，避免把卡片撑宽。 */
+function formatSiteBalance(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  if (Math.abs(value) >= 1000) return `$${(value / 1000).toFixed(1)}k`;
+  return `$${value.toFixed(2)}`;
+}
+
+/**
+ * 站点「余额 + 今日签到」的紧凑徽标。
+ *
+ * 模型监控一行一个模型，同一个站点会重复很多次，所以这里只做小号 inline
+ * 标签：余额用中性文字，签到用状态色，不额外占一整行高度。
+ */
+function SiteWalletBadges(props: { site: SiteRow | undefined; compact?: boolean }) {
+  const { site, compact = false } = props;
+  if (!site) return null;
+  const hasAccounts = site.accountCount > 0;
+  const checkinEnabled = site.checkinEnabledCount > 0;
+  const checkedIn = site.todayCheckedIn === true;
+  const badgeFont = compact ? 10.5 : 11;
+  return (
+    <span
+      className="model-monitor-site-wallet"
+      title={[
+        `余额 ${formatSiteBalance(site.totalBalance)}`,
+        `${site.accountCount} 个账号`,
+        checkinEnabled ? `今日已签到 ${site.todayCheckedInCount}/${site.checkinEnabledCount}` : '未开启签到',
+      ].join(' · ')}
+    >
+      <span className="model-monitor-site-balance">{formatSiteBalance(site.totalBalance)}</span>
+      {!hasAccounts ? (
+        <span className="badge badge-muted" style={{ fontSize: badgeFont }}>{tr('未绑定')}</span>
+      ) : !checkinEnabled ? (
+        <span className="badge badge-muted" style={{ fontSize: badgeFont }}>{tr('未开启签到')}</span>
+      ) : (
+        <span className={`badge ${checkedIn ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: badgeFont }}>
+          {checkedIn ? tr('已签到') : tr('未签到')}
+          {site.todayCheckedInCount > 0 ? ` ${site.todayCheckedInCount}/${site.checkinEnabledCount}` : ''}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * 站点筛选下拉里的一行文案：站点名 + 采集状态 + 余额 + 今日签到。
+ *
+ * 下拉是很多人第一眼找“哪个站没钱 / 哪个站还没签到”的地方，把这些带上就
+ * 不用先去列表里翻。
+ */
+function buildSiteFilterLabel(site: SiteRow): string {
+  const statusSuffix = site.status === 'unsupported'
+    ? `${tr('（不支持）')}`
+    : site.status === 'models_only'
+      ? `${tr('（仅模型）')}`
+      : '';
+  const checkinLabel = site.accountCount <= 0
+    ? tr('未绑定')
+    : site.checkinEnabledCount <= 0
+      ? tr('未开启签到')
+      : site.todayCheckedIn
+        ? tr('已签到')
+        : tr('未签到');
+  return [site.siteName + statusSuffix, formatSiteBalance(site.totalBalance), checkinLabel]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 /** 价格按数量级留小数：$75 不写「75.00」，$0.0125 也别被抹成 0.01。 */
@@ -637,6 +710,7 @@ export default function ModelMonitor() {
     modelName: model.modelName,
   })), [models]);
   const sites = overview?.sites ?? [];
+  const siteById = useMemo(() => new Map(sites.map((site) => [site.siteId, site])), [sites]);
   // CC Switch 导入弹窗里的模型候选：当前这份清单里的「站点 · 模型」，方便换模型名。
   const ccSwitchModelOptions = useMemo(() => {
     const byName = new Map<string, { value: string; label: string; description?: string }>();
@@ -680,7 +754,20 @@ export default function ModelMonitor() {
     const modelsOnly = sites.filter((site) => site.status === 'models_only').length;
     const rates = models.map((model) => model.successRate).filter((rate): rate is number => rate != null);
     const average = rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : null;
-    return { okSites, totalSites: sites.length - unsupported, unsupported, modelsOnly, average };
+    // 余额和签到是站点维度的，直接在这里汇总，省得页面上再扫一遍 58 个站点。
+    const totalBalance = sites.reduce((sum, site) => sum + (Number(site.totalBalance) || 0), 0);
+    const checkinSites = sites.filter((site) => site.checkinEnabledCount > 0).length;
+    const checkedInSites = sites.filter((site) => site.checkinEnabledCount > 0 && site.todayCheckedIn).length;
+    return {
+      okSites,
+      totalSites: sites.length - unsupported,
+      unsupported,
+      modelsOnly,
+      average,
+      totalBalance,
+      checkinSites,
+      checkedInSites,
+    };
   }, [models, sites]);
 
   // 站点切换后，之前选的模型很可能不在新站点的清单里。留着它只会查到空结果，
@@ -773,6 +860,16 @@ export default function ModelMonitor() {
               {stats.okSites} / {stats.totalSites}
             </strong>
           </div>
+          <div className="stat-card-row">
+            <span>{tr('站点余额')}</span>
+            <strong title={tr('所有站点账号余额之和')}>{formatSiteBalance(stats.totalBalance)}</strong>
+          </div>
+          <div className="stat-card-row">
+            <span>{tr('今日签到')}</span>
+            <strong title={tr('已签到站点 / 配置了签到的站点')}>
+              {stats.checkedInSites} / {stats.checkinSites}
+            </strong>
+          </div>
           {stats.modelsOnly ? (
             <div className="stat-card-row">
               <span>{tr('仅模型列表')}</span>
@@ -822,11 +919,7 @@ export default function ModelMonitor() {
               { value: '', label: tr('全部站点') },
               ...sites.map((site) => ({
                 value: String(site.siteId),
-                label: site.status === 'unsupported'
-                  ? `${site.siteName}${tr('（不支持）')}`
-                  : site.status === 'models_only'
-                    ? `${site.siteName}${tr('（仅模型）')}`
-                    : site.siteName,
+                label: buildSiteFilterLabel(site),
               })),
             ]}
             size="sm"
@@ -1039,19 +1132,22 @@ export default function ModelMonitor() {
                   <span className="badge badge-info" title={tr('站点没有模型监控接口，只有模型名')}>{tr('仅模型')}</span>
                 )}
               </div>
-              {model.siteUrl ? (
-                <a
-                  className="model-monitor-card-site"
-                  href={model.siteUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={model.siteUrl}
-                >
-                  {model.siteName}
-                </a>
-              ) : (
-                <div className="model-monitor-card-site">{model.siteName}</div>
-              )}
+              <div className="model-monitor-card-site-row">
+                {model.siteUrl ? (
+                  <a
+                    className="model-monitor-card-site"
+                    href={model.siteUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={model.siteUrl}
+                  >
+                    {model.siteName}
+                  </a>
+                ) : (
+                  <div className="model-monitor-card-site">{model.siteName}</div>
+                )}
+                <SiteWalletBadges site={siteById.get(model.siteId)} compact />
+              </div>
               {metricsAvailable ? (
                 <>
                   <SuccessBars samples={model.recentSuccess} windowStart={model.windowStart} />
@@ -1162,11 +1258,14 @@ export default function ModelMonitor() {
                     </button>
                   </td>
                   <td>
-                    {model.siteUrl ? (
-                      <a href={model.siteUrl} target="_blank" rel="noreferrer" title={model.siteUrl}>
-                        {model.siteName}
-                      </a>
-                    ) : model.siteName}
+                    <div className="model-monitor-table-site">
+                      {model.siteUrl ? (
+                        <a href={model.siteUrl} target="_blank" rel="noreferrer" title={model.siteUrl}>
+                          {model.siteName}
+                        </a>
+                      ) : model.siteName}
+                      <SiteWalletBadges site={siteById.get(model.siteId)} compact />
+                    </div>
                   </td>
                   <td className={metricsAvailable ? `model-monitor-rate is-${resolveModelRateLevel(model.successRate)}` : ''}>
                     {metricsAvailable ? formatPercent(model.successRate) : (

@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
+import { getLocalDayRangeUtc } from './localTimeService.js';
 import {
   buildModelProbeKey,
   loadModelProbeResultMap,
@@ -143,6 +144,16 @@ export type ModelMonitorOverview = {
     summarySuccessRate: number | null;
     summaryAvgTps: number | null;
     fetchedAt: string | null;
+    /** 站点下所有账号的余额之和；没有账号时是 0。 */
+    totalBalance: number;
+    /** 站点下有多少个账号（用于区分「未绑定」和「未开启签到」）。 */
+    accountCount: number;
+    /** 打开了签到开关的账号数。 */
+    checkinEnabledCount: number;
+    /** 今天是否有账号签到成功：和「站点管理」页同一套口径。 */
+    todayCheckedIn: boolean;
+    /** 今天签到成功的账号数。 */
+    todayCheckedInCount: number;
   }>;
   models: ModelMonitorModelView[];
 };
@@ -1354,6 +1365,49 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     });
   }
 
+  /**
+   * 站点余额 + 今日签到。
+   *
+   * 和「站点管理」列表用的是同一套口径：余额是站点下所有账号之和，签到按
+   * 「今天有任意一个账号成功」算。这里一次查完所有站点，页面一次 overview
+   * 就能铺满，不用为每个站点再发请求。
+   */
+  const accountRows = await db.select({
+    siteId: schema.accounts.siteId,
+    balance: schema.accounts.balance,
+    checkinEnabled: schema.accounts.checkinEnabled,
+  }).from(schema.accounts).all();
+  const { startUtc, endUtc } = getLocalDayRangeUtc();
+  const todaySuccessRows = await db
+    .select({ accountId: schema.checkinLogs.accountId, siteId: schema.accounts.siteId })
+    .from(schema.checkinLogs)
+    .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
+    .where(and(
+      gte(schema.checkinLogs.createdAt, startUtc),
+      lt(schema.checkinLogs.createdAt, endUtc),
+      eq(schema.checkinLogs.status, 'success'),
+    ))
+    .all();
+  const checkedInAccountIdsBySiteId = new Map<number, Set<number>>();
+  for (const row of todaySuccessRows) {
+    const bucket = checkedInAccountIdsBySiteId.get(row.siteId) ?? new Set<number>();
+    bucket.add(row.accountId);
+    checkedInAccountIdsBySiteId.set(row.siteId, bucket);
+  }
+  const siteWalletStats = new Map<number, {
+    totalBalance: number;
+    accountCount: number;
+    checkinEnabledCount: number;
+  }>();
+  for (const row of accountRows) {
+    const stats = siteWalletStats.get(row.siteId)
+      ?? { totalBalance: 0, accountCount: 0, checkinEnabledCount: 0 };
+    stats.totalBalance += Number(row.balance || 0);
+    stats.accountCount += 1;
+    if (row.checkinEnabled !== false) stats.checkinEnabledCount += 1;
+    siteWalletStats.set(row.siteId, stats);
+  }
+
   // 站点状态决定模型行要不要显示指标：'models_only' 的站点这一轮的模型
   // 只有名字，页面对这些行隐藏成功率/延迟/吞吐，避免误以为有采样。
   const metricsAvailableBySite = new Map<number, boolean>();
@@ -1444,19 +1498,29 @@ export async function loadModelMonitorOverview(filter: ModelMonitorFilter = {}):
     modelOptions,
     families,
     sites: siteRows
-      .map((row) => ({
-        siteId: row.siteId,
-        siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
-        url: siteNameById.get(row.siteId)?.url || '',
-        platform: siteNameById.get(row.siteId)?.platform || '',
-        status: row.status,
-        message: row.message,
-        modelsCount: row.modelsCount,
-        summaryAvgLatencyMs: row.summaryAvgLatencyMs,
-        summarySuccessRate: row.summarySuccessRate,
-        summaryAvgTps: row.summaryAvgTps,
-        fetchedAt: row.fetchedAt,
-      }))
+      .map((row) => {
+        const wallet = siteWalletStats.get(row.siteId);
+        const checkedInCount = checkedInAccountIdsBySiteId.get(row.siteId)?.size ?? 0;
+        return {
+          siteId: row.siteId,
+          siteName: siteNameById.get(row.siteId)?.name || `#${row.siteId}`,
+          url: siteNameById.get(row.siteId)?.url || '',
+          platform: siteNameById.get(row.siteId)?.platform || '',
+          status: row.status,
+          message: row.message,
+          modelsCount: row.modelsCount,
+          summaryAvgLatencyMs: row.summaryAvgLatencyMs,
+          summarySuccessRate: row.summarySuccessRate,
+          summaryAvgTps: row.summaryAvgTps,
+          fetchedAt: row.fetchedAt,
+          // 余额做一次小数量级收敛，避免浮点累加出 12.340000000000002。
+          totalBalance: Math.round((wallet?.totalBalance ?? 0) * 1_000_000) / 1_000_000,
+          accountCount: wallet?.accountCount ?? 0,
+          checkinEnabledCount: wallet?.checkinEnabledCount ?? 0,
+          todayCheckedIn: checkedInCount > 0,
+          todayCheckedInCount: checkedInCount,
+        };
+      })
       .sort((left, right) => left.siteName.localeCompare(right.siteName)),
     models,
   };

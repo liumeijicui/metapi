@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 import { config } from '../config.js';
 
 const getAdapterMock = vi.fn();
@@ -1020,6 +1021,70 @@ describe('modelMonitorService', () => {
 
       const bySite = await service.loadModelMonitorOverview({ sort: 'site' });
       expect(bySite.models[0].siteName).toBe('Alpha');
+    });
+
+    it('站点行带余额与今日签到状态，多账号按站点汇总', async () => {
+      const alpha = await db.select().from(schema.sites)
+        .where(eq(schema.sites.name, 'Alpha')).get();
+      const beta = await db.select().from(schema.sites)
+        .where(eq(schema.sites.name, 'Beta')).get();
+
+      const alphaMain = await db.insert(schema.accounts).values({
+        siteId: alpha!.id,
+        username: 'alpha-main',
+        accessToken: 'alpha-main-token',
+        balance: 1.5,
+        checkinEnabled: true,
+      }).returning().get();
+      // 第二个账号关掉了签到：它不计入 checkinEnabledCount。
+      await db.insert(schema.accounts).values({
+        siteId: alpha!.id,
+        username: 'alpha-second',
+        accessToken: 'alpha-second-token',
+        balance: 2.25,
+        checkinEnabled: false,
+      }).run();
+      const betaAccount = await db.insert(schema.accounts).values({
+        siteId: beta!.id,
+        username: 'beta-main',
+        accessToken: 'beta-main-token',
+        balance: 10,
+        checkinEnabled: true,
+      }).returning().get();
+
+      // Alpha 今天只有一个账号签到成功；Beta 没有任何签到记录。
+      await db.insert(schema.checkinLogs).values({
+        accountId: alphaMain.id,
+        status: 'success',
+        message: 'ok',
+      }).run();
+      // 昨天的成功记录不能算进「今日已签到」。
+      const yesterday = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      await db.insert(schema.checkinLogs).values({
+        accountId: betaAccount.id,
+        status: 'success',
+        message: 'ok',
+        createdAt: yesterday.toISOString().replace('T', ' ').slice(0, 19),
+      }).run();
+
+      const overview = await service.loadModelMonitorOverview();
+      const alphaRow = overview.sites.find((row) => row.siteName === 'Alpha');
+      const betaRow = overview.sites.find((row) => row.siteName === 'Beta');
+
+      expect(alphaRow).toMatchObject({
+        totalBalance: 3.75,
+        accountCount: 2,
+        checkinEnabledCount: 1,
+        todayCheckedIn: true,
+        todayCheckedInCount: 1,
+      });
+      expect(betaRow).toMatchObject({
+        totalBalance: 10,
+        accountCount: 1,
+        checkinEnabledCount: 1,
+        todayCheckedIn: false,
+        todayCheckedInCount: 0,
+      });
     });
   });
 
