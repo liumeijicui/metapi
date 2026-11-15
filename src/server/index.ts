@@ -29,6 +29,15 @@ import {
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { securityRoutes } from './routes/api/security.js';
+import { instaboxRoutes } from './routes/api/instabox.js';
+import {
+  startInstaboxKeepaliveScheduler,
+  stopInstaboxKeepaliveScheduler,
+} from './services/instaboxKeepaliveService.js';
+import {
+  startInstaboxSshScheduler,
+  stopInstaboxSshScheduler,
+} from './services/instaboxSshService.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { promptLibraryRoutes } from './routes/api/promptLibrary.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
@@ -298,6 +307,7 @@ await app.register(assistedLoginRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
 await app.register(securityRoutes);
+await app.register(instaboxRoutes);
 
 // Register OpenAI-compatible proxy routes
 await app.register(proxyRoutes);
@@ -352,6 +362,8 @@ try {
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startModelMonitorScheduler();
+startInstaboxKeepaliveScheduler();
+startInstaboxSshScheduler();
 startXApiKeyScheduler();
 startChannelRecoveryProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
@@ -373,6 +385,8 @@ app.addHook('onClose', async () => {
   stopProxyLogRetentionService();
   stopModelAvailabilityProbeScheduler();
   stopModelMonitorScheduler();
+  stopInstaboxKeepaliveScheduler();
+  stopInstaboxSshScheduler();
   stopXApiKeyScheduler();
   stopChannelRecoveryProbeScheduler();
   await stopUsageAggregationProjectorScheduler();

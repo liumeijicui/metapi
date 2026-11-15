@@ -45,6 +45,7 @@ const DownstreamKeys = lazy(() => import('./pages/DownstreamKeys.js'));
 const ImportExport = lazy(() => import('./pages/ImportExport.js'));
 const NotificationSettings = lazy(() => import('./pages/NotificationSettings.js'));
 const Security = lazy(() => import('./pages/Security.js'));
+const InstaBox = lazy(() => import('./pages/InstaBox.js'));
 const ProgramLogs = lazy(() => import('./pages/ProgramLogs.js'));
 const Models = lazy(() => import('./pages/Models.js'));
 const About = lazy(() => import('./pages/About.js'));
@@ -625,6 +626,7 @@ export const sidebarGroups = [
       { to: '/accounts', label: '连接管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg> },
       { to: '/oauth', label: 'OAuth 管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a3 3 0 106 0 3 3 0 00-6 0zM3 17a3 3 0 106 0 3 3 0 00-6 0zM15 17a3 3 0 106 0 3 3 0 00-6 0zM6 14V10m0 0a3 3 0 113-3m-3 3a3 3 0 003 3h6" /></svg> },
       { to: '/downstream-keys', label: '下游密钥', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a4 4 0 11-8 0 4 4 0 018 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 21a6 6 0 0110.8-3.6M15.5 18.5l2-2m0 0l2 2m-2-2V21" /></svg> },
+      { to: '/instabox', label: 'InstaBox', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7.5L12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7.5l8 4.5 8-4.5M12 12v9" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 5.25l8 4.5" /></svg> },
       { to: '/checkin', label: '签到记录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> },
       { to: '/model-forwarding', label: '模型转发', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7h9a3 3 0 013 3v0a3 3 0 003 3h1" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 17h4a4 4 0 004-4v0a4 4 0 014-4h4" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M17 6l3 2-3 2M17 14l3 2-3 2" /></svg> },
       { to: '/logs', label: '使用日志', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg> },
@@ -1210,6 +1212,7 @@ function AppShell() {
                 <Route path="/downstream-keys" element={<DownstreamKeys />} />
                 <Route path="/events" element={<ProgramLogs />} />
                 <Route path="/security" element={<Security />} />
+                <Route path="/instabox" element={<InstaBox />} />
                 <Route path="/settings/import-export" element={<ImportExport />} />
                 <Route path="/settings/notify" element={<NotificationSettings />} />
                 <Route path="/models" element={<Models />} />

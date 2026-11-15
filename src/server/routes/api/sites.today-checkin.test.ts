@@ -121,4 +121,44 @@ describe('sites route today check-in progress', () => {
     expect(row?.todayCheckedIn).toBe(false);
     expect(row?.todayCheckedInCount).toBe(0);
   });
+
+  it('reports the latest failure and its message for a site that has not succeeded', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'broken-site',
+      url: 'https://broken.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'broken-user',
+      accessToken: 'token-broken',
+      balance: 0,
+      status: 'expired',
+      checkinEnabled: true,
+    }).returning().get();
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const storedNow = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+    await db.insert(schema.checkinLogs).values({
+      accountId: account.id,
+      status: 'failed',
+      message: '皮皮智绘登录凭证已失效（HTTP 401），请重新完成 Linux.do 授权',
+      createdAt: storedNow,
+    }).run();
+
+    const response = await app.inject({ method: 'GET', url: '/api/sites' });
+    const body = response.json() as Array<{
+      id: number;
+      todayCheckedIn: boolean;
+      todayCheckinStatus: string | null;
+      todayCheckinMessage: string | null;
+      todayCheckinAccount: string | null;
+    }>;
+    const row = body.find((item) => item.id === site.id);
+    expect(row?.todayCheckedIn).toBe(false);
+    expect(row?.todayCheckinStatus).toBe('failed');
+    expect(row?.todayCheckinMessage).toContain('HTTP 401');
+    expect(row?.todayCheckinAccount).toBe('broken-user');
+  });
 });

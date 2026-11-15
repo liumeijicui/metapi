@@ -485,6 +485,42 @@ export async function sitesRoutes(app: FastifyInstance) {
       checkedInAccountsBySiteId.set(row.siteId, bucket);
     }
 
+    // A site that has not succeeded today may still have an explicit failure.
+    // The list has to show that error (and its message) instead of a plain
+    // "未签到", otherwise a broken session looks like a forgotten check-in.
+    const todayAllRows = await db
+      .select({
+        accountId: schema.checkinLogs.accountId,
+        siteId: schema.accounts.siteId,
+        username: schema.accounts.username,
+        status: schema.checkinLogs.status,
+        message: schema.checkinLogs.message,
+        createdAt: schema.checkinLogs.createdAt,
+      })
+      .from(schema.checkinLogs)
+      .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
+      .where(and(
+        gte(schema.checkinLogs.createdAt, startUtc),
+        lt(schema.checkinLogs.createdAt, endUtc),
+      ))
+      .all();
+    const latestCheckinBySiteId = new Map<number, {
+      status: string;
+      message: string | null;
+      createdAt: string | null;
+      username: string | null;
+    }>();
+    for (const row of todayAllRows) {
+      const previous = latestCheckinBySiteId.get(row.siteId);
+      if (previous && String(previous.createdAt || '') >= String(row.createdAt || '')) continue;
+      latestCheckinBySiteId.set(row.siteId, {
+        status: row.status,
+        message: row.message,
+        createdAt: row.createdAt,
+        username: row.username,
+      });
+    }
+
     const totalBalanceBySiteId: Record<number, number> = {};
     const subscriptionBySiteId: Record<number, SiteSubscriptionAggregate | undefined> = {};
     const accountCountBySiteId: Record<number, number> = {};
@@ -505,6 +541,8 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     return siteRowsWithApiEndpoints.map((site) => {
       const checkedInAccounts = checkedInAccountsBySiteId.get(site.id);
+      const latestCheckin = latestCheckinBySiteId.get(site.id) || null;
+      const todayFailed = (checkedInAccounts?.size ?? 0) === 0 && latestCheckin?.status === 'failed';
       return {
         ...site,
         totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
@@ -513,6 +551,10 @@ export async function sitesRoutes(app: FastifyInstance) {
         checkinEnabledCount: checkinEnabledCountBySiteId[site.id] || 0,
         todayCheckedIn: (checkedInAccounts?.size ?? 0) > 0,
         todayCheckedInCount: checkedInAccounts?.size ?? 0,
+        todayCheckinStatus: todayFailed ? 'failed' : latestCheckin?.status ?? null,
+        todayCheckinMessage: todayFailed ? (latestCheckin?.message || '签到失败') : null,
+        todayCheckinAt: latestCheckin?.createdAt ?? null,
+        todayCheckinAccount: latestCheckin?.username ?? null,
         lastBalanceRefresh: latestBalanceRefreshBySiteId[site.id] || null,
       };
     });

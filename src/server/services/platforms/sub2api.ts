@@ -872,6 +872,10 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       { label: 'check-in', statusPath: '/api/v1/check-in/status', claimPath: '/api/v1/check-in', claimBody: { turnstile_token: '' } },
       { label: 'checkin', statusPath: '/api/v1/checkin/status', claimPath: '/api/v1/checkin' },
       { label: 'user', statusPath: '/api/v1/user/check-in', claimPath: '/api/v1/user/check-in' },
+      // apikey.casa（福利站）把签到挂在兑换页下面：状态和领取都是
+      // `/api/v1/redeem/checkin`，回传 `{reward, checked_in, date}`，
+      // GET 取状态、POST 领取，奖励直接计入余额。
+      { label: 'redeem', statusPath: '/api/v1/redeem/checkin', claimPath: '/api/v1/redeem/checkin' },
       // ChatflowsAI (ai.chatflowsai.com) serves its check-in from the public
       // site root rather than under `/api/v1`, and takes its day boundary from
       // the deployment's own `reset_hour` (12:00 there) instead of midnight.
@@ -922,6 +926,11 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
     if (status?.checked_in_today === true || status?.checked_in === true) {
       return { success: false, message: '今日已签到' };
+    }
+    // `redeem` 方言用奖励金额表示当天是否开放：金额为 0 说明站点没配置奖励，
+    // 站点页面上的签到按钮同样是禁用的。
+    if (dialect.label === 'redeem' && typeof status?.reward === 'number' && status.reward <= 0) {
+      return { success: false, message: '站点今日没有配置签到奖励' };
     }
     if (status?.turnstile_required === true) {
       return { success: false, message: '站点开启了 Turnstile 校验，需要人工签到' };

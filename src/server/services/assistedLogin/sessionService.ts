@@ -1,7 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { createManagedBrowser } from './browserManager.js';
-import { passCloudflareChallenge } from './cloudflareChallenge.js';
+import {
+  isCloudflareChallengePage,
+  passCloudflareChallenge,
+  passCloudflareChallengeWithRetry,
+} from './cloudflareChallenge.js';
 import { buildEntryLocator } from './entryMatch.js';
 import { captureHyperGithubCredentials, supportsHyperGithubLogin } from './sites/hyper.js';
 import { pipiImageHintsFor } from './sites/pipiImageSite.js';
@@ -27,6 +31,13 @@ const ENTRY_CLICK_ATTEMPTS = 3;
 /** How long to wait for a gated entry to mount before ticking the agreement box. */
 const AGREEMENT_WAIT_TIMEOUT_MS = 20_000;
 const TOKEN_WAIT_TIMEOUT_MS = 40_000;
+/**
+ * 皮皮智绘这类站点会先把「登录」按钮跳到自己的 Cloudflare 验证页。验证通过后
+ * 页面回到首页，但登录弹窗已经被关掉，真正需要点的 Linux.do 入口从未出现过。
+ * 这种情况下不必等满一轮 token 超时，给站点几秒钟写回凭证，没写回就立刻重新
+ * 打开登录弹窗再点一次。
+ */
+const SITE_CHALLENGE_RETRY_GRACE_MS = 8_000;
 
 const ACCESS_TOKEN_KEYS = ['auth_token', 'access_token', 'token', 'jwt', 'jwt_token'];
 
@@ -491,6 +502,7 @@ export function createAssistedLoginSession(input: {
     const triggers = [
       page.getByRole('button', { name: /^(登录|登入|登陆|Login|Sign in|Sign-in|登 录)$/i }),
       page.getByRole('link', { name: /^(登录|登入|登陆|Login|Sign in|Sign-in)$/i }),
+      page.locator('[data-act="login"]'),
       page.locator('button:has-text("登录")'),
       page.locator('a:has-text("登录")'),
       page.locator('button:has-text("Login")'),
@@ -501,7 +513,18 @@ export function createAssistedLoginSession(input: {
     for (const locator of triggers) {
       if (await clickWhenVisible(locator, 3_000)) {
         await settle(page, 2_500);
-        await passLoginSecurityVerification(page);
+        const passedSecurityGate = await passLoginSecurityVerification(page);
+        if (passedSecurityGate) {
+          // 验证页通过后站点会回到首页，原来的登录弹窗已经消失。再点一次
+          // 「登录」，才能看到真正的 Linux.do 入口。
+          await settle(page, 1_200);
+          for (const retrigger of triggers) {
+            if (await clickWhenVisible(retrigger, 3_000)) {
+              await settle(page, 2_500);
+              break;
+            }
+          }
+        }
         return true;
       }
     }
@@ -519,14 +542,15 @@ export function createAssistedLoginSession(input: {
    * real pointer click (the same helper the consent page uses) and the page then
    * redirects to the form on its own.
    */
-  async function passLoginSecurityVerification(page: import('playwright-core').Page): Promise<void> {
-    if (!/\/security\/verify/i.test(page.url())) return;
+  async function passLoginSecurityVerification(page: import('playwright-core').Page): Promise<boolean> {
+    if (!/\/security\/verify/i.test(page.url())) return false;
     await passCloudflareChallenge(page);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline && /\/security\/verify/i.test(page.url())) {
       await page.waitForTimeout(1_000).catch(() => undefined);
     }
     await settle(page, 1_500);
+    return true;
   }
 
   /** Entry locator; the shape matching and the content-link filter live in `entryMatch`. */
@@ -779,17 +803,58 @@ export function createAssistedLoginSession(input: {
     context: import('playwright-core').BrowserContext,
     pagesBefore: Set<import('playwright-core').Page>,
     initialPage: import('playwright-core').Page,
+    siteUrl: string,
   ) {
     const deadline = Date.now() + NAVIGATION_TIMEOUT_MS;
     let handoffFallback: import('playwright-core').Page | null = null;
+    const clearedChallenges = new Set<import('playwright-core').Page>();
+    let siteChallengeCleared = false;
+    const siteHost = safeHost(siteUrl);
 
     while (Date.now() < deadline) {
       const live = context.pages().filter((candidate) => !candidate.isClosed());
 
+      // Some sites now put their own Cloudflare gate in front of the OAuth
+      // entry (皮皮智绘 added `/api/v1/security/verify` in Oct 2026). That page
+      // is on the site's own host, so the handoff-host check below never sees
+      // it; answering it here is what lets the click continue to Linux.do.
+      for (const candidate of live) {
+        if (clearedChallenges.has(candidate)) continue;
+        if (!(await isCloudflareChallengePage(candidate))) continue;
+        clearedChallenges.add(candidate);
+        const candidateHost = safeHost(candidate.url());
+        if (siteHost && (candidateHost === siteHost || candidateHost.endsWith(`.${siteHost}`))) {
+          siteChallengeCleared = true;
+        }
+        await passCloudflareChallengeWithRetry(candidate, { attempts: 2 }).catch(() => false);
+      }
+
+      // 站点自己的验证页通过后会回到首页，登录弹窗已经消失；此时继续等
+      // 「授权页出现」只会白等到整个导航超时。给页面 1.5 秒完成跳转，仍然
+      // 在站点首页就立刻交回调用方，让它重新点一次登录入口。
+      if (siteChallengeCleared) {
+        await initialPage.waitForTimeout(1_500).catch(() => undefined);
+        const pagesNow = context.pages().filter((candidate) => !candidate.isClosed());
+        for (const candidate of pagesNow) {
+          if (provider.isAuthorizationUrl(candidate.url())) {
+            return { page: candidate, siteChallengeCleared };
+          }
+        }
+        const hasNewPage = pagesNow.some((candidate) => !pagesBefore.has(candidate));
+        const backOnSite = pagesNow.find(
+          (candidate) => safeHost(candidate.url()) === siteHost,
+        );
+        if (!hasNewPage && backOnSite && !(await isCloudflareChallengePage(backOnSite))) {
+          return { page: backOnSite, siteChallengeCleared };
+        }
+      }
+
       // Priority 1: the provider's actual OAuth authorize page. This is the only
       // page we can meaningfully act on.
       for (const candidate of live) {
-        if (provider.isAuthorizationUrl(candidate.url())) return candidate;
+        if (provider.isAuthorizationUrl(candidate.url())) {
+          return { page: candidate, siteChallengeCleared };
+        }
       }
 
       // Priority 2: a *newly opened* page on a handoff host, kept as a weaker
@@ -806,7 +871,7 @@ export function createAssistedLoginSession(input: {
       await initialPage.waitForTimeout(600);
     }
 
-    return handoffFallback || initialPage;
+    return { page: handoffFallback || initialPage, siteChallengeCleared };
   }
 
   /**
@@ -819,9 +884,15 @@ export function createAssistedLoginSession(input: {
     pagesBefore: Set<import('playwright-core').Page>,
     initialPage: import('playwright-core').Page,
     storageHints?: StorageCredentialHints | null,
+    siteUrl?: string,
   ): Promise<CaptureResult> {
-    const loginPage = await findHandoffPage(context, pagesBefore, initialPage);
+    const handoff = await findHandoffPage(context, pagesBefore, initialPage, siteUrl || '');
+    const loginPage = handoff.page;
     await settle(loginPage);
+
+    // The interstitial can also be the first page after the click; wait it out
+    // before judging the URL. A non-challenge page returns immediately.
+    await passCloudflareChallengeWithRetry(loginPage, { attempts: 3 }).catch(() => false);
 
     // The consent URL is sometimes answered with a Cloudflare interstitial
     // rather than the authorize form. That page holds none of the controls this
@@ -850,10 +921,25 @@ export function createAssistedLoginSession(input: {
       await clickConsentButton(loginPage);
     }
 
-    const tokenDeadline = Date.now() + TOKEN_WAIT_TIMEOUT_MS;
+    const returnedToSite = (() => {
+      const siteHost = safeHost(siteUrl || '');
+      if (!siteHost) return false;
+      const currentHost = safeHost(loginPage.url());
+      return currentHost === siteHost
+        && !provider.isHandoffHost(currentHost);
+    })();
+    const tokenWaitMs = handoff.siteChallengeCleared && returnedToSite
+      ? Math.min(SITE_CHALLENGE_RETRY_GRACE_MS, TOKEN_WAIT_TIMEOUT_MS)
+      : TOKEN_WAIT_TIMEOUT_MS;
+    const tokenDeadline = Date.now() + tokenWaitMs;
+    const clearedDuringCapture = new Set<import('playwright-core').Page>();
     while (Date.now() < tokenDeadline) {
       for (const candidate of context.pages()) {
         if (candidate.isClosed()) continue;
+        if (!clearedDuringCapture.has(candidate) && await isCloudflareChallengePage(candidate)) {
+          clearedDuringCapture.add(candidate);
+          await passCloudflareChallengeWithRetry(candidate, { attempts: 2 }).catch(() => false);
+        }
         const harvested = await harvestFromPage(candidate, storageHints);
         if (harvested && !looksSignedOut(candidate.url())) {
           return { status: 'captured', credentials: harvested, url: candidate.url() };
@@ -1012,6 +1098,20 @@ export function createAssistedLoginSession(input: {
       await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
       await settle(page);
 
+      if (input.forceLogin) {
+        // 上一次失败很可能就是因为 localStorage 里还留着已经失效的令牌；
+        // 强制重登前清掉站点自己的存储，避免采集器把旧令牌当成刚拿到的新凭证。
+        await page.evaluate(() => {
+          try {
+            window.localStorage.clear();
+            window.sessionStorage.clear();
+          } catch {
+            // Storage can be disabled on a hardened page; the login click below
+            // still decides whether a fresh handshake can start.
+          }
+        }).catch(() => undefined);
+      }
+
       // A harvested cookie is not proof of a live session: a rolling credential is
       // retired server-side the moment it is exchanged, so the jar can hold a value
       // that is already dead. When the caller knows the previous credential failed,
@@ -1043,7 +1143,7 @@ export function createAssistedLoginSession(input: {
             retryClicked = await dismissTermsGate(page, () => clickEntry(page, 1));
           }
           if (retryClicked) {
-            return await finishCapture(context, pagesBefore, page, storageHints);
+            return await finishCapture(context, pagesBefore, page, storageHints, site.url);
           }
         }
         return {
@@ -1054,7 +1154,35 @@ export function createAssistedLoginSession(input: {
         };
       }
 
-      return await finishCapture(context, pagesBefore, page, storageHints);
+      let captured = await finishCapture(context, pagesBefore, page, storageHints, site.url);
+      if (captured.status === 'captured') return captured;
+
+      // 有的站点（皮皮智绘 2026-10 起）把登录入口放在自己的 Cloudflare 验证页
+      // 后面：第一次点击只会跳到 `/api/v1/security/verify`，通过后回到首页，
+      // 登录弹窗已经关掉，真正的 OAuth 入口并没有被点过。验证页清掉后再点一次
+      // 入口，才能继续到 Linux.do。只在回到站点本页、且没有落到授权页时重试，
+      // 避免把「需要用户重新登录 Linux.do」误判成可重试。
+      const returnedToSite = (() => {
+        try {
+          const current = new URL(page.url());
+          const expected = new URL(site.url);
+          return current.hostname === expected.hostname
+            && !provider.isHandoffHost(current.host);
+        } catch {
+          return false;
+        }
+      })();
+      if (returnedToSite && !(await isCloudflareChallengePage(page))) {
+        const afterGate = new Set(context.pages());
+        let clickedAgain = await clickEntry(page);
+        if (!clickedAgain) {
+          clickedAgain = await dismissTermsGate(page, () => clickEntry(page));
+        }
+        if (clickedAgain) {
+          captured = await finishCapture(context, afterGate, page, storageHints, site.url);
+        }
+      }
+      return captured;
       } finally {
         await parkSiteTab(page);
       }

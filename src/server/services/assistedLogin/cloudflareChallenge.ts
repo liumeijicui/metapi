@@ -28,13 +28,22 @@ export const DEFAULT_CHALLENGE_TIMEOUT_MS = 45_000;
 /** Titles every Cloudflare interstitial uses, in the languages sites see. */
 const CHALLENGE_TITLE = /just a moment|attention required|checking your browser|正在验证|请稍候/i;
 const TURNSTILE_HOST = 'challenges.cloudflare.com';
-/** Widgets draw the checkbox near their left edge, vertically centred. */
-const CHECKBOX_OFFSET_X = 25;
+/**
+ * Widgets draw the checkbox near their left edge, vertically centred.
+ * Confirmed against 皮皮智绘's Turnstile (300x65 frame): the box sits at
+ * x≈19, y≈34. The previous 25px offset landed on the label text instead.
+ */
+const CHECKBOX_OFFSET_X = 19;
 
 export type ChallengeBox = { x: number; y: number; width: number; height: number };
 
 function isChallengeTitle(title: string): boolean {
   return CHALLENGE_TITLE.test(title || '');
+}
+
+/** True when this page is still sitting on a Cloudflare interstitial. */
+export async function isCloudflareChallengePage(page: Page): Promise<boolean> {
+  return isChallengeTitle(await page.title().catch(() => ''));
 }
 
 /**
@@ -62,6 +71,24 @@ export async function passCloudflareChallenge(
   }
 
   return !isChallengeTitle(await page.title().catch(() => ''));
+}
+
+/**
+ * Cloudflare's managed challenge sometimes takes longer than one budget, and a
+ * challenge that reappears after the first wait is still the same gate rather
+ * than a new failure. Retry a few rounds before letting the caller treat the
+ * page as unusable.
+ */
+export async function passCloudflareChallengeWithRetry(
+  page: Page,
+  options: { attempts?: number; timeoutMs?: number } = {},
+): Promise<boolean> {
+  const attempts = Math.max(1, Math.trunc(options.attempts ?? 3));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!(await isCloudflareChallengePage(page))) return true;
+    if (await passCloudflareChallenge(page, { timeoutMs: options.timeoutMs })) return true;
+  }
+  return !(await isCloudflareChallengePage(page));
 }
 
 /** Clicks the widget once, through Playwright when it can and xdotool when not. */
@@ -113,10 +140,11 @@ export async function clickWithRealPointer(page: Page, box: ChallengeBox): Promi
   const geometry = await page.evaluate(() => ({
     screenX: window.screenX,
     screenY: window.screenY,
-    chromeWidth: Math.max(0, window.outerWidth - window.innerWidth),
     chromeHeight: Math.max(0, window.outerHeight - window.innerHeight),
   }));
-  const x = Math.round(geometry.screenX + geometry.chromeWidth / 2 + box.x + CHECKBOX_OFFSET_X);
+  // 不要把横向的浏览器边框再加回来：box.x 已经是视口坐标，多算的几像素
+  // 会把点击从复选框推到右侧文字上，验证就永远过不去。
+  const x = Math.round(geometry.screenX + box.x + CHECKBOX_OFFSET_X);
   const y = Math.round(geometry.screenY + geometry.chromeHeight + box.y + box.height / 2);
   await promisify(execFile)('xdotool', ['mousemove', String(x), String(y)]).catch(() => undefined);
   await page.waitForTimeout(400).catch(() => undefined);

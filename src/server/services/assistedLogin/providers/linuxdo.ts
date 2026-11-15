@@ -165,7 +165,14 @@ export const linuxDoProvider: AssistedLoginProvider = {
     return { loggedIn: true, username, userId, blocked: false };
   },
   entryNamePattern: /linux\s*\.?\s*do|linuxdo/i,
-  entrySelectors: ['[href*="linuxdo"]', '[href*="linux.do"]', 'button:has-text("LinuxDO")', 'button:has-text("LINUX DO")', 'button:has-text("linuxdo")'],
+  entrySelectors: [
+    '[href*="linuxdo"]',
+    '[href*="linux.do"]',
+    '[data-act="linuxdo"]',
+    'button:has-text("LinuxDO")',
+    'button:has-text("LINUX DO")',
+    'button:has-text("linuxdo")',
+  ],
   /**
    * Landing pages commonly carry links back to the community itself (`/t/topic`,
    * `/u/<name>`, `/c/<slug>`, `/tag/<slug>`, `/g/<group>`), printed with the URL

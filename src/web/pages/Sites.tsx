@@ -104,6 +104,10 @@ type SiteRow = {
   checkinEnabledCount?: number;
   todayCheckedIn?: boolean;
   todayCheckedInCount?: number;
+  todayCheckinStatus?: string | null;
+  todayCheckinMessage?: string | null;
+  todayCheckinAt?: string | null;
+  todayCheckinAccount?: string | null;
   lastBalanceRefresh?: string | null;
   createdAt?: string;
   postRefreshProbeEnabled?: boolean;
@@ -319,6 +323,8 @@ function SiteCheckinDisplay(props: { site: SiteRow }) {
   const done = site.todayCheckedInCount ?? 0;
   const succeeded = site.todayCheckedIn === true;
   const hasAccounts = (site.accountCount ?? 0) > 0;
+  const failed = !succeeded && site.todayCheckinStatus === 'failed';
+  const failureMessage = String(site.todayCheckinMessage || '').trim();
 
   if (!hasAccounts) {
     return (
@@ -332,6 +338,46 @@ function SiteCheckinDisplay(props: { site: SiteRow }) {
       <span className="badge badge-muted" style={{ fontSize: 11 }}>
         未开启
       </span>
+    );
+  }
+
+  if (failed) {
+    const detail = [
+      site.todayCheckinAccount ? `账号：${site.todayCheckinAccount}` : '',
+      site.todayCheckinAt ? `时间：${formatDateTimeLocal(site.todayCheckinAt)}` : '',
+      failureMessage || '签到失败',
+    ].filter(Boolean).join(' · ');
+    return (
+      <div className="site-checkin-inline">
+        <span
+          className="badge badge-error"
+          style={{ fontSize: 11 }}
+          data-tooltip={detail}
+          data-tooltip-side="top"
+        >
+          签到失败
+        </span>
+        <span
+          title={detail}
+          style={{
+            maxWidth: 220,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            fontSize: 11,
+            color: 'var(--color-danger, #b91c1c)',
+          }}
+        >
+          {failureMessage || '未返回原因'}
+        </span>
+        <span
+          className="site-checkin-progress"
+          data-tooltip={`今日已签到 ${done}/${total} 个账号`}
+          data-tooltip-side="top"
+        >
+          {done}/{total}
+        </span>
+      </div>
     );
   }
 

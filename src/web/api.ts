@@ -60,6 +60,13 @@ async function extractResponseErrorMessage(res: Response): Promise<string> {
       }
     }
   } catch {}
+  // Fastify answers an unknown route with `{ error: "Not found" }`. That almost
+  // always means the static frontend has been rebuilt while the Node process is
+  // still running the previous build, so say what to do instead of echoing a
+  // bare "Not found" that looks like a bad URL.
+  if (res.status === 404 && /^not found$/i.test(message.trim())) {
+    return "接口不存在：服务端可能尚未重启加载新版本，请重启 metapi 后重试";
+  }
   return message;
 }
 
@@ -2033,6 +2040,123 @@ export const api = {
       body: JSON.stringify({}),
       timeoutMs: 180_000,
     }),
+
+  // InstaBox cloud sandboxes. The API key is stored encrypted on the server
+  // and never returned by these endpoints.
+  getInstaboxConfig: () => request("/api/instabox/config", { timeoutMs: 15_000 }),
+  saveInstaboxConfig: (apiKey: string) =>
+    request("/api/instabox/config", {
+      method: "PUT",
+      body: JSON.stringify({ apiKey }),
+      timeoutMs: 45_000,
+    }),
+  clearInstaboxConfig: () =>
+    request("/api/instabox/config", { method: "DELETE", timeoutMs: 15_000 }),
+  testInstaboxConfig: () =>
+    request("/api/instabox/config/test", {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 45_000,
+    }),
+  getInstaboxOverview: () =>
+    request("/api/instabox/overview", { timeoutMs: 45_000 }),
+  getInstaboxKeepalive: () =>
+    request("/api/instabox/keepalive", { timeoutMs: 15_000 }),
+  setInstaboxKeepalive: (enabled: boolean) =>
+    request("/api/instabox/keepalive", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+      timeoutMs: 15_000,
+    }),
+  createInstaboxMachine: (data: {
+    name?: string;
+    templateId?: string;
+    templateVersion?: string;
+    desiredState?: "running" | "stopped";
+  }) =>
+    request("/api/instabox/machines", {
+      method: "POST",
+      body: JSON.stringify(data),
+      timeoutMs: 60_000,
+    }),
+  getInstaboxMachine: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}`, { timeoutMs: 30_000 }),
+  getInstaboxSsh: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/ssh`, {
+      timeoutMs: 45_000,
+    }),
+  refreshInstaboxSsh: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/ssh/refresh`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 45_000,
+    }),
+  createInstaboxUploadCommand: (id: string, path: string, localPath: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/files/upload-command`, {
+      method: "POST",
+      body: JSON.stringify({ path, localPath }),
+      timeoutMs: 30_000,
+    }),
+  uploadInstaboxFile: async (
+    id: string,
+    path: string,
+    file: File,
+    overwrite = false,
+  ) => {
+    const params = new URLSearchParams({ path });
+    if (overwrite) params.set("overwrite", "true");
+    const response = await fetchAuthenticatedResponse(
+      `/api/instabox/machines/${encodeURIComponent(id)}/files?${params.toString()}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+        timeoutMs: 30 * 60_000,
+      },
+    );
+    if (!response.ok) {
+      throw new Error(await extractResponseErrorMessage(response));
+    }
+    return response.json();
+  },
+  instaboxMachineAction: (
+    id: string,
+    action: "start" | "stop" | "suspend" | "resume",
+  ) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 45_000,
+    }),
+  deleteInstaboxMachine: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      timeoutMs: 45_000,
+    }),
+  restartInstaboxMachine: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/restart`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 180_000,
+    }),
+  getInstaboxPorts: (id: string) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/ports`, {
+      timeoutMs: 30_000,
+    }),
+  publishInstaboxPort: (
+    id: string,
+    data: { port: number; name?: string; access?: "public" | "private"; protocol?: "http" | "tcp" },
+  ) =>
+    request(`/api/instabox/machines/${encodeURIComponent(id)}/ports`, {
+      method: "POST",
+      body: JSON.stringify(data),
+      timeoutMs: 30_000,
+    }),
+  unpublishInstaboxPort: (id: string, port: number) =>
+    request(
+      `/api/instabox/machines/${encodeURIComponent(id)}/ports/${encodeURIComponent(String(port))}`,
+      { method: "DELETE", timeoutMs: 30_000 },
+    ),
 
   // Models marketplace
   getModelsMarketplace: (options?: {
